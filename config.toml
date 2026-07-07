@@ -1,0 +1,18 @@
+[groq]
+model = "whisper-large-v3-turbo"   # or "distil-whisper-large-v3-en" (English-only, faster)
+language = "en"                     # ISO-639-1; improves accuracy AND latency
+temperature = 0.0
+
+[vad]
+speech_threshold = 0.5              # Silero prob above this = speech
+endpoint_silence_ms = 1500          # trailing silence before auto-stop
+min_speech_ms = 300                 # must hear this much speech before endpointing arms
+preroll_ms = 300                    # keep audio before speech onset (anti first-word-clip)
+max_utterance_ms = 60000            # hard safety cap
+
+[daemon]
+notifications = true                # desktop notifications on state changes
+
+[inject]
+method = "portal"                   # portal | clipboard
+type_delay_ms = 2                   # pacing between synthesized keystrokes
