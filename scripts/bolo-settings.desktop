@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Bolo
+GenericName=Dictation Settings
+Comment=Speak anywhere — settings, scratchpad and history
+Exec=bolo settings
+Icon=bolo
+Terminal=false
+Categories=Utility;AudioVideo;
+Keywords=dictation;speech;voice;whisper;transcribe;

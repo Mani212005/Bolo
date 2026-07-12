@@ -120,6 +120,15 @@ else
     warn "systemd user session unavailable — start the daemon manually: bolo daemon &"
 fi
 
+# ---------------------------------------------------------------- app entry
+mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
+cp "$REPO/assets/bolo.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/bolo.svg"
+sed "s|^Exec=.*|Exec=$BIN_DIR/bolo settings|" "$REPO/scripts/bolo-settings.desktop" \
+    > "$HOME/.local/share/applications/bolo-settings.desktop"
+command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+say "\"Bolo\" added to your app grid (also: bolo settings)"
+
 # ---------------------------------------------------------------- local model
 provider="$(grep -E '^provider *= *"' "$CONF_DIR/config.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 if [ "$provider" = "whisper" ]; then   # faster-whisper self-downloads via its sidecar
@@ -134,7 +143,7 @@ cat <<'EOF'
     Ctrl+Space  start dictating / finish (text pastes at your cursor)
     Alt+P       pause / resume (copy text while paused to splice it in)
     Alt+I       insert clipboard while paused · re-type last transcript when idle
-    bolo settings   full settings UI in the terminal (engine, models, vocabulary…)
+    Settings    open "Bolo" from your app grid, or run: bolo settings
 
   First dictation shows a one-time GNOME permission dialog (portal) — accept it.
 EOF

@@ -31,15 +31,14 @@ portable, but text injection and hotkeys still need a macOS backend.
 The first dictation after the daemon starts shows a one-time GNOME
 permission dialog — accept it so Bolo may type for you.
 
-## Settings
+## Settings app
 
-```sh
-bolo settings
-```
-
-A full-screen terminal UI (with Bo the cat 🐱): choose the speech engine and
-model, toggle behavior, edit your vocabulary and enhance prompt, and run a
-3-second mic test. Or edit the files directly:
+Open **Bolo** from your app grid (or run `bolo settings`). A glassmorphism
+settings app served locally by the daemon: choose the speech engine and model,
+pick your own hotkeys, toggle behavior, edit vocabulary and the enhance
+prompt, run a 3-second mic test, and use the **scratchpad** — every dictation
+lands in a history feed with per-entry Copy / Enhance / append-to-pad.
+Prefer files? Everything is also plain text:
 
 - `~/.config/bolo/config.toml` — engine, models, hotkey behavior, insertion method
 - `~/.config/bolo/vocabulary.txt` — words the recognizer should spell correctly (one per line, applies instantly)
@@ -61,7 +60,7 @@ bolo daemon              run the daemon in the foreground
 bolo toggle|pause        what the hotkeys call
 bolo insert-last         re-type the last transcript
 bolo enhance             enhance the last transcript
-bolo settings            terminal settings UI
+bolo settings            open the settings app (alias: bolo ui)
 bolo status|quit         daemon control
 bolo transcribe <wav>    transcribe a 16kHz mono WAV (benchmarking)
 bolo model download [m]  pre-fetch a local model
