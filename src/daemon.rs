@@ -1,7 +1,6 @@
 use crate::config::{Config, InjectMethod, SttBackend, PIPELINE_SAMPLE_RATE};
 use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector, TextInjector};
 use crate::stt::groq::encode_wav;
-use crate::stt::SttProvider;
 use crate::vad::{self, Control, StopReason, Utterance};
 use anyhow::{anyhow, Context};
 use crossbeam_channel::Sender;
@@ -12,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
+pub(crate) enum Phase {
     Idle,
     Recording,
     Paused,
@@ -20,7 +19,7 @@ enum Phase {
 }
 
 impl Phase {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Phase::Idle => "idle",
             Phase::Recording => "recording",
@@ -30,8 +29,8 @@ impl Phase {
     }
 }
 
-struct Shared {
-    phase: Phase,
+pub(crate) struct Shared {
+    pub(crate) phase: Phase,
     /// Control channel into the active endpointer, while recording.
     control_tx: Option<Sender<Control>>,
     /// When the starting toggle arrived, for the toggle→capture metric.
@@ -40,7 +39,7 @@ struct Shared {
     /// user copied something to splice into the transcript.
     clip_snapshot: Option<String>,
     /// Most recent finished transcript (or enhanced text); what Alt+I types.
-    last_text: Option<String>,
+    pub(crate) last_text: Option<String>,
 }
 
 enum PipelineMsg {
@@ -122,7 +121,7 @@ fn read_clipboard() -> Option<String> {
     String::from_utf8(out.stdout).ok() // non-text (e.g. image) -> None
 }
 
-pub fn run(cfg: Config) -> anyhow::Result<()> {
+pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let path = socket_path();
     // Single instance: a live socket means another daemon owns it.
     if UnixStream::connect(&path).is_ok() {
@@ -243,6 +242,13 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
+    // Settings app: local web UI served from inside the daemon.
+    {
+        let shared = Arc::clone(&shared);
+        let cfg = cfg.clone();
+        std::thread::spawn(move || crate::web::serve(config_path, shared, cfg));
+    }
+
     // Pipeline loop: assemble pieces per session; on finalize, await the
     // background transcriptions in order, join, and inject. Owns the tokio
     // runtime and the (stateful) injectors so the portal session survives
@@ -319,6 +325,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                 match outcome {
                     Ok(enhanced) => {
                         println!("[enhanced] {enhanced}");
+                        crate::userdata::append_history("enhanced", &enhanced);
                         shared.lock().unwrap().last_text = Some(enhanced);
                         notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Ctrl+V pastes");
                     }
@@ -436,6 +443,7 @@ fn finalize(
                 _ => "On clipboard — paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
+            crate::userdata::append_history("dictation", &text);
             shared.lock().unwrap().last_text = Some(text);
         }
         Err(e) => {

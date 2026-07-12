@@ -1,14 +1,16 @@
 mod audio;
 mod config;
+mod config_edit;
 mod daemon;
 mod enhance;
 mod inject;
+mod mictest;
 mod resample;
 mod sound;
 mod stt;
-mod tui;
 mod userdata;
 mod vad;
+mod web;
 
 use crate::config::{Config, PIPELINE_SAMPLE_RATE};
 use crate::stt::groq::{encode_wav, CAPTURE_DUMP_PATH};
@@ -47,12 +49,15 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("daemon") => {
             let cfg = Config::load(&config_path)?;
-            return daemon::run(cfg);
+            return daemon::run(cfg, config_path);
         }
         Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit")) => {
             return client(cmd)
         }
-        Some("settings") => return tui::run(&config_path),
+        Some("settings" | "ui") => {
+            let cfg = Config::load(&config_path)?;
+            return open_settings_app(cfg.ui.port);
+        }
         Some("transcribe") => {
             // bolo transcribe <file.wav> — run the configured STT provider on
             // a 16kHz mono WAV file (benchmarking / debugging).
@@ -162,6 +167,41 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("[stt-raw] {}", transcript.raw_json);
     println!("[result]  {}", transcript.text);
+    Ok(())
+}
+
+/// Open the settings app: make sure the daemon is up, then launch the UI in
+/// an app window (Chrome/Chromium) or the default browser.
+fn open_settings_app(port: u16) -> anyhow::Result<()> {
+    let daemon_up = std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok();
+    if !daemon_up {
+        let started = std::process::Command::new("systemctl")
+            .args(["--user", "start", "bolo.service"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !started {
+            let exe = std::env::current_exe()?;
+            std::process::Command::new(exe).arg("daemon").spawn()?;
+        }
+        // Give it a moment to bind the web port.
+        for _ in 0..20 {
+            if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+    let url = format!("http://127.0.0.1:{port}");
+    for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
+        if std::process::Command::new(browser)
+            .arg(format!("--app={url}"))
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
     Ok(())
 }
 

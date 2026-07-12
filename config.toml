@@ -42,3 +42,7 @@ type_delay_ms = 2                   # pacing between keystrokes (portal mode)
 # NOTE: Enhance sends the transcript to Groq's LLM even when stt.provider is
 # "whisper" (local). Clicking Enhance is the opt-in.
 model = "llama-3.3-70b-versatile"
+
+[ui]
+# Settings app (bolo settings), served by the daemon on 127.0.0.1 only.
+port = 4525

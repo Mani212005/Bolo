@@ -21,6 +21,21 @@ pub struct Config {
     pub inject: InjectConfig,
     #[serde(default)]
     pub enhance: EnhanceConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Port for the settings app, served on 127.0.0.1 only.
+    pub port: u16,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { port: 4525 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
