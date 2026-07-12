@@ -1,16 +1,31 @@
 mod audio;
 mod config;
 mod daemon;
+mod enhance;
 mod inject;
 mod resample;
+mod sound;
 mod stt;
+mod tui;
+mod userdata;
 mod vad;
 
 use crate::config::{Config, PIPELINE_SAMPLE_RATE};
-use crate::stt::groq::{encode_wav, GroqStt, CAPTURE_DUMP_PATH};
-use crate::stt::SttProvider;
+use crate::stt::groq::{encode_wav, CAPTURE_DUMP_PATH};
+use anyhow::Context;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+
+/// Config search order: ./config.toml (repo/dev use), then
+/// ~/.config/bolo/config.toml (installed use — created by install.sh),
+/// so `bolo` works from any directory once installed.
+fn default_config_path() -> PathBuf {
+    let local = PathBuf::from("config.toml");
+    if local.exists() {
+        return local;
+    }
+    userdata::config_dir().join("config.toml")
+}
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -27,20 +42,55 @@ fn main() -> anyhow::Result<()> {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+        .unwrap_or_else(default_config_path);
 
     match args.get(1).map(String::as_str) {
         Some("daemon") => {
             let cfg = Config::load(&config_path)?;
             return daemon::run(cfg);
         }
-        Some(cmd @ ("toggle" | "pause" | "status" | "quit")) => return client(cmd),
+        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit")) => {
+            return client(cmd)
+        }
+        Some("settings") => return tui::run(&config_path),
+        Some("transcribe") => {
+            // bolo transcribe <file.wav> — run the configured STT provider on
+            // a 16kHz mono WAV file (benchmarking / debugging).
+            let cfg = Config::load(&config_path)?;
+            let file = args.get(2).context("usage: bolo transcribe <file.wav>")?;
+            let bytes = std::fs::read(file)?;
+            let spec = hound::WavReader::new(std::io::Cursor::new(&bytes[..]))?.spec();
+            anyhow::ensure!(
+                spec.sample_rate == PIPELINE_SAMPLE_RATE && spec.channels == 1,
+                "need 16kHz mono WAV (got {}Hz {}ch); convert: ffmpeg -i in.wav -ar 16000 -ac 1 out.wav",
+                spec.sample_rate,
+                spec.channels
+            );
+            let stt = stt::make_provider(&cfg)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let transcript = runtime.block_on(stt.transcribe(bytes))?;
+            println!("[result]  {}", transcript.text);
+            return Ok(());
+        }
+        Some("model") => {
+            // bolo model download [name]  — pre-fetch a local whisper model.
+            let cfg = Config::load(&config_path)?;
+            let name = match (args.get(2).map(String::as_str), args.get(3)) {
+                (Some("download"), name) => {
+                    name.cloned().unwrap_or_else(|| cfg.stt.whisper.model.clone())
+                }
+                _ => anyhow::bail!("usage: bolo model download [name]"),
+            };
+            let path = stt::whisper::ensure_model_blocking(&name)?;
+            println!("[model] ready: {}", path.display());
+            return Ok(());
+        }
         _ => {} // one-shot mode below
     }
     let cfg = Config::load(&config_path)?;
 
-    // Fail fast on a missing API key before recording anything.
-    let stt = GroqStt::new(cfg.groq.clone())?;
+    // Fail fast (missing API key / missing model) before recording anything.
+    let stt = stt::make_provider(&cfg)?;
 
     let (audio_tx, audio_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
     let (control_tx, control_rx) = crossbeam_channel::unbounded::<vad::Control>();
@@ -110,7 +160,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let transcript = runtime.block_on(stt.transcribe(wav_bytes))?;
 
-    eprintln!("[groq-raw] {}", transcript.raw_json);
+    eprintln!("[stt-raw] {}", transcript.raw_json);
     println!("[result]  {}", transcript.text);
     Ok(())
 }

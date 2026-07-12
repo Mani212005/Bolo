@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Registers GNOME custom keybindings for Bolo:
-#   toggle (default Ctrl+Space) and pause (default Alt+P).
+#   toggle (default Ctrl+Space), pause (default Alt+P),
+#   insert-last (default Alt+I).
 # Append-safe and re-runnable: slots are reused by name, other custom
 # keybindings are preserved.
-# Usage: install-hotkey.sh [toggle-binding] [pause-binding]
+# Usage: install-hotkey.sh [toggle-binding] [pause-binding] [insert-binding]
 set -euo pipefail
 
 TOGGLE_BINDING="${1:-<Control>space}"
 PAUSE_BINDING="${2:-<Alt>p}"
+INSERT_BINDING="${3:-<Alt>i}"
 BOLO="$(cd "$(dirname "$0")/.." && pwd)/target/release/bolo"
 [ -x "$BOLO" ] || { echo "error: $BOLO not built (run: cargo build --release)"; exit 1; }
 
@@ -42,4 +44,5 @@ register() {
 
 register "Bolo toggle" "$BOLO toggle" "$TOGGLE_BINDING"
 register "Bolo pause"  "$BOLO pause"  "$PAUSE_BINDING"
+register "Bolo insert" "$BOLO insert-last" "$INSERT_BINDING"
 echo "verify:    gsettings get $SCHEMA custom-keybindings"

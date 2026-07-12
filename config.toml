@@ -1,3 +1,18 @@
+[stt]
+# groq           = cloud, ~0.5s per utterance (fastest)
+# faster-whisper = local & private, CTranslate2 INT8 sidecar (fast local pick)
+# whisper        = local & private, whisper.cpp (no Python, but slower)
+provider = "faster-whisper"
+
+[stt.whisper]
+# Local model, shared by both local providers. Warm-transcription time for
+# 11s of audio, measured on this machine (CPU, 12 threads):
+#   faster-whisper: base.en 0.7s · distil-small.en 1.5s · small.en 1.9s
+#   whisper.cpp:    base.en 2.4s · distil-small.en 5.8s · small.en 6.9s
+#   large-v3-turbo (any form): 26s+ — do not use on CPU.
+# Vocabulary biasing: ~/.config/bolo/vocabulary.txt (one term per line).
+model = "small.en"
+
 [groq]
 model = "whisper-large-v3-turbo"   # or "distil-whisper-large-v3-en" (English-only, faster)
 language = "en"                     # ISO-639-1; improves accuracy AND latency
@@ -5,14 +20,25 @@ temperature = 0.0
 
 [vad]
 speech_threshold = 0.5              # Silero prob above this = speech
-endpoint_silence_ms = 1500          # trailing silence before auto-stop
+auto_endpoint = false               # true = trailing silence auto-stops the recording
+endpoint_silence_ms = 1500          # trailing silence before auto-stop (when auto_endpoint)
 min_speech_ms = 300                 # must hear this much speech before endpointing arms
 preroll_ms = 300                    # keep audio before speech onset (anti first-word-clip)
-max_utterance_ms = 60000            # hard safety cap
+max_utterance_ms = 300000           # hard safety cap (5 min)
 
 [daemon]
 notifications = true                # desktop notifications on state changes
+sounds = true                       # chime on recording start/stop
 
 [inject]
-method = "portal"                   # portal | clipboard
-type_delay_ms = 2                   # pacing between synthesized keystrokes
+# paste     = clipboard + synthesized Ctrl+V: whole text lands at once (default)
+#             (terminals usually want Ctrl+Shift+V — use Ctrl+V there manually)
+# portal    = type char-by-char through the portal (slow but works sans clipboard)
+# clipboard = copy only; you paste with Ctrl+V yourself
+method = "paste"
+type_delay_ms = 2                   # pacing between keystrokes (portal mode)
+
+[enhance]
+# NOTE: Enhance sends the transcript to Groq's LLM even when stt.provider is
+# "whisper" (local). Clicking Enhance is the opt-in.
+model = "llama-3.3-70b-versatile"

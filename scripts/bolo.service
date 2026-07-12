@@ -1,0 +1,17 @@
+# Bolo dictation daemon — user service, tied to the graphical session
+# (needs WAYLAND_DISPLAY/DBUS from the desktop for portal typing,
+# clipboard, and notifications). Installed by install.sh.
+[Unit]
+Description=Bolo dictation daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/bolo daemon
+Restart=on-failure
+RestartSec=2
+# GROQ_API_KEY lives in ~/.env (never in config, never committed).
+EnvironmentFile=-%h/.env
+
+[Install]
+WantedBy=graphical-session.target

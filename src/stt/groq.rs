@@ -21,7 +21,7 @@ impl GroqStt {
     }
 
     fn form(&self, wav_bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Form> {
-        Ok(reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part(
                 "file",
                 reqwest::multipart::Part::bytes(wav_bytes)
@@ -31,7 +31,13 @@ impl GroqStt {
             .text("model", self.config.model.clone())
             .text("response_format", "json")
             .text("language", self.config.language.clone())
-            .text("temperature", self.config.temperature.to_string()))
+            .text("temperature", self.config.temperature.to_string());
+        // Bias the model toward the user's vocabulary (names, jargon).
+        if let Some(vocab) = crate::userdata::vocabulary_prompt() {
+            eprintln!("[groq]    vocabulary prompt: {vocab}");
+            form = form.text("prompt", vocab);
+        }
+        Ok(form)
     }
 
     async fn request_once(&self, wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {

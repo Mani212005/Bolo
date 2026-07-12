@@ -1,6 +1,6 @@
-use crate::config::{Config, InjectMethod, PIPELINE_SAMPLE_RATE};
+use crate::config::{Config, InjectMethod, SttBackend, PIPELINE_SAMPLE_RATE};
 use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector, TextInjector};
-use crate::stt::groq::{encode_wav, GroqStt};
+use crate::stt::groq::encode_wav;
 use crate::stt::SttProvider;
 use crate::vad::{self, Control, StopReason, Utterance};
 use anyhow::{anyhow, Context};
@@ -39,12 +39,18 @@ struct Shared {
     /// Clipboard content at pause time; a change by resume time means the
     /// user copied something to splice into the transcript.
     clip_snapshot: Option<String>,
+    /// Most recent finished transcript (or enhanced text); what Alt+I types.
+    last_text: Option<String>,
 }
 
 enum PipelineMsg {
     Segment(Utterance),
     Insert(String),
     Finalize,
+    /// Re-type previously finished text at the current cursor (Alt+I).
+    InsertLast(String),
+    /// Rewrite the last transcript as a better LLM prompt (Enhance).
+    Enhance(String),
 }
 
 /// One piece of the transcript being assembled: speech already sent to Groq
@@ -73,10 +79,45 @@ fn notify(cfg: &Config, body: &str) {
         .show();
 }
 
+/// Result notification with an Enhance action button. GNOME shows the button
+/// on the banner; clicking it feeds "enhance" back through our own socket so
+/// all state transitions stay on the socket thread. Falls back to a plain
+/// notification body if the server ignores actions.
+fn notify_result(cfg: &Config, body: &str) {
+    if !cfg.daemon.notifications {
+        return;
+    }
+    let notification = notify_rust::Notification::new()
+        .summary("Bolo")
+        .body(body)
+        .action("enhance", "Enhance")
+        .timeout(notify_rust::Timeout::Milliseconds(15000))
+        .finalize();
+    // wait_for_action blocks until click/close/timeout — needs its own thread.
+    std::thread::spawn(move || match notification.show() {
+        Ok(handle) => handle.wait_for_action(|action| {
+            if action == "enhance" {
+                if let Ok(mut c) = UnixStream::connect(socket_path()) {
+                    let _ = writeln!(c, "enhance");
+                    // Read the reply so the daemon's write doesn't hit a
+                    // closed pipe (was logging "client error: Broken pipe").
+                    let mut reply = String::new();
+                    let _ = BufReader::new(c).read_line(&mut reply);
+                }
+            }
+        }),
+        Err(e) => eprintln!("[notify] failed: {e}"),
+    });
+}
+
 fn read_clipboard() -> Option<String> {
-    let out = std::process::Command::new("wl-paste").arg("-n").output().ok()?;
+    // Bounded: a hung clipboard owner would otherwise wedge the socket thread.
+    let out = std::process::Command::new("timeout")
+        .args(["1.5", "wl-paste", "-n"])
+        .output()
+        .ok()?;
     if !out.status.success() {
-        return None; // empty clipboard exits non-zero
+        return None; // empty clipboard exits non-zero; 124 = timed out
     }
     String::from_utf8(out.stdout).ok() // non-text (e.g. image) -> None
 }
@@ -92,14 +133,24 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         .with_context(|| format!("cannot bind {}", path.display()))?;
     eprintln!("[daemon] listening on {}", path.display());
 
-    // Fail fast on a missing key, like the one-shot path.
-    let stt = Arc::new(GroqStt::new(cfg.groq.clone())?);
+    // Fail fast: missing GROQ_API_KEY (groq) or a first-time model download
+    // (whisper) both surface here, before any recording.
+    if cfg.stt.provider == SttBackend::Whisper
+        && !crate::stt::whisper::model_path(&cfg.stt.whisper.model).exists()
+    {
+        notify(
+            &cfg,
+            &format!("Downloading whisper model {} (one-time)…", cfg.stt.whisper.model),
+        );
+    }
+    let stt = crate::stt::make_provider(&cfg)?;
 
     let shared = Arc::new(Mutex::new(Shared {
         phase: Phase::Idle,
         control_tx: None,
         toggle_t0: None,
         clip_snapshot: None,
+        last_text: None,
     }));
     let (start_tx, start_rx) = crossbeam_channel::unbounded::<()>();
     let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded::<PipelineMsg>();
@@ -110,6 +161,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         let shared = Arc::clone(&shared);
         let pipeline_tx = pipeline_tx.clone();
         let vad_cfg = cfg.vad.clone();
+        let cfg_audio = cfg.clone();
         std::thread::spawn(move || {
             for () in start_rx.iter() {
                 let (audio_tx, audio_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
@@ -137,9 +189,16 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                         );
                     }
                 }
-                let result =
-                    vad::run_endpointer(audio_rx, control_rx, &vad_cfg, info.sample_rate, true);
+                crate::sound::play(&cfg_audio, crate::sound::Chime::Start);
+                let result = vad::run_endpointer(
+                    audio_rx,
+                    control_rx,
+                    &vad_cfg,
+                    info.sample_rate,
+                    vad_cfg.auto_endpoint,
+                );
                 drop(stream);
+                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
                 {
                     let mut s = shared.lock().unwrap();
                     s.control_tx = None;
@@ -173,7 +232,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
                 if let Err(e) = handle_client(conn, &shared, &start_tx, &pipeline_tx, &cfg) {
-                    eprintln!("[daemon] client error: {e:#}");
+                    // A client hanging up before reading its reply is routine
+                    // (hotkey scripts, probes) — not worth an error line.
+                    match e.downcast_ref::<std::io::Error>() {
+                        Some(io) if io.kind() == std::io::ErrorKind::BrokenPipe => {}
+                        _ => eprintln!("[daemon] client error: {e:#}"),
+                    }
                 }
             }
         });
@@ -213,6 +277,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                         Err(e) => eprintln!("[daemon] wav encode failed: {e:#}"),
                     }
                 }
+                if utt.reason == StopReason::MaxCap {
+                    notify(
+                        &cfg,
+                        &format!("Max length ({}s) reached — transcribing", cfg.vad.max_utterance_ms / 1000),
+                    );
+                }
                 if utt.reason != StopReason::Pause {
                     finalize(&runtime, &mut pieces, &mut portal, &mut clipboard, &cfg, &shared);
                 }
@@ -224,9 +294,78 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             PipelineMsg::Finalize => {
                 finalize(&runtime, &mut pieces, &mut portal, &mut clipboard, &cfg, &shared);
             }
+            PipelineMsg::InsertLast(text) => {
+                let outcome = runtime.block_on(inject_text(&text, &mut portal, &mut clipboard, &cfg));
+                match outcome {
+                    Ok(used) => {
+                        eprintln!("[insert-last] method={} chars={}", used, text.chars().count());
+                        if used != "portal" && used != "paste" {
+                            notify(&cfg, "On clipboard — paste with Ctrl+V");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[insert-last] failed: {e:#}");
+                        notify(&cfg, &format!("Insert failed: {e}"));
+                    }
+                }
+            }
+            PipelineMsg::Enhance(text) => {
+                notify(&cfg, "Enhancing…");
+                let outcome = runtime.block_on(async {
+                    let enhanced = crate::enhance::enhance(&cfg.enhance, &text).await?;
+                    clipboard.inject(&enhanced).await?;
+                    anyhow::Ok(enhanced)
+                });
+                match outcome {
+                    Ok(enhanced) => {
+                        println!("[enhanced] {enhanced}");
+                        shared.lock().unwrap().last_text = Some(enhanced);
+                        notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Ctrl+V pastes");
+                    }
+                    Err(e) => {
+                        eprintln!("[enhance] failed: {e:#}");
+                        notify(&cfg, &format!("Enhance failed: {e}"));
+                    }
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Inject `text` by the configured method (portal falls back to clipboard).
+/// Returns the method actually used.
+async fn inject_text(
+    text: &str,
+    portal: &mut PortalInjector,
+    clipboard: &mut ClipboardInjector,
+    cfg: &Config,
+) -> anyhow::Result<&'static str> {
+    match cfg.inject.method {
+        InjectMethod::Paste => {
+            // Copy first; even if the chord fails the text is one Ctrl+V away.
+            clipboard.inject(text).await?;
+            match portal.paste_chord().await {
+                Ok(()) => Ok("paste"),
+                Err(e) => {
+                    eprintln!("[inject] paste chord failed ({e:#}); text is on the clipboard");
+                    Ok("clipboard")
+                }
+            }
+        }
+        InjectMethod::Portal => match portal.inject(text).await {
+            Ok(()) => Ok("portal"),
+            Err(e) => {
+                eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
+                clipboard.inject(text).await?;
+                Ok("clipboard-fallback")
+            }
+        },
+        InjectMethod::Clipboard => {
+            clipboard.inject(text).await?;
+            Ok("clipboard")
+        }
+    }
 }
 
 fn finalize(
@@ -266,17 +405,16 @@ fn finalize(
         println!("[result]  {text}");
 
         let t_inject = Instant::now();
-        let (used, result) = match cfg.inject.method {
-            InjectMethod::Portal => match portal.inject(&text).await {
-                Ok(()) => ("portal", Ok(())),
-                Err(e) => {
-                    eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
-                    ("clipboard-fallback", clipboard.inject(&text).await)
-                }
-            },
-            InjectMethod::Clipboard => ("clipboard", clipboard.inject(&text).await),
-        };
-        result?;
+        let used = inject_text(&text, portal, clipboard, cfg).await?;
+        // Safety net: the transcript is always on the clipboard too, so a
+        // missed portal paste never means digging through daemon logs. The
+        // text was already typed, so a copy failure is non-fatal.
+        if used == "portal" {
+            match clipboard.inject(&text).await {
+                Ok(()) => eprintln!("[clipboard] copied chars={}", text.chars().count()),
+                Err(e) => eprintln!("[clipboard] copy failed (text was typed): {e:#}"),
+            }
+        }
         eprintln!(
             "[inject]  method={} chars={} inject_ms={} finalize→done_ms={}",
             used,
@@ -291,10 +429,15 @@ fn finalize(
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
-        Ok(Some((used, text))) if used != "portal" => {
-            notify(cfg, &format!("On clipboard — paste with Ctrl+V:\n{text}"));
+        Ok(Some((used, text))) => {
+            let head = match used {
+                "paste" => "Pasted + on clipboard",
+                "portal" => "Typed + copied — Ctrl+V pastes it elsewhere",
+                _ => "On clipboard — paste with Ctrl+V",
+            };
+            notify_result(cfg, &format!("{head}\n{text}"));
+            shared.lock().unwrap().last_text = Some(text);
         }
-        Ok(Some((_, text))) => notify(cfg, &text),
         Err(e) => {
             eprintln!("[daemon] session failed: {e:#}");
             notify(cfg, &format!("Error: {e}"));
@@ -355,7 +498,7 @@ fn handle_client(
                         let _ = tx.send(Control::Pause);
                     }
                     drop(s);
-                    notify(cfg, "Paused — copy text to insert · Alt+P resume · Ctrl+Space finish");
+                    notify(cfg, "Paused — Alt+I insert clipboard · Alt+P resume · Ctrl+Space finish");
                     "ok paused".to_string()
                 }
                 Phase::Paused => {
@@ -377,6 +520,46 @@ fn handle_client(
                     "ok recording".to_string()
                 }
                 phase => format!("err not recording (phase: {})", phase.as_str()),
+            }
+        }
+        "insert-last" => {
+            let mut s = shared.lock().unwrap();
+            match (s.phase, s.last_text.clone()) {
+                (Phase::Idle, Some(text)) => {
+                    drop(s);
+                    pipeline_tx.send(PipelineMsg::InsertLast(text)).context("pipeline gone")?;
+                    "ok inserting".to_string()
+                }
+                (Phase::Idle, None) => "err nothing to insert yet".to_string(),
+                // While paused, Alt+I means "splice the current clipboard
+                // into the transcript" — no matter when it was copied (covers
+                // content copied before the dictation even started).
+                (Phase::Paused, _) => match read_clipboard() {
+                    Some(text) if !text.trim().is_empty() => {
+                        let n = text.chars().count();
+                        // Remember it so the Alt+P resume's changed-clipboard
+                        // check doesn't insert the same text twice.
+                        s.clip_snapshot = Some(text.clone());
+                        drop(s);
+                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
+                        notify(cfg, &format!("Inserted {n} chars from clipboard"));
+                        "ok inserted".to_string()
+                    }
+                    _ => "err clipboard empty".to_string(),
+                },
+                (phase, _) => format!("busy {}", phase.as_str()),
+            }
+        }
+        "enhance" => {
+            let s = shared.lock().unwrap();
+            match (s.phase, s.last_text.clone()) {
+                (Phase::Idle, Some(text)) => {
+                    drop(s);
+                    pipeline_tx.send(PipelineMsg::Enhance(text)).context("pipeline gone")?;
+                    "ok enhancing".to_string()
+                }
+                (Phase::Idle, None) => "err nothing to enhance yet".to_string(),
+                (phase, _) => format!("busy {}", phase.as_str()),
             }
         }
         "status" => shared.lock().unwrap().phase.as_str().to_string(),

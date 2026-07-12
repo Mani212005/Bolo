@@ -1,5 +1,0 @@
-# cpal needs ALSA headers; they're extracted locally (no sudo) under
-# ~/.local/alsa-dev — see libasound2-dev. Remove this once the system
-# package is installed.
-[env]
-PKG_CONFIG_PATH = "/home/mani/.local/alsa-dev/usr/lib/x86_64-linux-gnu/pkgconfig"

@@ -14,20 +14,73 @@ pub struct Config {
     pub groq: GroqConfig,
     pub vad: VadConfig,
     #[serde(default)]
+    pub stt: SttConfig,
+    #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub inject: InjectConfig,
+    #[serde(default)]
+    pub enhance: EnhanceConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SttConfig {
+    pub provider: SttBackend,
+    pub whisper: WhisperConfig,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self { provider: SttBackend::Groq, whisper: WhisperConfig::default() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SttBackend {
+    Groq,
+    Whisper,
+    #[serde(rename = "faster-whisper")]
+    FasterWhisper,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WhisperConfig {
+    /// ggml model name as published in ggerganov/whisper.cpp on Hugging Face
+    /// (e.g. "large-v3-turbo", "small.en", "base.en").
+    pub model: String,
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self { model: "large-v3-turbo".to_string() }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EnhanceConfig {
+    pub model: String,
+}
+
+impl Default for EnhanceConfig {
+    fn default() -> Self {
+        Self { model: "llama-3.3-70b-versatile".to_string() }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {
     pub notifications: bool,
+    pub sounds: bool,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { notifications: true }
+        Self { notifications: true, sounds: true }
     }
 }
 
@@ -40,14 +93,18 @@ pub struct InjectConfig {
 
 impl Default for InjectConfig {
     fn default() -> Self {
-        Self { method: InjectMethod::Portal, type_delay_ms: 2 }
+        Self { method: InjectMethod::Paste, type_delay_ms: 2 }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InjectMethod {
+    /// Clipboard + portal-synthesized Ctrl+V: whole text appears at once.
+    Paste,
+    /// Portal keystroke typing, char by char.
     Portal,
+    /// Clipboard only; the user pastes manually.
     Clipboard,
 }
 
@@ -65,6 +122,14 @@ pub struct VadConfig {
     pub min_speech_ms: u64,
     pub preroll_ms: u64,
     pub max_utterance_ms: u64,
+    /// When false, trailing silence never ends a recording — only
+    /// Ctrl+Space, Alt+P, or the max_utterance_ms cap do.
+    #[serde(default = "default_true")]
+    pub auto_endpoint: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {

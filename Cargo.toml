@@ -20,3 +20,6 @@ crossbeam-channel = "0.5"
 ashpd = { version = "0.13", features = ["remote_desktop", "screencast"] }  # XDG portal text injection
 notify-rust = "4"       # desktop notifications for daemon state
 dotenvy = "0.15"        # fall back to ~/.env for GROQ_API_KEY
+whisper-rs = "0.16.0"
+ratatui = "0.30.2"
+toml_edit = "0.25.12"

@@ -9,6 +9,7 @@ use ashpd::desktop::Session;
 // X11 keysyms for the control characters we can meaningfully type.
 const XK_RETURN: u32 = 0xFF0D;
 const XK_TAB: u32 = 0xFF09;
+const XK_CONTROL_L: u32 = 0xFFE3;
 
 /// Types text into the focused app by synthesizing keystrokes through the
 /// XDG RemoteDesktop portal.
@@ -61,14 +62,32 @@ impl PortalInjector {
         Ok(())
     }
 
+    async fn key(&self, keysym: u32, state: KeyState) -> anyhow::Result<()> {
+        let (proxy, session) = self.session.as_ref().expect("session ensured before key");
+        proxy
+            .notify_keyboard_keysym(session, keysym as i32, state, NotifyKeyboardKeysymOptions::default())
+            .await?;
+        Ok(())
+    }
+
     async fn tap(&self, keysym: u32) -> anyhow::Result<()> {
-        let (proxy, session) = self.session.as_ref().expect("session ensured before tap");
-        proxy
-            .notify_keyboard_keysym(session, keysym as i32, KeyState::Pressed, NotifyKeyboardKeysymOptions::default())
-            .await?;
-        proxy
-            .notify_keyboard_keysym(session, keysym as i32, KeyState::Released, NotifyKeyboardKeysymOptions::default())
-            .await?;
+        self.key(keysym, KeyState::Pressed).await?;
+        self.key(keysym, KeyState::Released).await
+    }
+
+    /// Synthesize Ctrl+V at the focused app — the "paste it all at once"
+    /// path: the transcript is placed on the clipboard first, then this
+    /// chord makes the app paste it in one go.
+    pub async fn paste_chord(&mut self) -> anyhow::Result<()> {
+        self.ensure_session().await?;
+        let gap = std::time::Duration::from_millis(10);
+        self.key(XK_CONTROL_L, KeyState::Pressed).await?;
+        tokio::time::sleep(gap).await;
+        self.key('v' as u32, KeyState::Pressed).await?;
+        tokio::time::sleep(gap).await;
+        self.key('v' as u32, KeyState::Released).await?;
+        tokio::time::sleep(gap).await;
+        self.key(XK_CONTROL_L, KeyState::Released).await?;
         Ok(())
     }
 }
