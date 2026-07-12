@@ -9,6 +9,77 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/bolo")
 }
 
+/// ~/.local/share/bolo — models, venv, history, scratchpad.
+pub fn data_dir() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/bolo")
+}
+
+// ---- dictation history (jsonl, one {ts, kind, text} per line) ----
+
+fn history_path() -> PathBuf {
+    data_dir().join("history.jsonl")
+}
+
+pub fn append_history(kind: &str, text: &str) {
+    let _ = std::fs::create_dir_all(data_dir());
+    let line = serde_json::json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "kind": kind,
+        "text": text,
+    });
+    use std::io::Write;
+    if let Ok(mut f) =
+        std::fs::File::options().create(true).append(true).open(history_path())
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+pub fn read_history(max: usize) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(history_path()).unwrap_or_default();
+    let all: Vec<serde_json::Value> =
+        text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let skip = all.len().saturating_sub(max);
+    all.into_iter().skip(skip).collect()
+}
+
+pub fn clear_history() {
+    let _ = std::fs::remove_file(history_path());
+}
+
+// ---- scratchpad ----
+
+fn scratchpad_path() -> PathBuf {
+    data_dir().join("scratchpad.md")
+}
+
+pub fn read_scratchpad() -> String {
+    std::fs::read_to_string(scratchpad_path()).unwrap_or_default()
+}
+
+pub fn write_scratchpad(text: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir())?;
+    std::fs::write(scratchpad_path(), text)
+}
+
+/// Rewrite a userdata file's body while keeping its leading # comment header.
+pub fn write_keeping_comments(name: &str, body: &str) -> std::io::Result<()> {
+    let path = config_dir().join(name);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let header: Vec<&str> =
+        existing.lines().take_while(|l| l.trim_start().starts_with('#')).collect();
+    let mut out = header.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(body.trim_end());
+    out.push('\n');
+    std::fs::write(&path, out)
+}
+
 const VOCAB_STARTER: &str = "\
 # Bolo vocabulary — one term per line, exact spelling.
 # These are fed to the speech-to-text engine so names and jargon come out
