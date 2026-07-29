@@ -1,5 +1,11 @@
-use crate::config::{Config, InjectMethod, SttBackend, PIPELINE_SAMPLE_RATE};
-use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector, TextInjector};
+use crate::config::{Config, SttBackend, PIPELINE_SAMPLE_RATE};
+#[cfg(target_os = "linux")]
+use crate::config::InjectMethod;
+use crate::inject::TextInjector;
+#[cfg(target_os = "linux")]
+use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector};
+#[cfg(target_os = "macos")]
+use crate::inject::macos::MacOsTextInjector;
 use crate::stt::groq::encode_wav;
 use crate::vad::{self, Control, StopReason, Utterance};
 use anyhow::{anyhow, Context};
@@ -9,6 +15,57 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+#[cfg(target_os = "linux")]
+struct Injectors {
+    portal: PortalInjector,
+    clipboard: ClipboardInjector,
+}
+
+#[cfg(target_os = "macos")]
+struct Injectors {
+    macos: MacOsTextInjector,
+}
+
+impl Injectors {
+    #[cfg(target_os = "linux")]
+    fn new(cfg: &Config) -> Self {
+        Self {
+            portal: PortalInjector::new(cfg.inject.type_delay_ms),
+            clipboard: ClipboardInjector,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn new(_cfg: &Config) -> Self {
+        Self {
+            macos: MacOsTextInjector::new(),
+        }
+    }
+
+    async fn clipboard_inject(&mut self, text: &str) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        return self.clipboard.inject(text).await;
+        #[cfg(target_os = "macos")]
+        {
+            let text = text.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let mut child = std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    stdin.write_all(text.as_bytes())?;
+                }
+                child.wait()?;
+                anyhow::Ok(())
+            }).await??;
+            Ok(())
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -242,6 +299,21 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         });
     }
 
+    // Hotkey listener: on macOS, this intercepts keystrokes via rdev.
+    // On Linux, it's a no-op (hotkeys are handled by GNOME settings).
+    {
+        let listener = crate::hotkey::get_listener();
+        let path = path.clone();
+        if let Err(e) = listener.start(Box::new(move |cmd| {
+            if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(&path) {
+                let _ = writeln!(conn, "{}", cmd);
+                // read response if necessary, but we don't care
+            }
+        })) {
+            eprintln!("[daemon] hotkey listener failed: {e}");
+        }
+    }
+
     // Settings app: local web UI served from inside the daemon.
     {
         let shared = Arc::clone(&shared);
@@ -254,8 +326,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     // runtime and the (stateful) injectors so the portal session survives
     // across utterances.
     let runtime = tokio::runtime::Runtime::new()?;
-    let mut portal = PortalInjector::new(cfg.inject.type_delay_ms);
-    let mut clipboard = ClipboardInjector;
+    let mut injectors = Injectors::new(&cfg);
     let mut pieces: Vec<Piece> = Vec::new();
 
     for msg in pipeline_rx.iter() {
@@ -290,7 +361,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     );
                 }
                 if utt.reason != StopReason::Pause {
-                    finalize(&runtime, &mut pieces, &mut portal, &mut clipboard, &cfg, &shared);
+                    finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
                 }
             }
             PipelineMsg::Insert(text) => {
@@ -298,10 +369,10 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 pieces.push(Piece::Inserted(text));
             }
             PipelineMsg::Finalize => {
-                finalize(&runtime, &mut pieces, &mut portal, &mut clipboard, &cfg, &shared);
+                finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
             }
             PipelineMsg::InsertLast(text) => {
-                let outcome = runtime.block_on(inject_text(&text, &mut portal, &mut clipboard, &cfg));
+                let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg));
                 match outcome {
                     Ok(used) => {
                         eprintln!("[insert-last] method={} chars={}", used, text.chars().count());
@@ -319,7 +390,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 notify(&cfg, "Enhancing…");
                 let outcome = runtime.block_on(async {
                     let enhanced = crate::enhance::enhance(&cfg.enhance, &text).await?;
-                    clipboard.inject(&enhanced).await?;
+                    injectors.clipboard_inject(&enhanced).await?;
                     anyhow::Ok(enhanced)
                 });
                 match outcome {
@@ -344,15 +415,21 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
 /// Returns the method actually used.
 async fn inject_text(
     text: &str,
-    portal: &mut PortalInjector,
-    clipboard: &mut ClipboardInjector,
-    cfg: &Config,
+    injectors: &mut Injectors,
+    #[allow(unused)] cfg: &Config,
 ) -> anyhow::Result<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        injectors.macos.inject(text).await?;
+        return Ok("macos");
+    }
+
+    #[cfg(target_os = "linux")]
     match cfg.inject.method {
         InjectMethod::Paste => {
             // Copy first; even if the chord fails the text is one Ctrl+V away.
-            clipboard.inject(text).await?;
-            match portal.paste_chord().await {
+            injectors.clipboard.inject(text).await?;
+            match injectors.portal.paste_chord().await {
                 Ok(()) => Ok("paste"),
                 Err(e) => {
                     eprintln!("[inject] paste chord failed ({e:#}); text is on the clipboard");
@@ -360,16 +437,16 @@ async fn inject_text(
                 }
             }
         }
-        InjectMethod::Portal => match portal.inject(text).await {
+        InjectMethod::Portal => match injectors.portal.inject(text).await {
             Ok(()) => Ok("portal"),
             Err(e) => {
                 eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
-                clipboard.inject(text).await?;
+                injectors.clipboard.inject(text).await?;
                 Ok("clipboard-fallback")
             }
         },
         InjectMethod::Clipboard => {
-            clipboard.inject(text).await?;
+            injectors.clipboard.inject(text).await?;
             Ok("clipboard")
         }
     }
@@ -378,8 +455,7 @@ async fn inject_text(
 fn finalize(
     runtime: &tokio::runtime::Runtime,
     pieces: &mut Vec<Piece>,
-    portal: &mut PortalInjector,
-    clipboard: &mut ClipboardInjector,
+    injectors: &mut Injectors,
     cfg: &Config,
     shared: &Arc<Mutex<Shared>>,
 ) {
@@ -412,12 +488,12 @@ fn finalize(
         println!("[result]  {text}");
 
         let t_inject = Instant::now();
-        let used = inject_text(&text, portal, clipboard, cfg).await?;
+        let used = inject_text(&text, injectors, cfg).await?;
         // Safety net: the transcript is always on the clipboard too, so a
         // missed portal paste never means digging through daemon logs. The
         // text was already typed, so a copy failure is non-fatal.
         if used == "portal" {
-            match clipboard.inject(&text).await {
+            match injectors.clipboard_inject(&text).await {
                 Ok(()) => eprintln!("[clipboard] copied chars={}", text.chars().count()),
                 Err(e) => eprintln!("[clipboard] copy failed (text was typed): {e:#}"),
             }

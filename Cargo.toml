@@ -16,10 +16,14 @@ async-trait = "0.1"
 voice_activity_detector = "0.2"
 rubato = "0.15"
 crossbeam-channel = "0.5"
-# M3:
-ashpd = { version = "0.13", features = ["remote_desktop", "screencast"] }  # XDG portal text injection
 notify-rust = "4"       # desktop notifications for daemon state
 dotenvy = "0.15"        # fall back to ~/.env for GROQ_API_KEY
 whisper-rs = "0.16.0"
 toml_edit = "0.25.12"
 tiny_http = "0.12.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", features = ["remote_desktop", "screencast"] }  # XDG portal text injection
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rdev = "0.5.3"

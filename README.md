@@ -14,10 +14,18 @@ That's it. The installer sets up the Rust toolchain and system packages
 binary, puts `bolo` on your PATH, registers the GNOME hotkeys, creates your
 config, and starts the daemon as a login service.
 
-**Requirements:** Linux with GNOME on Wayland (Ubuntu 22.04+ tested), a
+**Requirements:** Linux with GNOME on Wayland (Ubuntu 22.04+ tested), or macOS (10.15+), a
 microphone, and optionally a [Groq API key](https://console.groq.com) for the
-fastest transcription. macOS is planned: the audio/transcription core is
-portable, but text injection and hotkeys still need a macOS backend.
+fastest transcription. 
+
+### macOS Permissions
+
+Bolo requires specific system permissions on macOS to function properly:
+1. **Accessibility**: To inject text via simulated keystrokes (e.g. `Cmd+V`).
+2. **Input Monitoring**: To listen for global push-to-talk hotkeys (e.g. `Ctrl+Space`) while in the background.
+3. **Microphone**: To capture audio for dictation.
+
+When you first run the daemon on macOS, the system should prompt you to grant these permissions in **System Settings > Privacy & Security**.
 
 ## Use
 
