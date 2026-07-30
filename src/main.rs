@@ -3,6 +3,7 @@ mod config;
 mod config_edit;
 mod daemon;
 mod enhance;
+mod hotkey;
 mod inject;
 mod mictest;
 mod resample;

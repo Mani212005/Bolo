@@ -1,4 +1,8 @@
+#[cfg(target_os = "linux")]
 pub mod clipboard;
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "linux")]
 pub mod portal;
 
 #[async_trait::async_trait]
