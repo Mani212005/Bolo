@@ -27,9 +27,9 @@ impl HotkeyListener for MacOsHotkeyListener {
                     EventType::KeyPress(key) => {
                         match key {
                             Key::ControlLeft | Key::ControlRight => ctrl_down.store(true, Ordering::SeqCst),
-                            Key::Alt | Key::AltGr => alt_down.store(true, Ordering::SeqCst),
+                            Key::Alt | Key::AltGr | Key::MetaLeft | Key::MetaRight => alt_down.store(true, Ordering::SeqCst),
                             Key::Space => {
-                                if ctrl_down.load(Ordering::SeqCst) {
+                                if ctrl_down.load(Ordering::SeqCst) || alt_down.load(Ordering::SeqCst) {
                                     cb("toggle");
                                 }
                             }
@@ -49,7 +49,7 @@ impl HotkeyListener for MacOsHotkeyListener {
                     EventType::KeyRelease(key) => {
                         match key {
                             Key::ControlLeft | Key::ControlRight => ctrl_down.store(false, Ordering::SeqCst),
-                            Key::Alt | Key::AltGr => alt_down.store(false, Ordering::SeqCst),
+                            Key::Alt | Key::AltGr | Key::MetaLeft | Key::MetaRight => alt_down.store(false, Ordering::SeqCst),
                             _ => {}
                         }
                     }
