@@ -122,10 +122,9 @@ enum Piece {
 }
 
 pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("bolo.sock")
+    let dir = crate::userdata::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("bolo.sock")
 }
 
 fn notify(cfg: &Config, body: &str) {
@@ -179,21 +178,14 @@ fn read_clipboard() -> Option<String> {
         }
         let s = String::from_utf8_lossy(&out.stdout).to_string();
         if s.trim().is_empty() {
-            return None;
+            None
+        } else {
+            Some(s)
         }
-        Some(s)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // Bounded: a hung clipboard owner would otherwise wedge the socket thread.
-        let out = std::process::Command::new("timeout")
-            .args(["1.5", "wl-paste", "-n"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None; // empty clipboard exits non-zero; 124 = timed out
-        }
-        String::from_utf8(out.stdout).ok().filter(|s| !s.trim().is_empty())
+        None
     }
 }
 
@@ -232,9 +224,11 @@ fn apply_voice_clipboard_triggers(text: &str) -> String {
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let path = socket_path();
-    // Single instance: a live socket means another daemon owns it.
-    if UnixStream::connect(&path).is_ok() {
-        return Err(anyhow!("bolo daemon already running on {}", path.display()));
+    // Single instance: if an old daemon is alive, send it quit or take over cleanly
+    if let Ok(mut stream) = UnixStream::connect(&path) {
+        use std::io::Write;
+        let _ = writeln!(stream, "quit");
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
     let _ = std::fs::remove_file(&path); // stale socket from a dead daemon
     let listener = UnixListener::bind(&path)

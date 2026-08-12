@@ -944,13 +944,17 @@
     return res.text();
   }
 
-  async function loadState() {
+  async function loadState(retryCount = 0) {
     try {
       const data = await api("state");
       state = Object.assign(state, data);
+      state.prevHistLen = (data.history || []).length;
       render();
     } catch (e) {
-      console.error("State load failed:", e);
+      console.warn("State load retry:", retryCount, e);
+      if (retryCount < 10) {
+        setTimeout(() => loadState(retryCount + 1), 300);
+      }
     }
   }
 
@@ -958,16 +962,17 @@
   setInterval(async () => {
     try {
       const data = await api("state");
-      const prevStatus = state.status;
       state.status = data.status;
-      state.history = data.history;
+      state.history = data.history || [];
       updateStatusUI();
-      if (data.history.length !== (state.prevHistLen || 0)) {
-        state.prevHistLen = data.history.length;
+      const feed = $("feed");
+      const hasCards = feed ? feed.querySelectorAll(".card").length > 0 : false;
+      if (!hasCards || state.history.length !== (state.prevHistLen || 0)) {
+        state.prevHistLen = state.history.length;
         renderFeed();
       }
     } catch (e) {}
-  }, 1200);
+  }, 1000);
 
   function updateStatusUI() {
     const dot = $("statusDot");

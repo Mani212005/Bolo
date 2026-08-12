@@ -2,8 +2,7 @@ use super::HotkeyListener;
 use anyhow::Result;
 use rdev::{listen, Event, EventType, Key};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -13,10 +12,14 @@ extern "C" {
 const COMBINED_SESSION_STATE: i32 = 0;
 const HID_SYSTEM_STATE: i32 = 1;
 
-/// Queries physical keyboard modifier state from macOS kernel.
+/// Queries physical keyboard key state directly from macOS kernel:
 /// Keycodes on macOS:
 /// - 59: Left Control, 62: Right Control
 /// - 58: Left Option,  61: Right Option
+/// - 49: Space
+/// - 9:  V
+/// - 35: P
+/// - 34: I
 #[inline]
 fn is_control_down() -> bool {
     unsafe {
@@ -37,6 +40,38 @@ fn is_option_down() -> bool {
     }
 }
 
+#[inline]
+fn is_space_down() -> bool {
+    unsafe {
+        CGEventSourceKeyState(COMBINED_SESSION_STATE, 49)
+            || CGEventSourceKeyState(HID_SYSTEM_STATE, 49)
+    }
+}
+
+#[inline]
+fn is_v_down() -> bool {
+    unsafe {
+        CGEventSourceKeyState(COMBINED_SESSION_STATE, 9)
+            || CGEventSourceKeyState(HID_SYSTEM_STATE, 9)
+    }
+}
+
+#[inline]
+fn is_p_down() -> bool {
+    unsafe {
+        CGEventSourceKeyState(COMBINED_SESSION_STATE, 35)
+            || CGEventSourceKeyState(HID_SYSTEM_STATE, 35)
+    }
+}
+
+#[inline]
+fn is_i_down() -> bool {
+    unsafe {
+        CGEventSourceKeyState(COMBINED_SESSION_STATE, 34)
+            || CGEventSourceKeyState(HID_SYSTEM_STATE, 34)
+    }
+}
+
 pub struct MacOsHotkeyListener;
 
 impl MacOsHotkeyListener {
@@ -51,11 +86,10 @@ impl HotkeyListener for MacOsHotkeyListener {
         
         let ctrl_down = Arc::new(AtomicBool::new(false));
         let alt_down = Arc::new(AtomicBool::new(false));
-        
-        let last_toggle = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
-        let last_splice = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
-        let last_pause = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
-        let last_insert = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
+        let space_armed = Arc::new(AtomicBool::new(true));
+        let v_armed = Arc::new(AtomicBool::new(true));
+        let p_armed = Arc::new(AtomicBool::new(true));
+        let i_armed = Arc::new(AtomicBool::new(true));
         
         let cb = callback.clone();
         
@@ -64,40 +98,51 @@ impl HotkeyListener for MacOsHotkeyListener {
                 match event.event_type {
                     EventType::KeyPress(key) => {
                         match key {
-                            Key::ControlLeft | Key::ControlRight => ctrl_down.store(true, Ordering::SeqCst),
-                            Key::Alt | Key::AltGr => alt_down.store(true, Ordering::SeqCst),
+                            Key::ControlLeft | Key::ControlRight => {
+                                ctrl_down.store(true, Ordering::SeqCst);
+                            }
+                            Key::Alt | Key::AltGr => {
+                                alt_down.store(true, Ordering::SeqCst);
+                            }
                             Key::Space => {
-                                if ctrl_down.load(Ordering::SeqCst) || is_control_down() {
-                                    let mut last = last_toggle.lock().unwrap();
-                                    if last.elapsed() >= Duration::from_millis(300) {
-                                        *last = Instant::now();
+                                // Self-healing check: if hardware says Space is up, re-arm
+                                if !is_space_down() {
+                                    space_armed.store(true, Ordering::SeqCst);
+                                }
+                                
+                                // Only fire if Space transitioned from Released -> Pressed (blocks all OS key-repeats)
+                                if space_armed.swap(false, Ordering::SeqCst) {
+                                    if ctrl_down.load(Ordering::SeqCst) || is_control_down() {
                                         cb("toggle");
                                     }
                                 }
                             }
                             Key::KeyP => {
-                                if alt_down.load(Ordering::SeqCst) || is_option_down() {
-                                    let mut last = last_pause.lock().unwrap();
-                                    if last.elapsed() >= Duration::from_millis(300) {
-                                        *last = Instant::now();
+                                if !is_p_down() {
+                                    p_armed.store(true, Ordering::SeqCst);
+                                }
+                                if p_armed.swap(false, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) || is_option_down() {
                                         cb("pause");
                                     }
                                 }
                             }
                             Key::KeyI => {
-                                if alt_down.load(Ordering::SeqCst) || is_option_down() {
-                                    let mut last = last_insert.lock().unwrap();
-                                    if last.elapsed() >= Duration::from_millis(300) {
-                                        *last = Instant::now();
+                                if !is_i_down() {
+                                    i_armed.store(true, Ordering::SeqCst);
+                                }
+                                if i_armed.swap(false, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) || is_option_down() {
                                         cb("insert-last");
                                     }
                                 }
                             }
                             Key::KeyV => {
-                                if alt_down.load(Ordering::SeqCst) || is_option_down() {
-                                    let mut last = last_splice.lock().unwrap();
-                                    if last.elapsed() >= Duration::from_millis(300) {
-                                        *last = Instant::now();
+                                if !is_v_down() {
+                                    v_armed.store(true, Ordering::SeqCst);
+                                }
+                                if v_armed.swap(false, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) || is_option_down() {
                                         cb("quick-splice");
                                     }
                                 }
@@ -116,6 +161,18 @@ impl HotkeyListener for MacOsHotkeyListener {
                                 if !is_option_down() {
                                     alt_down.store(false, Ordering::SeqCst);
                                 }
+                            }
+                            Key::Space => {
+                                space_armed.store(true, Ordering::SeqCst);
+                            }
+                            Key::KeyP => {
+                                p_armed.store(true, Ordering::SeqCst);
+                            }
+                            Key::KeyI => {
+                                i_armed.store(true, Ordering::SeqCst);
+                            }
+                            Key::KeyV => {
+                                v_armed.store(true, Ordering::SeqCst);
                             }
                             _ => {}
                         }
