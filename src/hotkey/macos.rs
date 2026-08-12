@@ -48,11 +48,6 @@ impl HotkeyListener for MacOsHotkeyListener {
                                     cb("quick-splice");
                                 }
                             }
-                            Key::KeyC => {
-                                if alt_down.load(Ordering::SeqCst) {
-                                    cb("copy-splice");
-                                }
-                            }
                             _ => {}
                         }
                     }
