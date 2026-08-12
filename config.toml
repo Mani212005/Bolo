@@ -21,10 +21,10 @@ temperature = 0.0
 [vad]
 speech_threshold = 0.5              # Silero prob above this = speech
 auto_endpoint = false               # true = trailing silence auto-stops the recording
-endpoint_silence_ms = 1500          # trailing silence before auto-stop (when auto_endpoint)
+endpoint_silence_ms = 3000          # trailing silence before auto-stop (when auto_endpoint)
 min_speech_ms = 300                 # must hear this much speech before endpointing arms
 preroll_ms = 300                    # keep audio before speech onset (anti first-word-clip)
-max_utterance_ms = 300000           # hard safety cap (5 min)
+max_utterance_ms = 1800000          # hard safety cap (30 min)
 
 [daemon]
 notifications = true                # desktop notifications on state changes

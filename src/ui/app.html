@@ -461,7 +461,7 @@ function renderFeed() {
       try {
         const out = live ? await api("enhance", { method: "POST", body: e.text }) : { text: "Enhanced: " + e.text };
         navigator.clipboard.writeText(out.text);
-        toast("Enhanced & copied — Alt+I types it at your cursor");
+        toast("Enhanced & copied — Alt+I types it at your cursor, Cmd+V (Mac) or Ctrl+V pastes");
         refresh();
       } catch (err) { toast("Enhance failed: " + err.message, 4200); }
       ev.target.textContent = "✨ Enhance";

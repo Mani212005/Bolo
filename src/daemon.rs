@@ -398,7 +398,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         println!("[enhanced] {enhanced}");
                         crate::userdata::append_history("enhanced", &enhanced);
                         shared.lock().unwrap().last_text = Some(enhanced);
-                        notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Ctrl+V pastes");
+                        notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Cmd+V (Mac) or Ctrl+V pastes");
                     }
                     Err(e) => {
                         eprintln!("[enhance] failed: {e:#}");

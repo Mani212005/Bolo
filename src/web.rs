@@ -236,7 +236,7 @@ fn state(config_path: &PathBuf, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<V
         "model": doc.str_at(&["stt", "whisper", "model"], "small.en"),
         "sounds": doc.bool_at(&["daemon", "sounds"], true),
         "notifications": doc.bool_at(&["daemon", "notifications"], true),
-        "auto_endpoint": doc.bool_at(&["vad", "auto_endpoint"], true),
+        "auto_endpoint": doc.bool_at(&["vad", "auto_endpoint"], false),
         "method": doc.str_at(&["inject", "method"], "paste"),
         "max_len": doc.int_at(&["vad", "max_utterance_ms"], 300_000),
         "hotkeys": read_hotkeys(),
