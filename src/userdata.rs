@@ -77,8 +77,18 @@ pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s
 
 pub fn read_history(max: usize) -> Vec<serde_json::Value> {
     let text = std::fs::read_to_string(history_path()).unwrap_or_default();
-    let all: Vec<serde_json::Value> =
-        text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let all: Vec<serde_json::Value> = text
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let mut val: serde_json::Value = serde_json::from_str(l).ok()?;
+            if val.get("id").is_none() || val["id"].is_null() {
+                let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                val["id"] = serde_json::json!(format!("hist_{ts}_{i}"));
+            }
+            Some(val)
+        })
+        .collect();
     let skip = all.len().saturating_sub(max);
     all.into_iter().skip(skip).collect()
 }
@@ -88,15 +98,18 @@ pub fn delete_history_item(id: &str) -> bool {
     let mut found = false;
     let remaining: Vec<String> = text
         .lines()
-        .filter_map(|l| {
+        .enumerate()
+        .filter_map(|(i, l)| {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(l) {
-                if let Some(item_id) = val["id"].as_str() {
-                    if item_id == id {
-                        found = true;
-                        let audio_path = recordings_dir().join(format!("{id}.wav"));
-                        let _ = std::fs::remove_file(audio_path);
-                        return None;
-                    }
+                let item_id = val.get("id").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| {
+                    let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                    format!("hist_{ts}_{i}")
+                });
+                if item_id == id {
+                    found = true;
+                    let audio_path = recordings_dir().join(format!("{id}.wav"));
+                    let _ = std::fs::remove_file(audio_path);
+                    return None;
                 }
             }
             Some(l.to_string())

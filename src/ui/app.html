@@ -1038,16 +1038,17 @@
       const card = document.createElement("div");
       card.className = "card";
       
+      const itemId = item.id || ('hist_' + item.ts + '_' + index);
       const { dateStr, timeStr } = formatDate(item.ts);
       const isLong = (item.text || "").length > 180 || (item.text || "").includes("\n\n");
       const hasAudio = !!(item.audio_id || item.id);
       const audioId = item.audio_id || item.id;
       
       card.innerHTML = `
-        <div class="card-text ${isLong ? 'truncated' : ''}" id="text-${item.id}">${escapeHtml(item.text)}</div>
-        ${isLong ? `<button class="show-more-btn" data-id="${item.id}">Show more ∨</button>` : ''}
+        <div class="card-text ${isLong ? 'truncated' : ''}" id="text-${itemId}">${escapeHtml(item.text)}</div>
+        ${isLong ? `<button class="show-more-btn" data-id="${itemId}">Show more ∨</button>` : ''}
         
-        <div id="audio-container-${item.id}"></div>
+        <div id="audio-container-${itemId}"></div>
 
         <div class="card-divider"></div>
 
@@ -1071,7 +1072,7 @@
             <button class="action-btn" data-action="enhance" data-text="${escapeAttr(item.text)}">
               ✨ Enhance
             </button>
-            <button class="action-btn icon-only delete" data-action="delete" data-id="${item.id}" title="Delete transcription">
+            <button class="action-btn icon-only delete" data-action="delete" data-id="${itemId}" title="Delete transcription">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
           </div>
@@ -1082,7 +1083,7 @@
       const toggleBtn = card.querySelector(".show-more-btn");
       if (toggleBtn) {
         toggleBtn.onclick = () => {
-          const textEl = card.querySelector(`#text-${item.id}`);
+          const textEl = card.querySelector(`#text-${itemId}`);
           if (textEl.classList.contains("truncated")) {
             textEl.classList.remove("truncated");
             toggleBtn.textContent = "Show less ∧";
@@ -1097,7 +1098,7 @@
       const audioBtn = card.querySelector(".play-audio-btn");
       if (audioBtn) {
         audioBtn.onclick = () => {
-          const container = card.querySelector(`#audio-container-${item.id}`);
+          const container = card.querySelector(`#audio-container-${itemId}`);
           if (container.innerHTML) {
             container.innerHTML = "";
             audioBtn.classList.remove("playing");
