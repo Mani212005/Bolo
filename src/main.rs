@@ -128,6 +128,8 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
             println!("Hello Bolo!");
+            let cfg = Config::load(&config_path)?;
+            let _ = open_settings_app(cfg.ui.port);
             return Ok(());
         }
         _ => {}
@@ -213,17 +215,15 @@ fn main() -> anyhow::Result<()> {
 /// Open the settings app: make sure the daemon is up, then launch the UI in
 /// an app window (Chrome/Chromium) or the default browser.
 fn open_settings_app(port: u16) -> anyhow::Result<()> {
-    let daemon_up = std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok();
-    if !daemon_up {
-        let started = std::process::Command::new("systemctl")
+    if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_err() {
+        let managed = std::process::Command::new("systemctl")
             .args(["--user", "start", "bolo.service"])
             .status()
             .is_ok_and(|s| s.success());
-        if !started {
+        if !managed {
             let exe = std::env::current_exe()?;
             std::process::Command::new(exe).arg("daemon").spawn()?;
         }
-        // Give it a moment to bind the web port.
         for _ in 0..20 {
             if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok() {
                 break;
@@ -231,18 +231,50 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
+
+    // 1. Try native Cocoa bolo-ui popup first (sleek macOS native floating window)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let native_ui = parent.join("bolo-ui");
+            if native_ui.exists() {
+                let _ = std::process::Command::new(native_ui).spawn();
+                return Ok(());
+            }
+        }
+    }
+    if std::process::Command::new("bolo-ui").spawn().is_ok() {
+        return Ok(());
+    }
+
+    // 2. Fallback to app-mode or system browser
     let url = format!("http://127.0.0.1:{port}");
-    for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
-        if std::process::Command::new(browser)
-            .arg(format!("--app={url}"))
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("open")
+            .args(["-na", "Google Chrome", "--args", &format!("--app={url}")])
             .spawn()
             .is_ok()
         {
             return Ok(());
         }
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        return Ok(());
     }
-    std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
-    Ok(())
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
+            if std::process::Command::new(browser)
+                .arg(format!("--app={url}"))
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
+        Ok(())
+    }
 }
 
 /// Send one command to the running daemon and print its reply.
