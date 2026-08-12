@@ -32,7 +32,7 @@ type EventHandlerProc = unsafe extern "C" fn(
 
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
-    fn GetEventDispatcherTarget() -> EventTargetRef;
+    fn GetApplicationEventTarget() -> EventTargetRef;
     fn InstallEventHandler(
         target: EventTargetRef,
         handler: EventHandlerProc,
@@ -58,11 +58,15 @@ extern "C" {
         out_actual_size: *mut usize,
         out_data: *mut c_void,
     ) -> OSStatus;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
-    fn CFRunLoopRun();
+    fn ReceiveNextEvent(
+        in_num_types: u32,
+        in_list: *const EventTypeSpec,
+        in_timeout: f64,
+        in_pull_event: bool,
+        out_event: *mut EventRef,
+    ) -> OSStatus;
+    fn SendEventToEventTarget(in_event: EventRef, in_target: EventTargetRef) -> OSStatus;
+    fn ReleaseEvent(in_event: EventRef);
 }
 
 // FourCC constants for Carbon events
@@ -74,8 +78,8 @@ const FOURCC_BOLO: u32 = u32::from_be_bytes(*b"BOLO"); // signature
 const EVENT_HOTKEY_PRESSED: u32 = 1; // kEventHotKeyPressed
 
 // Carbon Modifier Keys
-const MOD_CONTROL: u32 = 0x1000; // controlKey
-const MOD_OPTION: u32 = 0x0800; // optionKey
+const MOD_CONTROL: u32 = 0x1000; // controlKey (4096)
+const MOD_OPTION: u32 = 0x0800; // optionKey (2048)
 
 // Carbon Keycodes
 const KEY_SPACE: u32 = 49;
@@ -112,15 +116,19 @@ unsafe extern "C" fn hotkey_event_handler(
     if status == 0 {
         match hkid.id {
             ID_TOGGLE => {
+                eprintln!("[macos-hotkey] Ctrl+Space received -> toggle");
                 callback("toggle");
             }
             ID_QUICK_SPLICE => {
+                eprintln!("[macos-hotkey] Option+V received -> quick-splice");
                 callback("quick-splice");
             }
             ID_PAUSE => {
+                eprintln!("[macos-hotkey] Option+P received -> pause");
                 callback("pause");
             }
             ID_INSERT_LAST => {
+                eprintln!("[macos-hotkey] Option+I received -> insert-last");
                 callback("insert-last");
             }
             _ => {}
@@ -143,17 +151,17 @@ impl HotkeyListener for MacOsHotkeyListener {
         let callback = Arc::new(callback);
         
         std::thread::spawn(move || {
-            let target = unsafe { GetEventDispatcherTarget() };
-            
-            let event_type = EventTypeSpec {
-                event_class: FOURCC_KEYB,
-                event_kind: EVENT_HOTKEY_PRESSED,
-            };
-            
-            let user_data = Box::into_raw(Box::new(callback.clone())) as *mut c_void;
-            let mut handler_ref: EventHandlerRef = std::ptr::null_mut();
-            
             unsafe {
+                let target = GetApplicationEventTarget();
+                
+                let event_type = EventTypeSpec {
+                    event_class: FOURCC_KEYB,
+                    event_kind: EVENT_HOTKEY_PRESSED,
+                };
+                
+                let user_data = Box::into_raw(Box::new(callback.clone())) as *mut c_void;
+                let mut handler_ref: EventHandlerRef = std::ptr::null_mut();
+                
                 InstallEventHandler(
                     target,
                     hotkey_event_handler,
@@ -207,10 +215,18 @@ impl HotkeyListener for MacOsHotkeyListener {
                     &mut ref_insert,
                 );
                 
-                eprintln!("[macos-hotkey] registered native Carbon hotkeys (Ctrl+Space, Opt+V, Opt+P, Opt+I)");
+                eprintln!("[macos-hotkey] Carbon hotkeys registered on ApplicationEventTarget");
                 
-                // Run CoreFoundation run loop to process OS hotkey events
-                CFRunLoopRun();
+                // Pump events continuously using ReceiveNextEvent
+                let mut event: EventRef = std::ptr::null_mut();
+                loop {
+                    let status = ReceiveNextEvent(0, std::ptr::null(), 1.0, true, &mut event);
+                    if status == 0 && !event.is_null() {
+                        SendEventToEventTarget(event, target);
+                        ReleaseEvent(event);
+                        event = std::ptr::null_mut();
+                    }
+                }
             }
         });
         
