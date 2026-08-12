@@ -644,6 +644,12 @@ fn handle_client(
                     "ok recording".to_string()
                 }
                 Phase::Recording => {
+                    // Debounce: ignore accidental rapid double-tap within 600ms of start
+                    if let Some(t0) = s.toggle_t0 {
+                        if t0.elapsed().as_millis() < 600 {
+                            return Ok(());
+                        }
+                    }
                     if let Some(tx) = s.control_tx.as_ref() {
                         let _ = tx.send(Control::ForceStop);
                     }

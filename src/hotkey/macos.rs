@@ -18,6 +18,10 @@ impl HotkeyListener for MacOsHotkeyListener {
         
         let ctrl_down = Arc::new(AtomicBool::new(false));
         let alt_down = Arc::new(AtomicBool::new(false));
+        let space_down = Arc::new(AtomicBool::new(false));
+        let v_down = Arc::new(AtomicBool::new(false));
+        let p_down = Arc::new(AtomicBool::new(false));
+        let i_down = Arc::new(AtomicBool::new(false));
         
         let cb = callback.clone();
         
@@ -29,23 +33,32 @@ impl HotkeyListener for MacOsHotkeyListener {
                             Key::ControlLeft | Key::ControlRight => ctrl_down.store(true, Ordering::SeqCst),
                             Key::Alt | Key::AltGr => alt_down.store(true, Ordering::SeqCst),
                             Key::Space => {
-                                if ctrl_down.load(Ordering::SeqCst) {
-                                    cb("toggle");
+                                // Transition from false -> true prevents OS key repeat from sending multiple toggles!
+                                if !space_down.swap(true, Ordering::SeqCst) {
+                                    if ctrl_down.load(Ordering::SeqCst) {
+                                        cb("toggle");
+                                    }
                                 }
                             }
                             Key::KeyP => {
-                                if alt_down.load(Ordering::SeqCst) {
-                                    cb("pause");
+                                if !p_down.swap(true, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) {
+                                        cb("pause");
+                                    }
                                 }
                             }
                             Key::KeyI => {
-                                if alt_down.load(Ordering::SeqCst) {
-                                    cb("insert-last");
+                                if !i_down.swap(true, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) {
+                                        cb("insert-last");
+                                    }
                                 }
                             }
                             Key::KeyV => {
-                                if alt_down.load(Ordering::SeqCst) {
-                                    cb("quick-splice");
+                                if !v_down.swap(true, Ordering::SeqCst) {
+                                    if alt_down.load(Ordering::SeqCst) {
+                                        cb("quick-splice");
+                                    }
                                 }
                             }
                             _ => {}
@@ -55,6 +68,10 @@ impl HotkeyListener for MacOsHotkeyListener {
                         match key {
                             Key::ControlLeft | Key::ControlRight => ctrl_down.store(false, Ordering::SeqCst),
                             Key::Alt | Key::AltGr => alt_down.store(false, Ordering::SeqCst),
+                            Key::Space => space_down.store(false, Ordering::SeqCst),
+                            Key::KeyP => p_down.store(false, Ordering::SeqCst),
+                            Key::KeyI => i_down.store(false, Ordering::SeqCst),
+                            Key::KeyV => v_down.store(false, Ordering::SeqCst),
                             _ => {}
                         }
                     }
