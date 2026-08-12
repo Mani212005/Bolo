@@ -45,19 +45,12 @@
     justify-content: space-between;
     margin-bottom: 20px;
     gap: 16px;
+    padding-left: 68px; /* Offset for native macOS traffic lights */
+    -webkit-app-region: drag;
   }
-  .window-dots {
-    display: flex;
-    gap: 8px;
+  .nav-tabs, .status-pill, input, button, select, textarea, .card, .bottom-bar {
+    -webkit-app-region: no-drag;
   }
-  .dot-ctrl {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-  }
-  .dot-close { background: #ff5f56; }
-  .dot-min { background: #ffbd2e; }
-  .dot-max { background: #27c93f; }
 
   .nav-tabs {
     display: flex;
@@ -634,12 +627,6 @@
 
   <!-- Header -->
   <header class="header">
-    <div class="window-dots">
-      <div class="dot-ctrl dot-close"></div>
-      <div class="dot-ctrl dot-min"></div>
-      <div class="dot-ctrl dot-max"></div>
-    </div>
-
     <!-- Navigation Tabs -->
     <nav class="nav-tabs">
       <button class="nav-tab active" data-tab="history">Transcriptions</button>
@@ -1117,7 +1104,7 @@
           } else {
             container.innerHTML = `
               <div class="audio-player-box">
-                <audio controls autoplay src="/api/audio?id=${encodeURIComponent(audioId)}"></audio>
+                <audio controls autoplay src="/api/audio?id=${encodeURIComponent(audioId)}" onended="this.closest('.card').querySelector('.play-audio-btn').classList.remove('playing')" onerror="toast('Audio recording unavailable for this older entry'); this.closest('.audio-player-box').remove();"></audio>
               </div>
             `;
             audioBtn.classList.add("playing");

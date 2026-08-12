@@ -61,6 +61,8 @@ fn main() -> anyhow::Result<()> {
             if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
                 let _ = client("quit");
             }
+            // Terminate any running native bolo-ui popup window so it dies down
+            let _ = std::process::Command::new("pkill").arg("-f").arg("bolo-ui").status();
             println!("Thank you for using Bolo 😊");
             return Ok(());
         }
