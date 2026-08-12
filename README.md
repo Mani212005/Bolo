@@ -1,90 +1,160 @@
-# Bolo
+# Bolo 🎙️
 
-Press a key, talk, and the text appears at your cursor — in any app.
-Dictation for Linux with cloud (Groq) or fully-local, private transcription.
+**Private, lightning-fast voice-to-text dictation and clipboard splicing for macOS & Linux.**
 
-## Install
+Press a key, speak naturally, and high-accuracy transcribed text appears directly at your cursor in any application. Supports fully local, private models (whisper.cpp / faster-whisper) and blazing fast cloud transcription (Groq Whisper-Large in ~0.3s).
 
-```sh
-git clone <this-repo> && cd Bolo && ./install.sh
+---
+
+## ✨ Features
+
+- ⚡ **Global Push-to-Talk / Toggle**: Press `Ctrl + Space` anywhere to start speaking. Press again to finish — transcribed text instantly pastes at your cursor and copies to your clipboard.
+- ✂️ **Mid-Dictation Clipboard Splicing (`Option + V` / `Alt + V`)**: Copy text, links, or code mid-speech; press `Option + V` and keep talking without pausing — Bolo seamlessly stitches your speech, clipboard text, and subsequent voice input into a single chronological message.
+- 🔊 **Native History & Audio Playback Dashboard (`bolo`)**: A native macOS Cocoa popup (and Linux dashboard) displaying all your past transcriptions with timestamps, duration, search filtering, and **"Hear Voice"** audio playback of your original voice captures.
+- 🔒 **100% Local & Private Option**: Run speech recognition completely on-device with zero internet connection using local Whisper models.
+- 🪄 **One-Click AI Enhancement**: Transform messy dictation, speech-to-text rambles, or meeting notes into structured LLM prompts or professional summaries via LLaMA-3.3-70B.
+- 🎯 **Domain Vocabulary & Custom Prompts**: Add custom terms, tech jargon, and acronyms in `~/.config/bolo/vocabulary.txt` for perfect phonetic spelling.
+- 🎧 **Audio File Drag & Drop**: Drop any audio or voice memo file directly into the Bolo dashboard for instant transcription.
+
+---
+
+## ⌨️ Global Shortcuts
+
+| Shortcut (macOS) | Shortcut (Linux) | Action |
+|---|---|---|
+| `Ctrl + Space` | `Ctrl + Space` | **Start / Stop Dictation** — Pastes text at cursor and copies to clipboard |
+| `Option + V` (`⌥V`) | `Alt + V` | **Quick-Splice Clipboard** — Injects clipboard text mid-speech without stopping audio |
+| `Option + P` (`⌥P`) | `Alt + P` | **Pause / Resume** — Holds recording session |
+| `Option + I` (`⌥I`) | `Alt + I` | **Re-Type Last** — Re-types the last dictation at your current cursor position |
+| — | Notification Button | **Enhance** — Rewrites the dictation with AI and puts it on your clipboard |
+
+---
+
+## 🚀 Installation & Quickstart
+
+### macOS (Apple Silicon & Intel)
+
+1. **Clone and Build**:
+   ```bash
+   git clone https://github.com/Mani212005/Bolo.git
+   cd Bolo
+   cargo build --release
+   swiftc -O src/ui/BoloApp.swift -o target/release/bolo-ui -framework Cocoa -framework WebKit
+   cp target/release/bolo target/release/bolo-ui ~/.cargo/bin/
+   ```
+
+2. **Launch**:
+   ```bash
+   bolo
+   ```
+   *Typing `bolo` ensures the background engine is running and opens the native popup dashboard. Type `bolo exit` to cleanly shut down.*
+
+3. **Permissions**:
+   Grant the following permissions in **System Settings > Privacy & Security**:
+   - **Microphone**: For audio capture.
+   - **Accessibility**: To paste transcribed text directly at your cursor (`Cmd+V`).
+   - **Input Monitoring**: For background push-to-talk hotkeys (`Ctrl+Space`).
+
+---
+
+### Linux (Wayland / X11 / GNOME / KDE / Sway / Hyprland)
+
+1. **Run the One-Line Installer**:
+   ```bash
+   git clone https://github.com/Mani212005/Bolo.git
+   cd Bolo
+   ./install.sh
+   ```
+
+2. **How It Works on Linux**:
+   - Text injection utilizes **XDG Desktop Portals** (`org.freedesktop.portal.RemoteDesktop`) or clipboard paste chords (`wl-copy` / `xclip`).
+   - Hotkeys are mapped via desktop compositor shortcuts to `bolo toggle`, `bolo pause`, etc.
+   - Access the dashboard at `http://127.0.0.1:4525` or via `bolo ui`.
+
+---
+
+## 🛠️ CLI Commands
+
+```bash
+bolo                     # Start daemon (if not running) & open native popup dashboard
+bolo exit                # Cleanly terminate daemon and popup window
+bolo daemon              # Run the background engine in foreground (for logs/debugging)
+bolo toggle              # Toggle dictation recording start / stop
+bolo quick-splice        # Splice clipboard into ongoing recording
+bolo pause               # Pause or resume ongoing recording
+bolo insert-last         # Re-type the most recent transcript at cursor
+bolo enhance             # Enhance the last transcript with AI
+bolo history             # View history directly in terminal
+bolo transcribe <file>   # Transcribe a local WAV file
 ```
 
-That's it. The installer sets up the Rust toolchain and system packages
-(asks for sudo only if needed; falls back to a no-root install), builds the
-binary, puts `bolo` on your PATH, registers the GNOME hotkeys, creates your
-config, and starts the daemon as a login service.
+---
 
-**Requirements:** Linux with GNOME on Wayland (Ubuntu 22.04+ tested), or macOS (10.15+), a
-microphone, and optionally a [Groq API key](https://console.groq.com) for the
-fastest transcription. 
+## ⚙️ Configuration
 
-### macOS Permissions
+Bolo stores configuration files in standard `~/.config/bolo/`:
 
-Bolo requires specific system permissions on macOS to function properly:
-1. **Accessibility**: To inject text via simulated keystrokes (e.g. `Cmd+V`).
-2. **Input Monitoring**: To listen for global push-to-talk hotkeys (e.g. `Ctrl+Space`) while in the background.
-3. **Microphone**: To capture audio for dictation.
+- **`~/.config/bolo/config.toml`**: Speech engine, models, hotkeys, and VAD parameters.
+  ```toml
+  [stt]
+  provider = "faster-whisper" # "faster-whisper", "whisper", or "groq"
 
-When you first run the daemon on macOS, the system should prompt you to grant these permissions in **System Settings > Privacy & Security**.
+  [stt.whisper]
+  model = "small.en"          # "tiny.en", "base.en", "small.en", "large-v3-turbo"
 
-## Use
+  [groq]
+  model = "whisper-large-v3"
+  language = "en"
+  temperature = 0.0
 
-| Key | Action |
-|---|---|
-| `Ctrl+Space` | Start dictating / finish — the text pastes at your cursor and lands on the clipboard |
-| `Alt+P` | Pause / resume; anything you copy while paused gets spliced into the transcript |
-| `Alt+I` | While paused: insert the clipboard · when idle: re-type the last transcript at the cursor |
-| *Enhance* button on the result notification | Rewrite the dictation into a clean LLM prompt (via Groq) |
+  [vad]
+  auto_endpoint = false       # false = manual push-to-talk toggle
+  max_utterance_ms = 1800000  # 30-minute maximum recording cap
+  ```
 
-The first dictation after the daemon starts shows a one-time GNOME
-permission dialog — accept it so Bolo may type for you.
+- **`~/.config/bolo/vocabulary.txt`**: Custom word prompts (names, brand terms, acronyms).
+- **`~/.config/bolo/enhance_prompt.txt`**: Prompt template for the AI Enhance feature.
+- **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` for cloud transcription and LLaMA enhancement.
 
-## Settings app
+---
 
-Open **Bolo** from your app grid (or run `bolo settings`). A glassmorphism
-settings app served locally by the daemon: choose the speech engine and model,
-pick your own hotkeys, toggle behavior, edit vocabulary and the enhance
-prompt, run a 3-second mic test, and use the **scratchpad** — every dictation
-lands in a history feed with per-entry Copy / Enhance / append-to-pad.
-Prefer files? Everything is also plain text:
-
-- `~/.config/bolo/config.toml` — engine, models, hotkey behavior, insertion method
-- `~/.config/bolo/vocabulary.txt` — words the recognizer should spell correctly (one per line, applies instantly)
-- `~/.config/bolo/enhance_prompt.txt` — your own template for the Enhance rewrite (applies instantly)
-- `GROQ_API_KEY` lives in `~/.env` — environment only, never in config, never committed
-
-## Local & private transcription
-
-Set `provider = "faster-whisper"` (or pick it in `bolo settings`) and audio
-never leaves your machine. Measured on a 12-thread laptop CPU, transcribing
-11s of speech: `base.en` 0.7s · `distil-small.en` 1.5s · `small.en` 1.9s
-(Groq cloud: ~0.5s). Models download automatically on first use, or ahead of
-time with `bolo model download <name>`.
-
-## CLI
+## 🧩 Architecture
 
 ```
-bolo daemon              run the daemon in the foreground
-bolo toggle|pause        what the hotkeys call
-bolo insert-last         re-type the last transcript
-bolo enhance             enhance the last transcript
-bolo settings            open the settings app (alias: bolo ui)
-bolo status|quit         daemon control
-bolo transcribe <wav>    transcribe a 16kHz mono WAV (benchmarking)
-bolo model download [m]  pre-fetch a local model
+┌─────────────────────────────────────────────────────────────┐
+│                      macOS / Linux Desktop                  │
+│   (Any App: VS Code, Slack, Browser, Terminal, Notes)       │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+   [ Native Hotkey Engine ]              [ Native Popup UI ]
+    • macOS: CGEventTap / Carbon          • Swift Cocoa + WebKit (Mac)
+    • Linux: Desktop Portal Keybind       • Web Dashboard (Linux)
+            │                                     │
+            └──────────────────┬──────────────────┘
+                               ▼
+                    [ Bolo Core Daemon ]
+                 • Audio Stream (16kHz cpal)
+                 • Silero VAD (Speech Detection)
+                 • Mid-Speech Splicing Engine
+                 • Wave Capture Storage
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+   [ Local Private STT ]                 [ Cloud Fast STT ]
+    • faster-whisper (CTranslate2)        • Groq Whisper-Large-v3
+    • whisper.cpp (Metal/CPU)             • ~300ms ultra-low latency
+            │                                     │
+            └──────────────────┬──────────────────┘
+                               ▼
+                  [ Injector & Clipboard ]
+                • Native macOS Quartz Keystrokes
+                • Linux Wayland Portal / X11
 ```
 
-Daemon logs: `journalctl --user -u bolo` (or `/tmp/bolo-daemon.log` when
-started by hand).
+---
 
-## Troubleshooting
+## 📜 License
 
-- **Nothing typed, no error** — your cursor wasn't in a text field when the
-  text arrived; the transcript is always on the clipboard too (`Ctrl+V`), or
-  press `Alt+I` to re-type it wherever your cursor is now.
-- **Mic records silence after long idle** (some Intel sof-hda laptops):
-  PulseAudio's idle-suspend wedges the mic. Fix: add
-  `unload-module module-suspend-on-idle` to `~/.config/pulse/default.pa`
-  and restart PulseAudio.
-- **Terminals** paste with `Ctrl+Shift+V` — Bolo's synthesized `Ctrl+V`
-  won't paste there; use the clipboard.
+MIT License. Designed with speed, privacy, and ergonomics in mind.
