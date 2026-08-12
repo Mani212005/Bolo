@@ -54,7 +54,7 @@ fn ensure_venv() -> anyhow::Result<PathBuf> {
 impl FasterWhisperStt {
     pub fn new(model: &str) -> anyhow::Result<Self> {
         ensure_venv()?; // fail fast at startup, before any recording
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let threads = std::cmp::min(4, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
         let inner = Arc::new(Inner {
             sidecar: Mutex::new(None),
             model: model.to_string(),

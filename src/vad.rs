@@ -8,7 +8,7 @@ use voice_activity_detector::VoiceActivityDetector;
 const CHUNK_MS: u64 = (VAD_CHUNK_SIZE as u64 * 1000) / PIPELINE_SAMPLE_RATE as u64;
 const TRACE_EVERY_CHUNKS: u64 = 10;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     Silence,
     Force,
@@ -16,17 +16,17 @@ pub enum StopReason {
     /// Segment ended by Alt+P; the dictation session stays open.
     Pause,
     /// Segment cut mid-speech to splice clipboard without dropping audio stream.
-    Splice,
+    Splice(String),
 }
 
 impl StopReason {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             StopReason::Silence => "silence",
             StopReason::Force => "force",
             StopReason::MaxCap => "maxcap",
             StopReason::Pause => "pause",
-            StopReason::Splice => "splice",
+            StopReason::Splice(_) => "splice",
         }
     }
 }
@@ -45,7 +45,7 @@ pub struct Utterance {
 pub enum Control {
     ForceStop,
     Pause,
-    CutSegment,
+    CutSegment(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +142,8 @@ pub fn run_endpointer(
                     Ok(Control::Pause) => {
                         return Ok(finish(StopReason::Pause, native_samples, preroll, utterance, speech_ms, total_ms));
                     }
-                    Ok(Control::CutSegment) => {
-                        return Ok(finish(StopReason::Splice, native_samples, preroll, utterance, speech_ms, total_ms));
+                    Ok(Control::CutSegment(text)) => {
+                        return Ok(finish(StopReason::Splice(text), native_samples, preroll, utterance, speech_ms, total_ms));
                     }
                     Err(_) => {}
                 }

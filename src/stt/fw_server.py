@@ -12,7 +12,9 @@ import time
 from faster_whisper import WhisperModel
 
 model_name = sys.argv[1]
-threads = int(sys.argv[2])
+raw_threads = int(sys.argv[2])
+# macOS Apple Silicon performs best with 4 compute threads to avoid thread contention across E/P cores
+threads = min(4, max(1, raw_threads))
 model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=threads)
 print("ready", file=sys.stderr, flush=True)
 

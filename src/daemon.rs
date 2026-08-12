@@ -304,12 +304,19 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
 
                     match result {
                         Ok(utt) => {
-                            if utt.reason == StopReason::Splice {
-                                // Spoken audio before splice point is sent for background transcription
+                            if let StopReason::Splice(ref clip_text) = utt.reason {
+                                let text_to_insert = clip_text.clone();
+                                // 1. Spoken audio before splice point is sent for background transcription
                                 if pipeline_tx.send(PipelineMsg::Segment(utt)).is_err() {
                                     break;
                                 }
-                                // Seamlessly continue audio capture without dropping the stream!
+                                // 2. Insert the clipboard text right after the preceding spoken audio
+                                if !text_to_insert.trim().is_empty() {
+                                    if pipeline_tx.send(PipelineMsg::Insert(text_to_insert)).is_err() {
+                                        break;
+                                    }
+                                }
+                                // 3. Seamlessly continue audio capture without dropping the stream!
                                 continue;
                             }
 
@@ -722,16 +729,14 @@ fn handle_client(
             }
         }
         "quick-splice" => {
-            let mut s = shared.lock().unwrap();
+            let s = shared.lock().unwrap();
             match s.phase {
                 Phase::Recording => {
                     if let Some(text) = read_clipboard() {
                         let n = text.chars().count();
                         if let Some(tx) = s.control_tx.as_ref() {
-                            let _ = tx.send(Control::CutSegment);
+                            let _ = tx.send(Control::CutSegment(text));
                         }
-                        drop(s);
-                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
                         notify(cfg, &format!("Spliced {n} chars from clipboard"));
                         "ok spliced".to_string()
                     } else {
@@ -741,7 +746,6 @@ fn handle_client(
                 Phase::Paused => {
                     if let Some(text) = read_clipboard() {
                         let n = text.chars().count();
-                        s.clip_snapshot = Some(text.clone());
                         drop(s);
                         pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
                         notify(cfg, &format!("Inserted {n} chars from clipboard"));
@@ -761,10 +765,8 @@ fn handle_client(
                     if let Some(text) = read_clipboard() {
                         let n = text.chars().count();
                         if let Some(tx) = s.control_tx.as_ref() {
-                            let _ = tx.send(Control::CutSegment);
+                            let _ = tx.send(Control::CutSegment(text));
                         }
-                        drop(s);
-                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
                         notify(cfg, &format!("Copied & spliced {n} chars"));
                         "ok copied and spliced".to_string()
                     } else {
