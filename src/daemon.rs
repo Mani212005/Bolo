@@ -89,9 +89,9 @@ impl Phase {
 pub(crate) struct Shared {
     pub(crate) phase: Phase,
     /// Control channel into the active endpointer, while recording.
-    control_tx: Option<Sender<Control>>,
+    pub(crate) control_tx: Option<Sender<Control>>,
     /// When the starting toggle arrived, for the toggle→capture metric.
-    toggle_t0: Option<Instant>,
+    pub(crate) toggle_t0: Option<Instant>,
     /// Clipboard content at pause time; a change by resume time means the
     /// user copied something to splice into the transcript.
     clip_snapshot: Option<String>,
@@ -99,7 +99,7 @@ pub(crate) struct Shared {
     pub(crate) last_text: Option<String>,
 }
 
-enum PipelineMsg {
+pub(crate) enum PipelineMsg {
     Segment(Utterance),
     Insert(String),
     Finalize,
@@ -113,7 +113,11 @@ enum PipelineMsg {
 /// (transcribing in the background while the user is paused), or text the
 /// user copied during a pause.
 enum Piece {
-    Spoken(tokio::task::JoinHandle<anyhow::Result<crate::stt::Transcript>>),
+    Spoken {
+        handle: tokio::task::JoinHandle<anyhow::Result<crate::stt::Transcript>>,
+        audio_id: String,
+        duration_s: f64,
+    },
     Inserted(String),
 }
 
@@ -346,6 +350,8 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     {
         let shared = Arc::clone(&shared);
         let cfg = cfg.clone();
+        let start_tx = start_tx.clone();
+        let pipeline_tx = pipeline_tx.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
@@ -376,11 +382,14 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         }
     }
 
-    // Settings app: local web UI served from inside the daemon.
+    // Settings & History dashboard: local web UI served from inside the daemon.
     {
         let shared = Arc::clone(&shared);
         let cfg = cfg.clone();
-        std::thread::spawn(move || crate::web::serve(config_path, shared, cfg));
+        let start_tx = start_tx.clone();
+        let pipeline_tx = pipeline_tx.clone();
+        let stt = Arc::clone(&stt);
+        std::thread::spawn(move || crate::web::serve(config_path, shared, cfg, start_tx, pipeline_tx, stt));
     }
 
     // Pipeline loop: assemble pieces per session; on finalize, await the
@@ -401,17 +410,27 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     utt.speech_ms
                 );
                 if utt.speech_ms > 0 {
+                    let duration_s = utt.speech_ms as f64 / 1000.0;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let audio_id = format!("rec_{now_ms}");
                     match encode_wav(&utt.samples_16k) {
                         Ok(wav) => {
+                            let _ = crate::userdata::save_recording_wav(&audio_id, &wav);
                             eprintln!(
-                                "[wav]     mono=true sample_rate={} bytes={} path=/tmp/bolo_capture.wav",
+                                "[wav]     mono=true sample_rate={} bytes={} audio_id={}",
                                 PIPELINE_SAMPLE_RATE,
-                                wav.len()
+                                wav.len(),
+                                audio_id
                             );
                             let stt = Arc::clone(&stt);
-                            pieces.push(Piece::Spoken(
-                                runtime.spawn(async move { stt.transcribe(wav).await }),
-                            ));
+                            pieces.push(Piece::Spoken {
+                                handle: runtime.spawn(async move { stt.transcribe(wav).await }),
+                                audio_id,
+                                duration_s,
+                            });
                         }
                         Err(e) => eprintln!("[daemon] wav encode failed: {e:#}"),
                     }
@@ -458,7 +477,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 match outcome {
                     Ok(enhanced) => {
                         println!("[enhanced] {enhanced}");
-                        crate::userdata::append_history("enhanced", &enhanced);
+                        crate::userdata::append_history("enhanced", &enhanced, None, None);
                         shared.lock().unwrap().last_text = Some(enhanced);
                         notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Cmd+V (Mac) or Ctrl+V pastes");
                     }
@@ -528,16 +547,20 @@ fn finalize(
     }
     // notify-rust's blocking show() cannot run inside block_on (it spins up
     // its own runtime), so the async block only returns what to say.
-    let outcome: anyhow::Result<Option<(&'static str, String)>> = runtime.block_on(async {
+    let outcome: anyhow::Result<Option<(&'static str, String, Option<String>, f64)>> = runtime.block_on(async {
         let mut texts: Vec<String> = Vec::new();
+        let mut last_audio_id: Option<String> = None;
+        let mut total_duration_s = 0.0;
         for piece in pieces.drain(..) {
             match piece {
-                Piece::Spoken(handle) => {
+                Piece::Spoken { handle, audio_id, duration_s } => {
                     let transcript = handle.await.context("transcription task panicked")??;
                     let text = transcript.text.trim().to_string();
                     if !text.is_empty() {
                         let enriched = apply_voice_clipboard_triggers(&text);
                         texts.push(enriched);
+                        last_audio_id = Some(audio_id);
+                        total_duration_s += duration_s;
                     }
                 }
                 Piece::Inserted(text) => texts.push(text.trim().to_string()),
@@ -568,21 +591,21 @@ fn finalize(
             t_inject.elapsed().as_millis(),
             t_end.elapsed().as_millis()
         );
-        Ok(Some((used, text)))
+        Ok(Some((used, text, last_audio_id, total_duration_s)))
     });
     match outcome {
         Ok(None) => {
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
-        Ok(Some((used, text))) => {
+        Ok(Some((used, text, audio_id, duration_s))) => {
             let head = match used {
                 "paste" => "Pasted + on clipboard",
                 "portal" => "Typed + copied — Ctrl+V pastes it elsewhere",
                 _ => "On clipboard — paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
-            crate::userdata::append_history("dictation", &text);
+            crate::userdata::append_history("dictation", &text, audio_id.as_deref(), Some(duration_s));
             shared.lock().unwrap().last_text = Some(text);
         }
         Err(e) => {
