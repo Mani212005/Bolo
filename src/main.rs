@@ -104,7 +104,29 @@ fn main() -> anyhow::Result<()> {
             // Explicit interactive console recording mode
         }
         None => {
-            // Default `bolo` command: greet the user
+            // Default `bolo` command: ensure background daemon is up, then greet
+            let socket = daemon::socket_path();
+            let daemon_up = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            if !daemon_up {
+                let exe = std::env::current_exe()?;
+                let log_dir = userdata::config_dir();
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_path = log_dir.join("bolo-daemon.log");
+                let log_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .unwrap_or_else(|_| std::fs::File::create("/tmp/bolo-daemon.log").unwrap());
+                let err_file = log_file.try_clone().unwrap();
+
+                let _ = std::process::Command::new(exe)
+                    .arg("daemon")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(log_file)
+                    .stderr(err_file)
+                    .spawn();
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
             println!("Hello Bolo!");
             return Ok(());
         }
