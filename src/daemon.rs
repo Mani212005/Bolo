@@ -443,7 +443,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         &format!("Max length ({}s) reached — transcribing", cfg.vad.max_utterance_ms / 1000),
                     );
                 }
-                if utt.reason != StopReason::Pause {
+                if utt.reason != StopReason::Pause && !matches!(utt.reason, StopReason::Splice(_)) {
                     finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
                 }
             }
