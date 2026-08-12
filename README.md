@@ -30,46 +30,30 @@ Press a key, speak naturally, and high-accuracy transcribed text appears directl
 
 ---
 
-## 🚀 Installation & Quickstart
+## 🚀 Installation & Quickstart (macOS & Linux)
 
-### macOS (Apple Silicon & Intel)
+One command installs everything, compiles the native binaries, and sets up your environment:
 
-1. **Clone and Build**:
-   ```bash
-   git clone https://github.com/Mani212005/Bolo.git
-   cd Bolo
-   cargo build --release
-   swiftc -O src/ui/BoloApp.swift -o target/release/bolo-ui -framework Cocoa -framework WebKit
-   cp target/release/bolo target/release/bolo-ui ~/.cargo/bin/
-   ```
+```bash
+git clone https://github.com/Mani212005/Bolo.git
+cd Bolo
+./install.sh
+```
 
-2. **Launch**:
-   ```bash
-   bolo
-   ```
-   *Typing `bolo` ensures the background engine is running and opens the native popup dashboard. Type `bolo exit` to cleanly shut down.*
+### 1. Launch
+```bash
+bolo
+```
+*Typing `bolo` ensures the background daemon is running and opens the native popup dashboard. Type `bolo exit` anytime to cleanly shut down.*
 
-3. **Permissions**:
-   Grant the following permissions in **System Settings > Privacy & Security**:
-   - **Microphone**: For audio capture.
-   - **Accessibility**: To paste transcribed text directly at your cursor (`Cmd+V`).
-   - **Input Monitoring**: For background push-to-talk hotkeys (`Ctrl+Space`).
+### 2. macOS Permissions (One-Time Setup)
+Grant the following permissions in **System Settings > Privacy & Security**:
+- **Microphone**: For voice capture.
+- **Accessibility**: To paste transcribed text directly at your cursor (`Cmd+V`).
+- **Input Monitoring**: For global background push-to-talk hotkeys (`Ctrl+Space`).
 
----
-
-### Linux (Wayland / X11 / GNOME / KDE / Sway / Hyprland)
-
-1. **Run the One-Line Installer**:
-   ```bash
-   git clone https://github.com/Mani212005/Bolo.git
-   cd Bolo
-   ./install.sh
-   ```
-
-2. **How It Works on Linux**:
-   - Text injection utilizes **XDG Desktop Portals** (`org.freedesktop.portal.RemoteDesktop`) or clipboard paste chords (`wl-copy` / `xclip`).
-   - Hotkeys are mapped via desktop compositor shortcuts to `bolo toggle`, `bolo pause`, etc.
-   - Access the dashboard at `http://127.0.0.1:4525` or via `bolo ui`.
+### 3. Linux Integration
+On Linux, `install.sh` automatically configures your desktop service, GNOME hotkeys, and XDG Desktop Portals for Wayland / X11. You can access the dashboard at `http://127.0.0.1:4525` or via `bolo`.
 
 ---
 

@@ -1,88 +1,105 @@
 #!/usr/bin/env bash
-# Bolo one-command installer: clone the repo, run this, dictate.
-#   git clone <repo> && cd Bolo && ./install.sh
+# Bolo one-command installer for macOS & Linux: clone the repo, run this, dictate.
+#   git clone https://github.com/Mani212005/Bolo.git && cd Bolo && ./install.sh
 # Idempotent — safe to re-run after `git pull` to update.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/.local/bin"
 CONF_DIR="$HOME/.config/bolo"
+OS="$(uname -s)"
+
+# Determine preferred install binary directory
+if [ -d "$HOME/.cargo/bin" ]; then
+    BIN_DIR="$HOME/.cargo/bin"
+else
+    BIN_DIR="$HOME/.local/bin"
+fi
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*"; exit 1; }
 
-[ "$(uname -s)" = "Linux" ] || die "Bolo currently supports Linux (GNOME/Wayland). macOS support is planned — the audio/transcription core is portable, but text injection and hotkeys need a macOS backend."
+say "Detected OS: $OS ($(uname -m))"
 
-# ---------------------------------------------------------------- rust
+# ---------------------------------------------------------------- rust toolchain
 if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
     say "Installing Rust via rustup (one-time)…"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 fi
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$BIN_DIR:$PATH"
 
-# ------------------------------------------------------- build/runtime deps
-# Needs: C toolchain + cmake (whisper.cpp), ALSA headers (cpal),
-# libclang (bindgen), wl-clipboard + xclip (paste), pulseaudio utils (chimes).
-need_pkgs=()
-command -v cc >/dev/null 2>&1 || need_pkgs+=(build-essential)
-command -v cmake >/dev/null 2>&1 || need_pkgs+=(cmake)
-command -v pkg-config >/dev/null 2>&1 || need_pkgs+=(pkg-config)
-pkg-config --exists alsa 2>/dev/null || need_pkgs+=(libasound2-dev)
-ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 \
-    || ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1 \
-    || [ -n "${LIBCLANG_PATH:-}" ] || need_pkgs+=(libclang-dev)
-command -v wl-copy >/dev/null 2>&1 || need_pkgs+=(wl-clipboard)
-command -v xclip >/dev/null 2>&1 || need_pkgs+=(xclip)
-command -v paplay >/dev/null 2>&1 || need_pkgs+=(pulseaudio-utils)
+# ------------------------------------------------------- platform dependencies
+if [ "$OS" = "Linux" ]; then
+    need_pkgs=()
+    command -v cc >/dev/null 2>&1 || need_pkgs+=(build-essential)
+    command -v cmake >/dev/null 2>&1 || need_pkgs+=(cmake)
+    command -v pkg-config >/dev/null 2>&1 || need_pkgs+=(pkg-config)
+    pkg-config --exists alsa 2>/dev/null || need_pkgs+=(libasound2-dev)
+    ls /usr/lib/llvm-*/lib/libclang*.so* >/dev/null 2>&1 \
+        || ls /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1 \
+        || [ -n "${LIBCLANG_PATH:-}" ] || need_pkgs+=(libclang-dev)
+    command -v wl-copy >/dev/null 2>&1 || need_pkgs+=(wl-clipboard)
+    command -v xclip >/dev/null 2>&1 || need_pkgs+=(xclip)
+    command -v paplay >/dev/null 2>&1 || need_pkgs+=(pulseaudio-utils)
 
-local_dev_shim() {
-    # No sudo: extract the dev packages locally and point cargo at them.
-    say "No sudo — extracting ALSA/libclang locally under ~/.local (no root needed)…"
-    local tmp; tmp="$(mktemp -d)"
-    ( cd "$tmp" && apt-get download libasound2-dev libclang1-14 libclang-common-14-dev )
-    mkdir -p "$HOME/.local/alsa-dev" "$HOME/.local/clang-dev"
-    for deb in "$tmp"/libasound2-dev_*.deb; do dpkg -x "$deb" "$HOME/.local/alsa-dev"; done
-    for deb in "$tmp"/libclang*_*.deb; do dpkg -x "$deb" "$HOME/.local/clang-dev"; done
-    local pcdir="$HOME/.local/alsa-dev/usr/lib/x86_64-linux-gnu/pkgconfig"
-    sed -i "s|^prefix=.*|prefix=$HOME/.local/alsa-dev/usr|" "$pcdir/alsa.pc"
-    ln -sf /lib/x86_64-linux-gnu/libasound.so.2 \
-        "$HOME/.local/alsa-dev/usr/lib/x86_64-linux-gnu/libasound.so"
-    mkdir -p "$REPO/.cargo"
-    cat > "$REPO/.cargo/config.toml" <<EOF
+    local_dev_shim() {
+        say "No sudo — extracting ALSA/libclang locally under ~/.local (no root needed)…"
+        local tmp; tmp="$(mktemp -d)"
+        ( cd "$tmp" && apt-get download libasound2-dev libclang1-14 libclang-common-14-dev )
+        mkdir -p "$HOME/.local/alsa-dev" "$HOME/.local/clang-dev"
+        for deb in "$tmp"/libasound2-dev_*.deb; do dpkg -x "$deb" "$HOME/.local/alsa-dev"; done
+        for deb in "$tmp"/libclang*_*.deb; do dpkg -x "$deb" "$HOME/.local/clang-dev"; done
+        local pcdir="$HOME/.local/alsa-dev/usr/lib/x86_64-linux-gnu/pkgconfig"
+        sed -i "s|^prefix=.*|prefix=$HOME/.local/alsa-dev/usr|" "$pcdir/alsa.pc"
+        ln -sf /lib/x86_64-linux-gnu/libasound.so.2 \
+            "$HOME/.local/alsa-dev/usr/lib/x86_64-linux-gnu/libasound.so"
+        mkdir -p "$REPO/.cargo"
+        cat > "$REPO/.cargo/config.toml" <<EOF
 # Generated by install.sh: local dev-package shims (no sudo available).
 [env]
 PKG_CONFIG_PATH = "$pcdir"
 LIBCLANG_PATH = "$HOME/.local/clang-dev/usr/lib/llvm-14/lib"
 EOF
-    rm -rf "$tmp"
-}
+        rm -rf "$tmp"
+    }
 
-if [ "${#need_pkgs[@]}" -gt 0 ]; then
-    say "Missing system packages: ${need_pkgs[*]}"
-    if sudo -n true 2>/dev/null || { [ -t 0 ] && sudo -v; }; then
-        sudo apt-get install -y "${need_pkgs[@]}"
-    else
-        local_dev_shim
+    if [ "${#need_pkgs[@]}" -gt 0 ]; then
+        say "Missing Linux system packages: ${need_pkgs[*]}"
+        if sudo -n true 2>/dev/null || { [ -t 0 ] && sudo -v; }; then
+            sudo apt-get update -qq && sudo apt-get install -y "${need_pkgs[@]}"
+        else
+            local_dev_shim
+        fi
     fi
+
+elif [ "$OS" = "Darwin" ]; then
+    if ! command -v swiftc >/dev/null 2>&1; then
+        say "Installing macOS Command Line Tools (for swiftc)…"
+        xcode-select --install || true
+    fi
+else
+    die "Unsupported operating system: $OS. Bolo supports macOS and Linux."
 fi
 
 # ---------------------------------------------------------------- build
 say "Building Bolo (release)…"
 ( cd "$REPO" && cargo build --release )
 
-# ---------------------------------------------------------------- install
 mkdir -p "$BIN_DIR" "$CONF_DIR"
-ln -sf "$REPO/target/release/bolo" "$BIN_DIR/bolo"
-say "Linked $BIN_DIR/bolo"
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) warn "$BIN_DIR is not on your PATH — add:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-esac
+cp "$REPO/target/release/bolo" "$BIN_DIR/bolo"
+say "Installed $BIN_DIR/bolo"
 
+if [ "$OS" = "Darwin" ]; then
+    say "Compiling native Cocoa popup app (bolo-ui)…"
+    swiftc -O "$REPO/src/ui/BoloApp.swift" -o "$REPO/target/release/bolo-ui" -framework Cocoa -framework WebKit
+    cp "$REPO/target/release/bolo-ui" "$BIN_DIR/bolo-ui"
+    say "Installed $BIN_DIR/bolo-ui"
+fi
+
+# ---------------------------------------------------------------- config
 if [ ! -f "$CONF_DIR/config.toml" ]; then
     cp "$REPO/config.toml" "$CONF_DIR/config.toml"
-    say "Config created at $CONF_DIR/config.toml (edit anytime with: bolo settings)"
+    say "Config created at $CONF_DIR/config.toml"
 fi
 
 # ---------------------------------------------------------------- groq key
@@ -100,50 +117,77 @@ if [ -z "${GROQ_API_KEY:-}" ] && ! grep -q '^GROQ_API_KEY=' "$HOME/.env" 2>/dev/
     fi
 fi
 
-# ---------------------------------------------------------------- hotkeys
-if command -v gsettings >/dev/null 2>&1 && [ "${XDG_CURRENT_DESKTOP:-}" != "${XDG_CURRENT_DESKTOP#*GNOME}" -o "${XDG_CURRENT_DESKTOP:-}" = "GNOME" ]; then
-    say "Registering GNOME hotkeys (Ctrl+Space, Alt+P, Alt+I)…"
-    "$REPO/scripts/install-hotkey.sh" || warn "hotkey registration failed — run scripts/install-hotkey.sh manually"
-else
-    warn "Non-GNOME desktop: bind these commands to hotkeys yourself: 'bolo toggle', 'bolo pause', 'bolo insert-last'"
+# ---------------------------------------------------------------- platform integration
+if [ "$OS" = "Linux" ]; then
+    # GNOME Hotkeys
+    if command -v gsettings >/dev/null 2>&1 && [ "${XDG_CURRENT_DESKTOP:-}" != "${XDG_CURRENT_DESKTOP#*GNOME}" -o "${XDG_CURRENT_DESKTOP:-}" = "GNOME" ]; then
+        say "Registering GNOME hotkeys (Ctrl+Space, Alt+P, Alt+I)…"
+        "$REPO/scripts/install-hotkey.sh" || warn "hotkey registration failed — run scripts/install-hotkey.sh manually"
+    fi
+
+    # Systemd Service
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        mkdir -p "$HOME/.config/systemd/user"
+        cp "$REPO/scripts/bolo.service" "$HOME/.config/systemd/user/bolo.service"
+        systemctl --user daemon-reload
+        "$BIN_DIR/bolo" quit >/dev/null 2>&1 || true
+        systemctl --user enable --now bolo.service
+        say "Daemon installed as user service: systemctl --user status bolo"
+    fi
+
+    # App Entry
+    mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
+    cp "$REPO/assets/bolo.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/bolo.svg" 2>/dev/null || true
+    if [ -f "$REPO/scripts/bolo-settings.desktop" ]; then
+        sed "s|^Exec=.*|Exec=$BIN_DIR/bolo settings|" "$REPO/scripts/bolo-settings.desktop" \
+            > "$HOME/.local/share/applications/bolo-settings.desktop"
+        command -v update-desktop-database >/dev/null 2>&1 \
+            && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    fi
 fi
 
-# ---------------------------------------------------------------- daemon service
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-    mkdir -p "$HOME/.config/systemd/user"
-    cp "$REPO/scripts/bolo.service" "$HOME/.config/systemd/user/bolo.service"
-    systemctl --user daemon-reload
-    "$BIN_DIR/bolo" quit >/dev/null 2>&1 || true   # stop any hand-started daemon
-    systemctl --user enable --now bolo.service
-    say "Daemon installed as a user service (starts on login):  systemctl --user status bolo"
-else
-    warn "systemd user session unavailable — start the daemon manually: bolo daemon &"
-fi
+# ---------------------------------------------------------------- PATH check
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) warn "$BIN_DIR is not on your PATH — add to your shell profile:  export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
 
-# ---------------------------------------------------------------- app entry
-mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
-cp "$REPO/assets/bolo.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/bolo.svg"
-sed "s|^Exec=.*|Exec=$BIN_DIR/bolo settings|" "$REPO/scripts/bolo-settings.desktop" \
-    > "$HOME/.local/share/applications/bolo-settings.desktop"
-command -v update-desktop-database >/dev/null 2>&1 \
-    && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-say "\"Bolo\" added to your app grid (also: bolo settings)"
-
-# ---------------------------------------------------------------- local model
-provider="$(grep -E '^provider *= *"' "$CONF_DIR/config.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-if [ "$provider" = "whisper" ]; then   # faster-whisper self-downloads via its sidecar
-    model="$(grep -E '^model *= *"' "$CONF_DIR/config.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-    say "Local provider '$provider' selected — pre-fetching model '$model'…"
-    "$BIN_DIR/bolo" model download "$model" || warn "model download failed; it will retry on first use"
-fi
-
+# ---------------------------------------------------------------- welcome
+if [ "$OS" = "Darwin" ]; then
 cat <<'EOF'
 
-  Bolo is ready.
-    Ctrl+Space  start dictating / finish (text pastes at your cursor)
-    Alt+P       pause / resume (copy text while paused to splice it in)
-    Alt+I       insert clipboard while paused · re-type last transcript when idle
-    Settings    open "Bolo" from your app grid, or run: bolo settings
+  🎙️ Bolo is installed and ready on macOS!
 
-  First dictation shows a one-time GNOME permission dialog (portal) — accept it.
+  Quickstart:
+    bolo        Launch daemon & open native popup dashboard
+    bolo exit   Stop daemon and close popup window
+
+  Shortcuts:
+    Ctrl+Space  Start dictating / finish (text pastes at cursor)
+    Option+V    Quick-splice clipboard text into speech without pausing
+    Option+P    Pause / resume recording
+    Option+I    Re-type last transcription at cursor
+
+  Permissions (macOS System Settings > Privacy & Security):
+    • Microphone        Allow audio capture
+    • Accessibility     Allow typing text at cursor (Cmd+V)
+    • Input Monitoring  Allow global Ctrl+Space push-to-talk hotkey
+
 EOF
+else
+cat <<'EOF'
+
+  🎙️ Bolo is installed and ready on Linux!
+
+  Quickstart:
+    bolo        Launch daemon & open dashboard
+    bolo exit   Stop daemon
+
+  Shortcuts:
+    Ctrl+Space  Start dictating / finish (text pastes at cursor)
+    Alt+V       Quick-splice clipboard text into speech without pausing
+    Alt+P       Pause / resume recording
+    Alt+I       Insert clipboard while paused · re-type last transcript when idle
+
+EOF
+fi
