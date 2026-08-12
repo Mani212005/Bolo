@@ -89,9 +89,9 @@ impl Phase {
 pub(crate) struct Shared {
     pub(crate) phase: Phase,
     /// Control channel into the active endpointer, while recording.
-    control_tx: Option<Sender<Control>>,
+    pub(crate) control_tx: Option<Sender<Control>>,
     /// When the starting toggle arrived, for the toggle→capture metric.
-    toggle_t0: Option<Instant>,
+    pub(crate) toggle_t0: Option<Instant>,
     /// Clipboard content at pause time; a change by resume time means the
     /// user copied something to splice into the transcript.
     clip_snapshot: Option<String>,
@@ -99,7 +99,7 @@ pub(crate) struct Shared {
     pub(crate) last_text: Option<String>,
 }
 
-enum PipelineMsg {
+pub(crate) enum PipelineMsg {
     Segment(Utterance),
     Insert(String),
     Finalize,
@@ -113,15 +113,18 @@ enum PipelineMsg {
 /// (transcribing in the background while the user is paused), or text the
 /// user copied during a pause.
 enum Piece {
-    Spoken(tokio::task::JoinHandle<anyhow::Result<crate::stt::Transcript>>),
+    Spoken {
+        handle: tokio::task::JoinHandle<anyhow::Result<crate::stt::Transcript>>,
+        audio_id: String,
+        duration_s: f64,
+    },
     Inserted(String),
 }
 
 pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("bolo.sock")
+    let dir = crate::userdata::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("bolo.sock")
 }
 
 fn notify(cfg: &Config, body: &str) {
@@ -167,22 +170,65 @@ fn notify_result(cfg: &Config, body: &str) {
 }
 
 fn read_clipboard() -> Option<String> {
-    // Bounded: a hung clipboard owner would otherwise wedge the socket thread.
-    let out = std::process::Command::new("timeout")
-        .args(["1.5", "wl-paste", "-n"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None; // empty clipboard exits non-zero; 124 = timed out
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("pbpaste").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).to_string();
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
-    String::from_utf8(out.stdout).ok() // non-text (e.g. image) -> None
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn copy_selection() {
+    #[cfg(target_os = "macos")]
+    {
+        let applescript = r#"
+            tell application "System Events"
+                keystroke "c" using command down
+            end tell
+        "#;
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(applescript)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+}
+
+fn apply_voice_clipboard_triggers(text: &str) -> String {
+    let Ok(re) = regex::Regex::new(r"(?i)\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?") else {
+        return text.to_string();
+    };
+    if re.is_match(text) {
+        if let Some(clip) = read_clipboard() {
+            let trimmed = clip.trim();
+            if !trimmed.is_empty() {
+                return re.replace_all(text, trimmed).to_string();
+            }
+        }
+    }
+    text.to_string()
 }
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let path = socket_path();
-    // Single instance: a live socket means another daemon owns it.
-    if UnixStream::connect(&path).is_ok() {
-        return Err(anyhow!("bolo daemon already running on {}", path.display()));
+    // Single instance: if an old daemon is alive, send it quit or take over cleanly
+    if let Ok(mut stream) = UnixStream::connect(&path) {
+        use std::io::Write;
+        let _ = writeln!(stream, "quit");
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
     let _ = std::fs::remove_file(&path); // stale socket from a dead daemon
     let listener = UnixListener::bind(&path)
@@ -212,7 +258,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded::<PipelineMsg>();
 
     // Audio-owner thread: cpal Stream is !Send, so streams are created and
-    // dropped here, one per segment.
+    // dropped here, one per session/segment.
     {
         let shared = Arc::clone(&shared);
         let pipeline_tx = pipeline_tx.clone();
@@ -236,7 +282,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 {
                     let mut s = shared.lock().unwrap();
                     s.control_tx = Some(control_tx);
-                    if let Some(t0) = s.toggle_t0.take() {
+                    if let Some(t0) = s.toggle_t0 {
                         eprintln!(
                             "[daemon] toggle→capture_ms={} device=\"{}\" rate={}",
                             t0.elapsed().as_millis(),
@@ -246,34 +292,56 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     }
                 }
                 crate::sound::play(&cfg_audio, crate::sound::Chime::Start);
-                let result = vad::run_endpointer(
-                    audio_rx,
-                    control_rx,
-                    &vad_cfg,
-                    info.sample_rate,
-                    vad_cfg.auto_endpoint,
-                );
-                drop(stream);
-                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
-                {
-                    let mut s = shared.lock().unwrap();
-                    s.control_tx = None;
-                    // A pause keeps the session open; the socket thread has
-                    // already set phase=Paused. Anything else goes to the
-                    // pipeline for finalization.
-                    if !matches!(result, Ok(Utterance { reason: StopReason::Pause, .. })) {
-                        s.phase = Phase::Processing;
-                    }
-                }
-                match result {
-                    Ok(utt) => {
-                        if pipeline_tx.send(PipelineMsg::Segment(utt)).is_err() {
+
+                loop {
+                    let result = vad::run_endpointer(
+                        audio_rx.clone(),
+                        control_rx.clone(),
+                        &vad_cfg,
+                        info.sample_rate,
+                        vad_cfg.auto_endpoint,
+                    );
+
+                    match result {
+                        Ok(utt) => {
+                            if let StopReason::Splice(ref clip_text) = utt.reason {
+                                let text_to_insert = clip_text.clone();
+                                // 1. Spoken audio before splice point is sent for background transcription
+                                if pipeline_tx.send(PipelineMsg::Segment(utt)).is_err() {
+                                    break;
+                                }
+                                // 2. Insert the clipboard text right after the preceding spoken audio
+                                if !text_to_insert.trim().is_empty() {
+                                    if pipeline_tx.send(PipelineMsg::Insert(text_to_insert)).is_err() {
+                                        break;
+                                    }
+                                }
+                                // 3. Seamlessly continue audio capture without dropping the stream!
+                                continue;
+                            }
+
+                            drop(stream);
+                            if utt.reason != StopReason::Pause {
+                                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                            }
+                            {
+                                let mut s = shared.lock().unwrap();
+                                s.control_tx = None;
+                                s.toggle_t0 = None;
+                                if utt.reason != StopReason::Pause {
+                                    s.phase = Phase::Processing;
+                                }
+                            }
+                            let _ = pipeline_tx.send(PipelineMsg::Segment(utt));
                             break;
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("[daemon] endpointer failed: {e:#}");
-                        shared.lock().unwrap().phase = Phase::Idle;
+                        Err(e) => {
+                            eprintln!("[daemon] endpointer failed: {e:#}");
+                            drop(stream);
+                            crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                            shared.lock().unwrap().phase = Phase::Idle;
+                            break;
+                        }
                     }
                 }
             }
@@ -284,6 +352,8 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     {
         let shared = Arc::clone(&shared);
         let cfg = cfg.clone();
+        let start_tx = start_tx.clone();
+        let pipeline_tx = pipeline_tx.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
@@ -314,11 +384,14 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         }
     }
 
-    // Settings app: local web UI served from inside the daemon.
+    // Settings & History dashboard: local web UI served from inside the daemon.
     {
         let shared = Arc::clone(&shared);
         let cfg = cfg.clone();
-        std::thread::spawn(move || crate::web::serve(config_path, shared, cfg));
+        let start_tx = start_tx.clone();
+        let pipeline_tx = pipeline_tx.clone();
+        let stt = Arc::clone(&stt);
+        std::thread::spawn(move || crate::web::serve(config_path, shared, cfg, start_tx, pipeline_tx, stt));
     }
 
     // Pipeline loop: assemble pieces per session; on finalize, await the
@@ -339,17 +412,27 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     utt.speech_ms
                 );
                 if utt.speech_ms > 0 {
+                    let duration_s = utt.speech_ms as f64 / 1000.0;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let audio_id = format!("rec_{now_ms}");
                     match encode_wav(&utt.samples_16k) {
                         Ok(wav) => {
+                            let _ = crate::userdata::save_recording_wav(&audio_id, &wav);
                             eprintln!(
-                                "[wav]     mono=true sample_rate={} bytes={} path=/tmp/bolo_capture.wav",
+                                "[wav]     mono=true sample_rate={} bytes={} audio_id={}",
                                 PIPELINE_SAMPLE_RATE,
-                                wav.len()
+                                wav.len(),
+                                audio_id
                             );
                             let stt = Arc::clone(&stt);
-                            pieces.push(Piece::Spoken(
-                                runtime.spawn(async move { stt.transcribe(wav).await }),
-                            ));
+                            pieces.push(Piece::Spoken {
+                                handle: runtime.spawn(async move { stt.transcribe(wav).await }),
+                                audio_id,
+                                duration_s,
+                            });
                         }
                         Err(e) => eprintln!("[daemon] wav encode failed: {e:#}"),
                     }
@@ -360,7 +443,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         &format!("Max length ({}s) reached — transcribing", cfg.vad.max_utterance_ms / 1000),
                     );
                 }
-                if utt.reason != StopReason::Pause {
+                if utt.reason != StopReason::Pause && !matches!(utt.reason, StopReason::Splice(_)) {
                     finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
                 }
             }
@@ -396,9 +479,9 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 match outcome {
                     Ok(enhanced) => {
                         println!("[enhanced] {enhanced}");
-                        crate::userdata::append_history("enhanced", &enhanced);
+                        crate::userdata::append_history("enhanced", &enhanced, None, None);
                         shared.lock().unwrap().last_text = Some(enhanced);
-                        notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Ctrl+V pastes");
+                        notify(&cfg, "Enhanced & copied — Alt+I types it at your cursor, Cmd+V (Mac) or Ctrl+V pastes");
                     }
                     Err(e) => {
                         eprintln!("[enhance] failed: {e:#}");
@@ -466,15 +549,20 @@ fn finalize(
     }
     // notify-rust's blocking show() cannot run inside block_on (it spins up
     // its own runtime), so the async block only returns what to say.
-    let outcome: anyhow::Result<Option<(&'static str, String)>> = runtime.block_on(async {
+    let outcome: anyhow::Result<Option<(&'static str, String, Option<String>, f64)>> = runtime.block_on(async {
         let mut texts: Vec<String> = Vec::new();
+        let mut last_audio_id: Option<String> = None;
+        let mut total_duration_s = 0.0;
         for piece in pieces.drain(..) {
             match piece {
-                Piece::Spoken(handle) => {
+                Piece::Spoken { handle, audio_id, duration_s } => {
                     let transcript = handle.await.context("transcription task panicked")??;
                     let text = transcript.text.trim().to_string();
                     if !text.is_empty() {
-                        texts.push(text);
+                        let enriched = apply_voice_clipboard_triggers(&text);
+                        texts.push(enriched);
+                        last_audio_id = Some(audio_id);
+                        total_duration_s += duration_s;
                     }
                 }
                 Piece::Inserted(text) => texts.push(text.trim().to_string()),
@@ -505,21 +593,21 @@ fn finalize(
             t_inject.elapsed().as_millis(),
             t_end.elapsed().as_millis()
         );
-        Ok(Some((used, text)))
+        Ok(Some((used, text, last_audio_id, total_duration_s)))
     });
     match outcome {
         Ok(None) => {
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
-        Ok(Some((used, text))) => {
+        Ok(Some((used, text, audio_id, duration_s))) => {
             let head = match used {
                 "paste" => "Pasted + on clipboard",
                 "portal" => "Typed + copied — Ctrl+V pastes it elsewhere",
                 _ => "On clipboard — paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
-            crate::userdata::append_history("dictation", &text);
+            crate::userdata::append_history("dictation", &text, audio_id.as_deref(), Some(duration_s));
             shared.lock().unwrap().last_text = Some(text);
         }
         Err(e) => {
@@ -554,10 +642,16 @@ fn handle_client(
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(cfg, "Listening… (Ctrl+Space stop · Alt+P pause)");
+                    notify(cfg, "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)");
                     "ok recording".to_string()
                 }
                 Phase::Recording => {
+                    // Debounce: ignore accidental rapid double-tap within 800ms of start
+                    if let Some(t0) = s.toggle_t0 {
+                        if t0.elapsed().as_millis() < 800 {
+                            return Ok(());
+                        }
+                    }
                     if let Some(tx) = s.control_tx.as_ref() {
                         let _ = tx.send(Control::ForceStop);
                     }
@@ -600,7 +694,7 @@ fn handle_client(
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(cfg, "Listening… (Ctrl+Space stop · Alt+P pause)");
+                    notify(cfg, "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)");
                     "ok recording".to_string()
                 }
                 phase => format!("err not recording (phase: {})", phase.as_str()),
@@ -632,6 +726,54 @@ fn handle_client(
                     _ => "err clipboard empty".to_string(),
                 },
                 (phase, _) => format!("busy {}", phase.as_str()),
+            }
+        }
+        "quick-splice" => {
+            let s = shared.lock().unwrap();
+            match s.phase {
+                Phase::Recording => {
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        if let Some(tx) = s.control_tx.as_ref() {
+                            let _ = tx.send(Control::CutSegment(text));
+                        }
+                        notify(cfg, &format!("Spliced {n} chars from clipboard"));
+                        "ok spliced".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                Phase::Paused => {
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        drop(s);
+                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
+                        notify(cfg, &format!("Inserted {n} chars from clipboard"));
+                        "ok inserted".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                phase => format!("err not recording (phase: {})", phase.as_str()),
+            }
+        }
+        "copy-splice" => {
+            let s = shared.lock().unwrap();
+            match s.phase {
+                Phase::Recording => {
+                    copy_selection();
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        if let Some(tx) = s.control_tx.as_ref() {
+                            let _ = tx.send(Control::CutSegment(text));
+                        }
+                        notify(cfg, &format!("Copied & spliced {n} chars"));
+                        "ok copied and spliced".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                phase => format!("err not recording (phase: {})", phase.as_str()),
             }
         }
         "enhance" => {

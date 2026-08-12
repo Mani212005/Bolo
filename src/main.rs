@@ -52,10 +52,21 @@ fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config_path)?;
             return daemon::run(cfg, config_path);
         }
-        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit")) => {
+        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit" | "quick-splice" | "copy-splice")) => {
             return client(cmd)
         }
-        Some("settings" | "ui") => {
+        Some("exit") => {
+            // Gracefully shut down the daemon if running, then say goodbye.
+            let socket = daemon::socket_path();
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                let _ = client("quit");
+            }
+            // Terminate any running native bolo-ui popup window so it dies down
+            let _ = std::process::Command::new("pkill").arg("-f").arg("bolo-ui").status();
+            println!("Thank you for using Bolo 😊");
+            return Ok(());
+        }
+        Some("settings" | "ui" | "history" | "dashboard") => {
             let cfg = Config::load(&config_path)?;
             return open_settings_app(cfg.ui.port);
         }
@@ -91,7 +102,39 @@ fn main() -> anyhow::Result<()> {
             println!("[model] ready: {}", path.display());
             return Ok(());
         }
-        _ => {} // one-shot mode below
+        Some("record") => {
+            // Explicit interactive console recording mode
+        }
+        None => {
+            // Default `bolo` command: ensure background daemon is up, then greet
+            let socket = daemon::socket_path();
+            let daemon_up = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            if !daemon_up {
+                let exe = std::env::current_exe()?;
+                let log_dir = userdata::config_dir();
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_path = log_dir.join("bolo-daemon.log");
+                let log_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .unwrap_or_else(|_| std::fs::File::create("/tmp/bolo-daemon.log").unwrap());
+                let err_file = log_file.try_clone().unwrap();
+
+                let _ = std::process::Command::new(exe)
+                    .arg("daemon")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(log_file)
+                    .stderr(err_file)
+                    .spawn();
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            println!("Hello Bolo!");
+            let cfg = Config::load(&config_path)?;
+            let _ = open_settings_app(cfg.ui.port);
+            return Ok(());
+        }
+        _ => {}
     }
     let cfg = Config::load(&config_path)?;
 
@@ -174,17 +217,15 @@ fn main() -> anyhow::Result<()> {
 /// Open the settings app: make sure the daemon is up, then launch the UI in
 /// an app window (Chrome/Chromium) or the default browser.
 fn open_settings_app(port: u16) -> anyhow::Result<()> {
-    let daemon_up = std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok();
-    if !daemon_up {
-        let started = std::process::Command::new("systemctl")
+    if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_err() {
+        let managed = std::process::Command::new("systemctl")
             .args(["--user", "start", "bolo.service"])
             .status()
             .is_ok_and(|s| s.success());
-        if !started {
+        if !managed {
             let exe = std::env::current_exe()?;
             std::process::Command::new(exe).arg("daemon").spawn()?;
         }
-        // Give it a moment to bind the web port.
         for _ in 0..20 {
             if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok() {
                 break;
@@ -192,18 +233,50 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
+
+    // 1. Try native Cocoa bolo-ui popup first (sleek macOS native floating window)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let native_ui = parent.join("bolo-ui");
+            if native_ui.exists() {
+                let _ = std::process::Command::new(native_ui).spawn();
+                return Ok(());
+            }
+        }
+    }
+    if std::process::Command::new("bolo-ui").spawn().is_ok() {
+        return Ok(());
+    }
+
+    // 2. Fallback to app-mode or system browser
     let url = format!("http://127.0.0.1:{port}");
-    for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
-        if std::process::Command::new(browser)
-            .arg(format!("--app={url}"))
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("open")
+            .args(["-na", "Google Chrome", "--args", &format!("--app={url}")])
             .spawn()
             .is_ok()
         {
             return Ok(());
         }
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        return Ok(());
     }
-    std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
-    Ok(())
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
+            if std::process::Command::new(browser)
+                .arg(format!("--app={url}"))
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
+        Ok(())
+    }
 }
 
 /// Send one command to the running daemon and print its reply.

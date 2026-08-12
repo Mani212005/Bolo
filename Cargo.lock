@@ -303,6 +303,7 @@ dependencies = [
  "hound",
  "notify-rust",
  "rdev",
+ "regex",
  "reqwest",
  "rubato",
  "serde",

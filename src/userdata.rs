@@ -14,21 +14,58 @@ pub fn data_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/bolo")
 }
 
-// ---- dictation history (jsonl, one {ts, kind, text} per line) ----
+// ---- dictation history (jsonl, one {id, ts, kind, text, audio_id, duration_s} per line) ----
 
 fn history_path() -> PathBuf {
     data_dir().join("history.jsonl")
 }
 
-pub fn append_history(kind: &str, text: &str) {
+pub fn recordings_dir() -> PathBuf {
+    data_dir().join("recordings")
+}
+
+pub fn save_recording_wav(id: &str, wav_bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = recordings_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.wav"));
+    std::fs::write(&path, wav_bytes)?;
+    Ok(path)
+}
+
+pub fn read_recording_wav(id: &str) -> Option<Vec<u8>> {
+    let safe_id: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+        .collect();
+    let filename = if safe_id.ends_with(".wav") {
+        safe_id
+    } else {
+        format!("{safe_id}.wav")
+    };
+    let path = recordings_dir().join(filename);
+    std::fs::read(path).ok()
+}
+
+pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s: Option<f64>) {
     let _ = std::fs::create_dir_all(data_dir());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let id = audio_id
+        .map(String::from)
+        .unwrap_or_else(|| format!("rec_{now_ms}"));
     let line = serde_json::json!({
-        "ts": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        "id": id,
+        "ts": now,
         "kind": kind,
         "text": text,
+        "audio_id": audio_id,
+        "duration_s": duration_s,
     });
     use std::io::Write;
     if let Ok(mut f) =
@@ -40,14 +77,54 @@ pub fn append_history(kind: &str, text: &str) {
 
 pub fn read_history(max: usize) -> Vec<serde_json::Value> {
     let text = std::fs::read_to_string(history_path()).unwrap_or_default();
-    let all: Vec<serde_json::Value> =
-        text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let all: Vec<serde_json::Value> = text
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let mut val: serde_json::Value = serde_json::from_str(l).ok()?;
+            if val.get("id").is_none() || val["id"].is_null() {
+                let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                val["id"] = serde_json::json!(format!("hist_{ts}_{i}"));
+            }
+            Some(val)
+        })
+        .collect();
     let skip = all.len().saturating_sub(max);
     all.into_iter().skip(skip).collect()
 }
 
+pub fn delete_history_item(id: &str) -> bool {
+    let text = std::fs::read_to_string(history_path()).unwrap_or_default();
+    let mut found = false;
+    let remaining: Vec<String> = text
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(l) {
+                let item_id = val.get("id").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| {
+                    let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                    format!("hist_{ts}_{i}")
+                });
+                if item_id == id {
+                    found = true;
+                    let audio_path = recordings_dir().join(format!("{id}.wav"));
+                    let _ = std::fs::remove_file(audio_path);
+                    return None;
+                }
+            }
+            Some(l.to_string())
+        })
+        .collect();
+
+    if found {
+        let _ = std::fs::write(history_path(), remaining.join("\n") + "\n");
+    }
+    found
+}
+
 pub fn clear_history() {
     let _ = std::fs::remove_file(history_path());
+    let _ = std::fs::remove_dir_all(recordings_dir());
 }
 
 // ---- scratchpad ----

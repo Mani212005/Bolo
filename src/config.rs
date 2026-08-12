@@ -139,12 +139,12 @@ pub struct VadConfig {
     pub max_utterance_ms: u64,
     /// When false, trailing silence never ends a recording — only
     /// Ctrl+Space, Alt+P, or the max_utterance_ms cap do.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub auto_endpoint: bool,
 }
 
-fn default_true() -> bool {
-    true
+fn default_false() -> bool {
+    false
 }
 
 impl Config {
