@@ -288,7 +288,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 {
                     let mut s = shared.lock().unwrap();
                     s.control_tx = Some(control_tx);
-                    if let Some(t0) = s.toggle_t0.take() {
+                    if let Some(t0) = s.toggle_t0 {
                         eprintln!(
                             "[daemon] toggle→capture_ms={} device=\"{}\" rate={}",
                             t0.elapsed().as_millis(),
@@ -326,6 +326,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                             {
                                 let mut s = shared.lock().unwrap();
                                 s.control_tx = None;
+                                s.toggle_t0 = None;
                                 if utt.reason != StopReason::Pause {
                                     s.phase = Phase::Processing;
                                 }
@@ -644,9 +645,9 @@ fn handle_client(
                     "ok recording".to_string()
                 }
                 Phase::Recording => {
-                    // Debounce: ignore accidental rapid double-tap within 600ms of start
+                    // Debounce: ignore accidental rapid double-tap within 800ms of start
                     if let Some(t0) = s.toggle_t0 {
-                        if t0.elapsed().as_millis() < 600 {
+                        if t0.elapsed().as_millis() < 800 {
                             return Ok(());
                         }
                     }
