@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
             println!("Thank you for using Bolo 😊");
             return Ok(());
         }
-        Some("settings" | "ui") => {
+        Some("settings" | "ui" | "history" | "dashboard") => {
             let cfg = Config::load(&config_path)?;
             return open_settings_app(cfg.ui.port);
         }
