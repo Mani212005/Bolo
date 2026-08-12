@@ -15,6 +15,8 @@ pub enum StopReason {
     MaxCap,
     /// Segment ended by Alt+P; the dictation session stays open.
     Pause,
+    /// Segment cut mid-speech to splice clipboard without dropping audio stream.
+    Splice,
 }
 
 impl StopReason {
@@ -24,6 +26,7 @@ impl StopReason {
             StopReason::Force => "force",
             StopReason::MaxCap => "maxcap",
             StopReason::Pause => "pause",
+            StopReason::Splice => "splice",
         }
     }
 }
@@ -42,6 +45,7 @@ pub struct Utterance {
 pub enum Control {
     ForceStop,
     Pause,
+    CutSegment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +141,9 @@ pub fn run_endpointer(
                     }
                     Ok(Control::Pause) => {
                         return Ok(finish(StopReason::Pause, native_samples, preroll, utterance, speech_ms, total_ms));
+                    }
+                    Ok(Control::CutSegment) => {
+                        return Ok(finish(StopReason::Splice, native_samples, preroll, utterance, speech_ms, total_ms));
                     }
                     Err(_) => {}
                 }

@@ -167,15 +167,63 @@ fn notify_result(cfg: &Config, body: &str) {
 }
 
 fn read_clipboard() -> Option<String> {
-    // Bounded: a hung clipboard owner would otherwise wedge the socket thread.
-    let out = std::process::Command::new("timeout")
-        .args(["1.5", "wl-paste", "-n"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None; // empty clipboard exits non-zero; 124 = timed out
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("pbpaste").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).to_string();
+        if s.trim().is_empty() {
+            return None;
+        }
+        Some(s)
     }
-    String::from_utf8(out.stdout).ok() // non-text (e.g. image) -> None
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Bounded: a hung clipboard owner would otherwise wedge the socket thread.
+        let out = std::process::Command::new("timeout")
+            .args(["1.5", "wl-paste", "-n"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None; // empty clipboard exits non-zero; 124 = timed out
+        }
+        String::from_utf8(out.stdout).ok().filter(|s| !s.trim().is_empty())
+    }
+}
+
+fn copy_selection() {
+    #[cfg(target_os = "macos")]
+    {
+        let applescript = r#"
+            tell application "System Events"
+                keystroke "c" using command down
+            end tell
+        "#;
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(applescript)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+}
+
+fn apply_voice_clipboard_triggers(text: &str) -> String {
+    let Ok(re) = regex::Regex::new(r"(?i)\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?") else {
+        return text.to_string();
+    };
+    if re.is_match(text) {
+        if let Some(clip) = read_clipboard() {
+            let trimmed = clip.trim();
+            if !trimmed.is_empty() {
+                return re.replace_all(text, trimmed).to_string();
+            }
+        }
+    }
+    text.to_string()
 }
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
@@ -212,7 +260,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded::<PipelineMsg>();
 
     // Audio-owner thread: cpal Stream is !Send, so streams are created and
-    // dropped here, one per segment.
+    // dropped here, one per session/segment.
     {
         let shared = Arc::clone(&shared);
         let pipeline_tx = pipeline_tx.clone();
@@ -246,34 +294,48 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     }
                 }
                 crate::sound::play(&cfg_audio, crate::sound::Chime::Start);
-                let result = vad::run_endpointer(
-                    audio_rx,
-                    control_rx,
-                    &vad_cfg,
-                    info.sample_rate,
-                    vad_cfg.auto_endpoint,
-                );
-                drop(stream);
-                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
-                {
-                    let mut s = shared.lock().unwrap();
-                    s.control_tx = None;
-                    // A pause keeps the session open; the socket thread has
-                    // already set phase=Paused. Anything else goes to the
-                    // pipeline for finalization.
-                    if !matches!(result, Ok(Utterance { reason: StopReason::Pause, .. })) {
-                        s.phase = Phase::Processing;
-                    }
-                }
-                match result {
-                    Ok(utt) => {
-                        if pipeline_tx.send(PipelineMsg::Segment(utt)).is_err() {
+
+                loop {
+                    let result = vad::run_endpointer(
+                        audio_rx.clone(),
+                        control_rx.clone(),
+                        &vad_cfg,
+                        info.sample_rate,
+                        vad_cfg.auto_endpoint,
+                    );
+
+                    match result {
+                        Ok(utt) => {
+                            if utt.reason == StopReason::Splice {
+                                // Spoken audio before splice point is sent for background transcription
+                                if pipeline_tx.send(PipelineMsg::Segment(utt)).is_err() {
+                                    break;
+                                }
+                                // Seamlessly continue audio capture without dropping the stream!
+                                continue;
+                            }
+
+                            drop(stream);
+                            if utt.reason != StopReason::Pause {
+                                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                            }
+                            {
+                                let mut s = shared.lock().unwrap();
+                                s.control_tx = None;
+                                if utt.reason != StopReason::Pause {
+                                    s.phase = Phase::Processing;
+                                }
+                            }
+                            let _ = pipeline_tx.send(PipelineMsg::Segment(utt));
                             break;
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("[daemon] endpointer failed: {e:#}");
-                        shared.lock().unwrap().phase = Phase::Idle;
+                        Err(e) => {
+                            eprintln!("[daemon] endpointer failed: {e:#}");
+                            drop(stream);
+                            crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                            shared.lock().unwrap().phase = Phase::Idle;
+                            break;
+                        }
                     }
                 }
             }
@@ -474,7 +536,8 @@ fn finalize(
                     let transcript = handle.await.context("transcription task panicked")??;
                     let text = transcript.text.trim().to_string();
                     if !text.is_empty() {
-                        texts.push(text);
+                        let enriched = apply_voice_clipboard_triggers(&text);
+                        texts.push(enriched);
                     }
                 }
                 Piece::Inserted(text) => texts.push(text.trim().to_string()),
@@ -554,7 +617,7 @@ fn handle_client(
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(cfg, "Listening… (Ctrl+Space stop · Alt+P pause)");
+                    notify(cfg, "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)");
                     "ok recording".to_string()
                 }
                 Phase::Recording => {
@@ -600,7 +663,7 @@ fn handle_client(
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(cfg, "Listening… (Ctrl+Space stop · Alt+P pause)");
+                    notify(cfg, "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)");
                     "ok recording".to_string()
                 }
                 phase => format!("err not recording (phase: {})", phase.as_str()),
@@ -632,6 +695,59 @@ fn handle_client(
                     _ => "err clipboard empty".to_string(),
                 },
                 (phase, _) => format!("busy {}", phase.as_str()),
+            }
+        }
+        "quick-splice" => {
+            let mut s = shared.lock().unwrap();
+            match s.phase {
+                Phase::Recording => {
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        if let Some(tx) = s.control_tx.as_ref() {
+                            let _ = tx.send(Control::CutSegment);
+                        }
+                        drop(s);
+                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
+                        notify(cfg, &format!("Spliced {n} chars from clipboard"));
+                        "ok spliced".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                Phase::Paused => {
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        s.clip_snapshot = Some(text.clone());
+                        drop(s);
+                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
+                        notify(cfg, &format!("Inserted {n} chars from clipboard"));
+                        "ok inserted".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                phase => format!("err not recording (phase: {})", phase.as_str()),
+            }
+        }
+        "copy-splice" => {
+            let s = shared.lock().unwrap();
+            match s.phase {
+                Phase::Recording => {
+                    copy_selection();
+                    if let Some(text) = read_clipboard() {
+                        let n = text.chars().count();
+                        if let Some(tx) = s.control_tx.as_ref() {
+                            let _ = tx.send(Control::CutSegment);
+                        }
+                        drop(s);
+                        pipeline_tx.send(PipelineMsg::Insert(text)).context("pipeline gone")?;
+                        notify(cfg, &format!("Copied & spliced {n} chars"));
+                        "ok copied and spliced".to_string()
+                    } else {
+                        "err clipboard empty".to_string()
+                    }
+                }
+                phase => format!("err not recording (phase: {})", phase.as_str()),
             }
         }
         "enhance" => {

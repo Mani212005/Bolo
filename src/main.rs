@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config_path)?;
             return daemon::run(cfg, config_path);
         }
-        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit")) => {
+        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit" | "quick-splice" | "copy-splice")) => {
             return client(cmd)
         }
         Some("exit") => {

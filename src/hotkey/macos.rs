@@ -43,6 +43,16 @@ impl HotkeyListener for MacOsHotkeyListener {
                                     cb("insert-last");
                                 }
                             }
+                            Key::KeyV => {
+                                if alt_down.load(Ordering::SeqCst) {
+                                    cb("quick-splice");
+                                }
+                            }
+                            Key::KeyC => {
+                                if alt_down.load(Ordering::SeqCst) {
+                                    cb("copy-splice");
+                                }
+                            }
                             _ => {}
                         }
                     }
