@@ -105,20 +105,29 @@ pub fn serve(
                         )
                         .unwrap(),
                     ),
-                Ok(WebResponse::Audio(bytes)) => tiny_http::Response::from_data(bytes)
-                    .with_header(
-                        tiny_http::Header::from_bytes("Content-Type", "audio/wav").unwrap(),
-                    )
-                    .with_header(
-                        tiny_http::Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
-                    )
-                    .with_header(
-                        tiny_http::Header::from_bytes(
-                            "Cache-Control",
-                            "public, max-age=86400",
+                Ok(WebResponse::Audio(bytes)) => {
+                    let len = bytes.len();
+                    tiny_http::Response::from_data(bytes)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "audio/wav").unwrap(),
                         )
-                        .unwrap(),
-                    ),
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Length", len.to_string()).unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                "Cache-Control",
+                                "public, max-age=86400",
+                            )
+                            .unwrap(),
+                        )
+                }
                 Ok(WebResponse::NotFound) => {
                     tiny_http::Response::from_string("not found").with_status_code(404)
                 }

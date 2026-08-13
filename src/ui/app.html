@@ -1102,19 +1102,73 @@
       // Audio Playback
       const audioBtn = card.querySelector(".play-audio-btn");
       if (audioBtn) {
-        audioBtn.onclick = () => {
-          const container = card.querySelector(`#audio-container-${itemId}`);
-          if (container.innerHTML) {
-            container.innerHTML = "";
-            audioBtn.classList.remove("playing");
-          } else {
-            container.innerHTML = `
-              <div class="audio-player-box">
-                <audio controls autoplay src="/api/audio?id=${encodeURIComponent(audioId)}" onended="this.closest('.card').querySelector('.play-audio-btn').classList.remove('playing')" onerror="toast('Audio recording unavailable for this older entry'); this.closest('.audio-player-box').remove();"></audio>
-              </div>
-            `;
-            audioBtn.classList.add("playing");
+        audioBtn.onclick = (e) => {
+          e.stopPropagation();
+          const audioUrl = `/api/audio?id=${encodeURIComponent(audioId)}`;
+          
+          if (window.currentAudio && window.currentAudioBtn === audioBtn) {
+            if (!window.currentAudio.paused) {
+              window.currentAudio.pause();
+              audioBtn.classList.remove("playing");
+              audioBtn.innerHTML = `
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Hear Voice
+              `;
+              return;
+            } else {
+              window.currentAudio.play();
+              audioBtn.classList.add("playing");
+              audioBtn.innerHTML = `
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                Pause
+              `;
+              return;
+            }
           }
+          
+          if (window.currentAudio) {
+            window.currentAudio.pause();
+            if (window.currentAudioBtn) {
+              window.currentAudioBtn.classList.remove("playing");
+              window.currentAudioBtn.innerHTML = `
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Hear Voice
+              `;
+            }
+          }
+          
+          const audio = new Audio(audioUrl);
+          window.currentAudio = audio;
+          window.currentAudioBtn = audioBtn;
+          
+          audioBtn.classList.add("playing");
+          audioBtn.innerHTML = `
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+            Playing…
+          `;
+          
+          audio.onended = () => {
+            audioBtn.classList.remove("playing");
+            audioBtn.innerHTML = `
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              Hear Voice
+            `;
+          };
+          
+          audio.onerror = (err) => {
+            console.error("Audio playback error:", err);
+            toast("Audio file not found or unable to stream");
+            audioBtn.classList.remove("playing");
+            audioBtn.innerHTML = `
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              Hear Voice
+            `;
+          };
+          
+          audio.play().catch(err => {
+            console.warn("Audio play blocked:", err);
+            toast("Click again to play audio");
+          });
         };
       }
 
