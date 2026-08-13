@@ -1204,8 +1204,7 @@
     setBtnIdle(btn) {
       btn.classList.remove("playing", "paused", "loading");
       btn.innerHTML = `
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-        Hear Voice
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
       `;
     }
 
@@ -1213,8 +1212,7 @@
       btn.classList.remove("playing", "paused");
       btn.classList.add("loading");
       btn.innerHTML = `
-        <svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg>
-        Loading…
+        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg>
       `;
     }
 
@@ -1222,8 +1220,7 @@
       btn.classList.remove("paused", "loading");
       btn.classList.add("playing");
       btn.innerHTML = `
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
-        Pause
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
       `;
     }
 
@@ -1231,8 +1228,7 @@
       btn.classList.remove("playing", "loading");
       btn.classList.add("paused");
       btn.innerHTML = `
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-        Resume
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
       `;
     }
   }
@@ -1292,17 +1288,16 @@
 
           <div class="card-actions">
             ${hasAudio ? `
-              <button class="action-btn play-audio-btn" data-audio="${audioId}">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                Hear Voice
+              <button class="action-btn icon-only play-audio-btn" data-audio="${audioId}" title="Play voice recording">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
               </button>
             ` : ''}
-            <button class="action-btn" data-action="copy" data-text="${escapeAttr(item.text)}">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-              Copy
+            <button class="action-btn icon-only" data-action="copy" data-text="${escapeAttr(item.text)}" title="Copy text">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
             </button>
-            <button class="action-btn" data-action="enhance" data-text="${escapeAttr(item.text)}">
-              ✨ Enhance
+            <button class="action-btn" data-action="enhance" data-text="${escapeAttr(item.text)}" title="Refine and structure prompt">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg>
+              Enhance
             </button>
             <button class="action-btn icon-only delete" data-action="delete" data-id="${itemId}" title="Delete transcription">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
@@ -1338,22 +1333,22 @@
       // Copy Action
       card.querySelector('[data-action="copy"]').onclick = () => {
         navigator.clipboard.writeText(item.text);
-        toast("Copied transcription to clipboard");
+        toast("Copied to clipboard");
       };
 
       // Enhance Action
       card.querySelector('[data-action="enhance"]').onclick = async (e) => {
         const btn = e.currentTarget;
-        btn.textContent = "Enhancing…";
+        btn.innerHTML = `<svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg> Enhancing…`;
         try {
           const res = await api("enhance", { method: "POST", body: item.text });
-          navigator.clipboard.writeText(res.text);
-          toast("✨ Enhanced and copied to clipboard!");
+          await navigator.clipboard.writeText(res.text);
+          toast("Enhanced and copied to clipboard");
           loadState();
         } catch (err) {
           toast("Enhance failed: " + err.message);
         } finally {
-          btn.textContent = "✨ Enhance";
+          btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg> Enhance`;
         }
       };
 
