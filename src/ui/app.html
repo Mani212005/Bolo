@@ -503,16 +503,16 @@
   .settings-group {
     background: var(--card);
     border: 1px solid var(--card-border);
-    border-radius: var(--radius-lg);
-    padding: 20px;
+    border-radius: var(--radius-md);
+    padding: 18px 20px;
   }
   .settings-title {
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--muted);
-    margin-bottom: 14px;
+    margin-bottom: 12px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -521,11 +521,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 0;
+    padding: 12px 0;
     gap: 16px;
   }
   .setting-row + .setting-row {
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
   }
   .setting-info {
     flex: 1;
@@ -540,18 +540,68 @@
     color: var(--muted);
     margin-top: 2px;
   }
-  select, input[type="text"], textarea {
+  
+  /* Inputs, Textareas & Clean Flat Selects */
+  input[type="text"], textarea {
+    width: 100%;
+    box-sizing: border-box;
     background: var(--surface);
     border: 1px solid var(--card-border);
     border-radius: 8px;
     color: var(--text);
-    padding: 8px 12px;
+    padding: 10px 14px;
     font-size: 13.5px;
+    font-family: inherit;
     outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  select:focus, input:focus, textarea:focus {
-    border-color: rgba(255, 255, 255, 0.25);
+  input[type="text"]:focus, textarea:focus {
+    border-color: rgba(56, 189, 248, 0.4);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
   }
+
+  select {
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    appearance: none !important;
+    background-color: #1e202b !important;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239aa2b5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    background-size: 14px 14px !important;
+    border: 1px solid var(--card-border) !important;
+    border-radius: 8px !important;
+    color: var(--text) !important;
+    padding: 7px 32px 7px 12px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    font-family: inherit !important;
+    outline: none !important;
+    cursor: pointer !important;
+    box-shadow: none !important;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  select:focus {
+    border-color: rgba(56, 189, 248, 0.4) !important;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.12) !important;
+  }
+  select option {
+    background-color: #1a1b24;
+    color: #f0f3fa;
+  }
+
+  #scratchpadInput {
+    width: 100% !important;
+    min-height: 420px !important;
+    box-sizing: border-box !important;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif !important;
+    font-size: 14px !important;
+    line-height: 1.6 !important;
+    padding: 16px !important;
+    resize: vertical !important;
+    display: block !important;
+  }
+
   .toggle-switch {
     position: relative;
     width: 44px;
@@ -877,7 +927,7 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg>
           AI Prompt Enhance Template
         </div>
-        <p class="setting-desc">Instructions for the Groq LLM when clicking the ✨ Enhance button.</p>
+        <p class="setting-desc">Instructions for the Groq LLM when clicking the Enhance button.</p>
         <textarea id="enhancePromptInput" rows="5" style="width:100%; margin-top:10px;" placeholder="Leave empty for built-in prompt optimization defaults…"></textarea>
         <div style="display:flex; justify-content:flex-end; margin-top:8px;">
           <button class="action-btn" id="saveEnhancePrompt">Save Enhance Prompt</button>
