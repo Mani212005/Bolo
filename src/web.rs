@@ -11,6 +11,7 @@ use crate::vad::Control;
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,7 +63,12 @@ pub fn serve(
             let method = request.method().as_str().to_string();
             let url = request.url().to_string();
             let mut body_bytes = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut body_bytes);
+            if let Some(len) = request.body_length() {
+                body_bytes.resize(len, 0);
+                let _ = request.as_reader().read_exact(&mut body_bytes);
+            } else {
+                let _ = request.as_reader().read_to_end(&mut body_bytes);
+            }
             let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
             let result = route(

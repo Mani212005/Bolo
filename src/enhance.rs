@@ -11,11 +11,34 @@ filler words, false starts, and rambling structure. Do not add new requirements,
 opinions, or pleasantries. Output ONLY the rewritten prompt, with no preamble or \
 explanation.";
 
+pub fn get_groq_api_key() -> anyhow::Result<String> {
+    if let Ok(key) = std::env::var("GROQ_API_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let env_path = std::path::PathBuf::from(home).join(".env");
+        if let Ok(content) = std::fs::read_to_string(&env_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(val) = trimmed.strip_prefix("GROQ_API_KEY=") {
+                    let clean = val.trim_matches('"').trim_matches('\'').trim();
+                    if !clean.is_empty() {
+                        return Ok(clean.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Err(anyhow!("GROQ_API_KEY is not set (add it to ~/.env or export it)"))
+}
+
 /// Rewrite a transcript as a better LLM prompt via Groq's chat API.
-/// Uses GROQ_API_KEY from the environment (env only, never config).
+/// Uses GROQ_API_KEY from the environment or ~/.env.
 pub async fn enhance(cfg: &EnhanceConfig, text: &str) -> anyhow::Result<String> {
-    let api_key = std::env::var("GROQ_API_KEY")
-        .map_err(|_| anyhow!("GROQ_API_KEY is not set (Enhance uses Groq's LLM)"))?;
+    let api_key = get_groq_api_key()?;
     // ~/.config/bolo/enhance_prompt.txt lets the user standardize the shape
     // of enhanced prompts; the built-in prompt is the fallback.
     let custom = crate::userdata::enhance_prompt();

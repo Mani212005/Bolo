@@ -15,8 +15,7 @@ pub struct GroqStt {
 
 impl GroqStt {
     pub fn new(config: GroqConfig) -> anyhow::Result<Self> {
-        let api_key = std::env::var("GROQ_API_KEY")
-            .map_err(|_| anyhow!("GROQ_API_KEY is not set (export it; never put it in config)"))?;
+        let api_key = crate::enhance::get_groq_api_key()?;
         Ok(Self { client: reqwest::Client::new(), api_key, config })
     }
 
