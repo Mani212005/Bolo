@@ -283,9 +283,25 @@
     border-color: rgba(244, 63, 94, 0.3);
   }
   .action-btn.playing {
-    background: rgba(56, 189, 248, 0.18);
+    background: rgba(56, 189, 248, 0.22);
     color: var(--accent);
-    border-color: rgba(56, 189, 248, 0.35);
+    border-color: rgba(56, 189, 248, 0.45);
+    box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+  }
+  .action-btn.paused {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+  .action-btn.loading {
+    opacity: 0.8;
+    cursor: wait;
+  }
+  @keyframes spin {
+    100% { transform: rotate(360deg); }
+  }
+  .spin {
+    animation: spin 0.8s linear infinite;
   }
 
   /* Audio player sub-bar */
@@ -1012,6 +1028,197 @@
     $("settingNotifications").checked = !!state.notifications;
   }
 
+  // Dedicated Web Audio & HTML5 Audio playback manager
+  class VoicePlayer {
+    constructor() {
+      this.audio = null;
+      this.ctx = null;
+      this.source = null;
+      this.currentId = null;
+      this.currentBtn = null;
+      this.isPlaying = false;
+      this.isPaused = false;
+      this.audioBuffer = null;
+      this.startTime = 0;
+      this.pauseOffset = 0;
+    }
+
+    async toggle(audioId, btn) {
+      // If clicking the same item while active
+      if (this.currentId === audioId && (this.isPlaying || this.isPaused)) {
+        if (this.isPlaying) {
+          this.pause();
+        } else {
+          this.resume();
+        }
+        return;
+      }
+
+      // Switching items or new playback
+      this.stop();
+      this.currentId = audioId;
+      this.currentBtn = btn;
+      this.setBtnLoading(btn);
+
+      const url = `/api/audio?id=${encodeURIComponent(audioId)}`;
+
+      // Use Web Audio API for guaranteed WebKit playback & exact pause/resume
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!this.ctx) {
+          this.ctx = new AudioCtx();
+        }
+        if (this.ctx.state === "suspended") {
+          await this.ctx.resume();
+        }
+
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const arrayBuffer = await res.arrayBuffer();
+        this.audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+        this.playBuffer(0);
+      } catch (err) {
+        console.warn("WebAudio decode failed, falling back to HTMLAudioElement:", err);
+        this.playHtmlAudio(url);
+      }
+    }
+
+    playBuffer(offset = 0) {
+      if (!this.ctx || !this.audioBuffer) return;
+      if (this.source) {
+        try { this.source.stop(); } catch(e) {}
+        this.source.disconnect();
+      }
+
+      this.source = this.ctx.createBufferSource();
+      this.source.buffer = this.audioBuffer;
+      this.source.connect(this.ctx.destination);
+
+      this.startTime = this.ctx.currentTime - offset;
+      this.pauseOffset = offset;
+      this.isPlaying = true;
+      this.isPaused = false;
+      if (this.currentBtn) this.setBtnPlaying(this.currentBtn);
+
+      this.source.onended = () => {
+        if (this.isPlaying) {
+          this.stop();
+        }
+      };
+
+      this.source.start(0, offset);
+    }
+
+    playHtmlAudio(url) {
+      this.audio = new Audio(url);
+      this.audio.onplay = () => {
+        this.isPlaying = true;
+        this.isPaused = false;
+        if (this.currentBtn) this.setBtnPlaying(this.currentBtn);
+      };
+      this.audio.onpause = () => {
+        if (this.isPlaying) {
+          this.isPlaying = false;
+          this.isPaused = true;
+          if (this.currentBtn) this.setBtnPaused(this.currentBtn);
+        }
+      };
+      this.audio.onended = () => {
+        this.stop();
+      };
+      this.audio.onerror = (e) => {
+        console.error("Audio error:", e);
+        toast("Unable to play audio recording");
+        this.stop();
+      };
+      this.audio.play().catch(e => {
+        console.error("Play error:", e);
+        toast("Click again to play audio");
+        this.stop();
+      });
+    }
+
+    pause() {
+      if (this.source && this.ctx) {
+        this.pauseOffset = this.ctx.currentTime - this.startTime;
+        this.isPlaying = false;
+        this.isPaused = true;
+        try { this.source.stop(); } catch(e) {}
+        this.source = null;
+        if (this.currentBtn) this.setBtnPaused(this.currentBtn);
+      } else if (this.audio) {
+        this.audio.pause();
+      }
+    }
+
+    resume() {
+      if (this.audioBuffer && this.ctx) {
+        this.playBuffer(this.pauseOffset);
+      } else if (this.audio) {
+        this.audio.play().catch(e => console.error(e));
+      }
+    }
+
+    stop() {
+      if (this.source) {
+        try { this.source.stop(); } catch(e) {}
+        try { this.source.disconnect(); } catch(e) {}
+        this.source = null;
+      }
+      if (this.audio) {
+        this.audio.pause();
+        this.audio.currentTime = 0;
+        this.audio = null;
+      }
+      if (this.currentBtn) {
+        this.setBtnIdle(this.currentBtn);
+      }
+      this.currentId = null;
+      this.currentBtn = null;
+      this.isPlaying = false;
+      this.isPaused = false;
+      this.audioBuffer = null;
+      this.pauseOffset = 0;
+    }
+
+    setBtnIdle(btn) {
+      btn.classList.remove("playing", "paused", "loading");
+      btn.innerHTML = `
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        Hear Voice
+      `;
+    }
+
+    setBtnLoading(btn) {
+      btn.classList.remove("playing", "paused");
+      btn.classList.add("loading");
+      btn.innerHTML = `
+        <svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg>
+        Loading…
+      `;
+    }
+
+    setBtnPlaying(btn) {
+      btn.classList.remove("paused", "loading");
+      btn.classList.add("playing");
+      btn.innerHTML = `
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+        Pause
+      `;
+    }
+
+    setBtnPaused(btn) {
+      btn.classList.remove("playing", "loading");
+      btn.classList.add("paused");
+      btn.innerHTML = `
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        Resume
+      `;
+    }
+  }
+
+  const voicePlayer = new VoicePlayer();
+
   function renderFeed() {
     const feed = $("feed");
     const query = $("searchInput").value.trim().toLowerCase();
@@ -1104,71 +1311,7 @@
       if (audioBtn) {
         audioBtn.onclick = (e) => {
           e.stopPropagation();
-          const audioUrl = `/api/audio?id=${encodeURIComponent(audioId)}`;
-          
-          if (window.currentAudio && window.currentAudioBtn === audioBtn) {
-            if (!window.currentAudio.paused) {
-              window.currentAudio.pause();
-              audioBtn.classList.remove("playing");
-              audioBtn.innerHTML = `
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                Hear Voice
-              `;
-              return;
-            } else {
-              window.currentAudio.play();
-              audioBtn.classList.add("playing");
-              audioBtn.innerHTML = `
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
-                Pause
-              `;
-              return;
-            }
-          }
-          
-          if (window.currentAudio) {
-            window.currentAudio.pause();
-            if (window.currentAudioBtn) {
-              window.currentAudioBtn.classList.remove("playing");
-              window.currentAudioBtn.innerHTML = `
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                Hear Voice
-              `;
-            }
-          }
-          
-          const audio = new Audio(audioUrl);
-          window.currentAudio = audio;
-          window.currentAudioBtn = audioBtn;
-          
-          audioBtn.classList.add("playing");
-          audioBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
-            Playing…
-          `;
-          
-          audio.onended = () => {
-            audioBtn.classList.remove("playing");
-            audioBtn.innerHTML = `
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-              Hear Voice
-            `;
-          };
-          
-          audio.onerror = (err) => {
-            console.error("Audio playback error:", err);
-            toast("Audio file not found or unable to stream");
-            audioBtn.classList.remove("playing");
-            audioBtn.innerHTML = `
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-              Hear Voice
-            `;
-          };
-          
-          audio.play().catch(err => {
-            console.warn("Audio play blocked:", err);
-            toast("Click again to play audio");
-          });
+          voicePlayer.toggle(audioId, audioBtn);
         };
       }
 

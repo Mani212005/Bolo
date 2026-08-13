@@ -48,7 +48,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         window.contentView?.addSubview(webView)
 
-        if let url = URL(string: "http://127.0.0.1:4525") {
+        var port = "4525"
+        if CommandLine.arguments.count > 1 {
+            port = CommandLine.arguments[1]
+        } else {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let portFile = "\(home)/.local/share/bolo/port.txt"
+            if let saved = try? String(contentsOfFile: portFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !saved.isEmpty {
+                port = saved
+            }
+        }
+
+        if let url = URL(string: "http://127.0.0.1:\(port)") {
             let request = URLRequest(url: url)
             webView.load(request)
         }

@@ -37,12 +37,18 @@ pub fn serve(
     stt: Arc<dyn SttProvider>,
 ) {
     let mut port = cfg.ui.port;
+    let mut tries = 0;
     let server = loop {
         match tiny_http::Server::http(("127.0.0.1", port)) {
             Ok(s) => break s,
+            Err(e) if tries < 15 => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                tries += 1;
+            }
             Err(e) if port < cfg.ui.port + 5 => {
                 eprintln!("[web] port {port} unavailable ({e}); trying {}", port + 1);
                 port += 1;
+                tries = 0;
             }
             Err(e) => {
                 eprintln!("[web] settings app disabled: {e}");
@@ -50,6 +56,8 @@ pub fn serve(
             }
         }
     };
+    let _ = std::fs::create_dir_all(crate::userdata::data_dir());
+    let _ = std::fs::write(crate::userdata::data_dir().join("port.txt"), port.to_string());
     eprintln!("[web] settings & history dashboard on http://127.0.0.1:{port}");
     for mut request in server.incoming_requests() {
         let config_path = config_path.clone();
