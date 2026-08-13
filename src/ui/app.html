@@ -704,9 +704,15 @@
     <div class="card">
       <h2 style="font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:12px;">Quick Scratchpad</h2>
       <textarea id="scratchpadInput" rows="16" placeholder="A persistent workspace for notes, thoughts, and pasted transcriptions…"></textarea>
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px; gap:8px; flex-wrap:wrap;">
         <span style="font-size:12px; color:var(--muted);">Saved automatically to ~/.local/share/bolo/scratchpad.md</span>
-        <button class="action-btn" id="copyScratchpad">Copy All</button>
+        <div style="display:flex; gap:8px;">
+          <button class="action-btn" id="enhanceScratchpad">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg>
+            Enhance
+          </button>
+          <button class="action-btn" id="copyScratchpad">Copy All</button>
+        </div>
       </div>
     </div>
   </section>
@@ -1467,6 +1473,22 @@
   $("copyScratchpad").onclick = () => {
     navigator.clipboard.writeText($("scratchpadInput").value);
     toast("Scratchpad copied");
+  };
+  $("enhanceScratchpad").onclick = async () => {
+    const val = $("scratchpadInput").value.trim();
+    if (!val) return toast("Scratchpad is empty");
+    const btn = $("enhanceScratchpad");
+    btn.innerHTML = `<svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg> Enhancing…`;
+    try {
+      const res = await api("enhance", { method: "POST", body: val });
+      $("scratchpadInput").value = res.text;
+      await api("scratchpad", { method: "PUT", body: res.text });
+      toast("Enhanced scratchpad & saved");
+    } catch (err) {
+      toast("Enhance failed: " + err.message);
+    } finally {
+      btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg> Enhance`;
+    }
   };
 
   // Config Changes
