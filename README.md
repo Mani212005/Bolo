@@ -4,13 +4,11 @@ Fast, private voice dictation and speech-to-text for macOS and Linux. An open-so
 
 Press a global hotkey, speak naturally, and high-accuracy transcribed text appears directly at your cursor in any application.
 
-<p align="center">
-  <a href="https://github.com/Mani212005/Bolo/raw/main/assets/bolo.mp4">
-    <img src="assets/demo.gif" width="100%" alt="Bolo Product Demonstration Preview" style="border-radius: 8px;" />
-  </a>
-  <br />
-  <sub><i>🎥 Click the preview above to watch or download the full HD video (bolo.mp4)</i></sub>
-</p>
+
+
+https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
+
+
 
 ---
 
