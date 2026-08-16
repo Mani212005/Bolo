@@ -819,12 +819,26 @@
           </select>
         </div>
 
-        <div class="setting-row">
-          <div class="setting-info">
-            <div class="setting-label">Microphone Calibration</div>
-            <div class="setting-desc">Test 3-second sample capture & transcription</div>
+        <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div class="setting-info">
+              <div class="setting-label">Microphone Calibration & Voice Playback</div>
+              <div class="setting-desc">Record a 3s sample to test transcription and hear your own voice</div>
+            </div>
+            <button class="action-btn" id="micTestBtn">🎙️ Test Mic (3s)</button>
           </div>
-          <button class="action-btn" id="micTestBtn">Test Mic (3s)</button>
+          <div id="micTestResultBox" style="display: none; background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); border-radius: var(--radius-sm); padding: 12px 16px; margin-top: 4px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+              <div style="font-size: 13px; color: var(--text); flex: 1;">
+                <span style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 3px;">What Bolo Heard</span>
+                <span id="micTestHeardText" style="font-weight: 500; color: #fff;"></span>
+              </div>
+              <button id="micTestPlayBtn" class="action-btn" style="padding: 7px 14px; font-size: 12px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                <span>Hear Voice</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1029,7 +1043,9 @@
   }
 
   async function api(path, opts = {}) {
-    const res = await fetch(`/api/${path}`, opts);
+    opts.cache = "no-store";
+    const sep = path.includes("?") ? "&" : "?";
+    const res = await fetch(`/api/${path}${sep}_t=${Date.now()}`, opts);
     if (!res.ok) throw new Error(await res.text());
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("application/json")) return res.json();
@@ -1054,13 +1070,13 @@
   setInterval(async () => {
     try {
       const data = await api("state");
+      const hasChanged = JSON.stringify(data.history || []) !== JSON.stringify(state.history || []);
       state.status = data.status;
       state.history = data.history || [];
       updateStatusUI();
       const feed = $("feed");
       const hasCards = feed ? feed.querySelectorAll(".card").length > 0 : false;
-      if (!hasCards || state.history.length !== (state.prevHistLen || 0)) {
-        state.prevHistLen = state.history.length;
+      if (hasChanged || (!hasCards && state.history.length > 0)) {
         renderFeed();
       }
     } catch (e) {}
@@ -1565,17 +1581,28 @@
     toast("Enhance prompt template saved");
   };
 
-  // Mic Test
+  // Mic Test & Voice Playback
   $("micTestBtn").onclick = async () => {
     const btn = $("micTestBtn");
-    btn.textContent = "Listening (3s)…";
+    btn.textContent = "🎙️ Listening (3s)…";
+    $("micTestResultBox").style.display = "none";
     try {
       const res = await api("mic-test", { method: "POST" });
       toast(`Captured: "${res.text}"`);
+      $("micTestHeardText").textContent = `"${res.text || 'No speech detected'}"`;
+      $("micTestResultBox").style.display = "block";
+      if (res.audio_id) {
+        $("micTestPlayBtn").style.display = "flex";
+        $("micTestPlayBtn").onclick = () => {
+          voicePlayer.toggle(res.audio_id, $("micTestPlayBtn"));
+        };
+      } else {
+        $("micTestPlayBtn").style.display = "none";
+      }
     } catch (e) {
       toast("Mic test error: " + e.message);
     } finally {
-      btn.textContent = "Test Mic (3s)";
+      btn.textContent = "🎙️ Test Mic (3s)";
     }
   };
 

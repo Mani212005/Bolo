@@ -17,6 +17,7 @@ use crate::config::{Config, PIPELINE_SAMPLE_RATE};
 use crate::stt::groq::{encode_wav, CAPTURE_DUMP_PATH};
 use anyhow::Context;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 /// Config search order: ./config.toml (repo/dev use), then
@@ -52,10 +53,10 @@ fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config_path)?;
             return daemon::run(cfg, config_path);
         }
-        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quit" | "quick-splice" | "copy-splice")) => {
+        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quick-splice" | "copy-splice")) => {
             return client(cmd)
         }
-        Some("exit") => {
+        Some("exit" | "quit" | "stop") => {
             // Gracefully shut down the daemon if running, then say goodbye.
             let socket = daemon::socket_path();
             if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
@@ -71,7 +72,7 @@ fn main() -> anyhow::Result<()> {
             return open_settings_app(cfg.ui.port);
         }
         Some("transcribe") => {
-            // bolo transcribe <file.wav> — run the configured STT provider on
+            // bolo transcribe <file.wav> - run the configured STT provider on
             // a 16kHz mono WAV file (benchmarking / debugging).
             let cfg = Config::load(&config_path)?;
             let file = args.get(2).context("usage: bolo transcribe <file.wav>")?;
@@ -90,7 +91,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("model") => {
-            // bolo model download [name]  — pre-fetch a local whisper model.
+            // bolo model download [name]  - pre-fetch a local whisper model.
             let cfg = Config::load(&config_path)?;
             let name = match (args.get(2).map(String::as_str), args.get(3)) {
                 (Some("download"), name) => {
@@ -103,7 +104,11 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("record") => {
-            // Explicit interactive console recording mode
+            // Explicit interactive console recording mode continues below
+        }
+        Some("--help" | "-h" | "help") => {
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n");
+            return Ok(());
         }
         None => {
             // Default `bolo` command: ensure background daemon is up, then greet
@@ -129,12 +134,15 @@ fn main() -> anyhow::Result<()> {
                     .spawn();
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
-            println!("Hello Bolo!");
+            println!("hello Bolo!");
             let cfg = Config::load(&config_path)?;
             let _ = open_settings_app(cfg.ui.port);
             return Ok(());
         }
-        _ => {}
+        Some(other) => {
+            eprintln!("Unknown command '{other}'. Run `bolo --help` for usage.");
+            return Ok(());
+        }
     }
     let cfg = Config::load(&config_path)?;
 
@@ -239,12 +247,20 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
         if let Some(parent) = exe.parent() {
             let native_ui = parent.join("bolo-ui");
             if native_ui.exists() {
-                let _ = std::process::Command::new(native_ui).spawn();
+                let _ = std::process::Command::new(native_ui)
+                    .arg(port.to_string())
+                    .process_group(0)
+                    .spawn();
                 return Ok(());
             }
         }
     }
-    if std::process::Command::new("bolo-ui").spawn().is_ok() {
+    if std::process::Command::new("bolo-ui")
+        .arg(port.to_string())
+        .process_group(0)
+        .spawn()
+        .is_ok()
+    {
         return Ok(());
     }
 

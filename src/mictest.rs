@@ -1,10 +1,10 @@
-//! 3-second mic test: record → resample → transcribe with the given config.
+//! 3-second mic test: record -> resample -> transcribe with the given config.
 //! Blocking; run it on its own thread (extracted from the retired TUI).
 
 use crate::config::Config;
 use std::time::{Duration, Instant};
 
-pub fn run(cfg: &Config, seconds: u64) -> anyhow::Result<String> {
+pub fn run(cfg: &Config, seconds: u64) -> anyhow::Result<(String, String)> {
     let (audio_tx, audio_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
     let (stream, info) = crate::audio::start_capture(audio_tx)?;
     let mut resampler = crate::resample::StreamResampler::new(info.sample_rate)?;
@@ -20,8 +20,14 @@ pub fn run(cfg: &Config, seconds: u64) -> anyhow::Result<String> {
     drop(stream);
     anyhow::ensure!(!samples.is_empty(), "no audio captured (mic wedged?)");
     let wav = crate::stt::groq::encode_wav(&samples)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let audio_id = format!("mictest_{now_ms}");
+    let _ = crate::userdata::save_recording_wav(&audio_id, &wav);
     let provider = crate::stt::make_provider(cfg)?;
     let runtime = tokio::runtime::Runtime::new()?;
     let transcript = runtime.block_on(provider.transcribe(wav))?;
-    Ok(transcript.text)
+    Ok((transcript.text, audio_id))
 }

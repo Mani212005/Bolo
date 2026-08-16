@@ -85,15 +85,25 @@ fi
 say "Building Bolo (release)…"
 ( cd "$REPO" && cargo build --release )
 
-mkdir -p "$BIN_DIR" "$CONF_DIR"
-cp "$REPO/target/release/bolo" "$BIN_DIR/bolo"
-say "Installed $BIN_DIR/bolo"
+# Install to ~/.local/bin and ~/.cargo/bin
+mkdir -p "$HOME/.local/bin" "$CONF_DIR"
+cp "$REPO/target/release/bolo" "$HOME/.local/bin/bolo"
+say "Installed $HOME/.local/bin/bolo"
+
+if [ -d "$HOME/.cargo/bin" ]; then
+    cp "$REPO/target/release/bolo" "$HOME/.cargo/bin/bolo"
+    say "Installed $HOME/.cargo/bin/bolo"
+fi
 
 if [ "$OS" = "Darwin" ]; then
     say "Compiling native Cocoa popup app (bolo-ui)…"
     swiftc -O "$REPO/src/ui/BoloApp.swift" -o "$REPO/target/release/bolo-ui" -framework Cocoa -framework WebKit
-    cp "$REPO/target/release/bolo-ui" "$BIN_DIR/bolo-ui"
-    say "Installed $BIN_DIR/bolo-ui"
+    cp "$REPO/target/release/bolo-ui" "$HOME/.local/bin/bolo-ui"
+    say "Installed $HOME/.local/bin/bolo-ui"
+    if [ -d "$HOME/.cargo/bin" ]; then
+        cp "$REPO/target/release/bolo-ui" "$HOME/.cargo/bin/bolo-ui"
+        say "Installed $HOME/.cargo/bin/bolo-ui"
+    fi
 fi
 
 # ---------------------------------------------------------------- config

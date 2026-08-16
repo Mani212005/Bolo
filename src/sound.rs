@@ -22,7 +22,7 @@ impl Chime {
     }
 }
 
-/// assets/ next to the repo the binary was built in (target/release/bolo →
+/// assets/ next to the repo the binary was built in (target/release/bolo ->
 /// ../../assets), falling back to assets/ under the current directory.
 fn asset_path(name: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -37,6 +37,8 @@ fn asset_path(name: &str) -> Option<PathBuf> {
 
 /// Fire-and-forget chime via afplay (macOS) or paplay (Linux); never blocks the caller.
 /// spawned with std::process (not tokio) — see ClipboardInjector for why.
+/// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
+/// spawned with std::process (not tokio) - see ClipboardInjector for why.
 pub fn play(cfg: &Config, chime: Chime) {
     if !cfg.daemon.sounds {
         return;
@@ -46,6 +48,11 @@ pub fn play(cfg: &Config, chime: Chime) {
     };
     let Some(path) = asset_path(filename) else {
         eprintln!("[sound] {} skipped: assets/{} not found", chime.as_str(), filename);
+    let Some(file_name) = chime.file() else {
+        return;
+    };
+    let Some(path) = asset_path(file_name) else {
+        eprintln!("[sound] {} skipped: assets/{} not found", chime.as_str(), file_name);
         return;
     };
     let player = if cfg!(target_os = "macos") {
@@ -53,6 +60,7 @@ pub fn play(cfg: &Config, chime: Chime) {
     } else {
         "paplay"
     };
+
     match std::process::Command::new(player)
         .arg(&path)
         .stdout(std::process::Stdio::null())
