@@ -22,13 +22,15 @@ impl Chime {
 /// Ensures the start audio MP3 is extracted from binary bytes to a temporary path.
 fn get_start_audio_file() -> PathBuf {
     let tmp_path = std::env::temp_dir().join("bolo_start_chime.mp3");
-    if !tmp_path.exists() {
+    let needs_write = !tmp_path.exists()
+        || fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0) != START_MP3_BYTES.len() as u64;
+    if needs_write {
         let _ = fs::write(&tmp_path, START_MP3_BYTES);
     }
     tmp_path
 }
 
-/// Fire-and-forget chime via afplay on macOS (at 30% volume) or paplay on Linux; never blocks the caller.
+/// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
 pub fn play(cfg: &Config, chime: Chime) {
     if !cfg.daemon.sounds {
         return;
@@ -48,15 +50,15 @@ pub fn play(cfg: &Config, chime: Chime) {
 
     let mut cmd = std::process::Command::new(player);
     if is_macos {
-        // Reduce volume to 30% (-v 0.3) for a pleasant, non-jarring audio chime
-        cmd.arg("-v").arg("0.3");
+        // Set volume to 50% (-v 0.5) for crisp, clear, pleasant audio feedback
+        cmd.arg("-v").arg("0.5");
     }
     cmd.arg(&path);
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
 
     match cmd.spawn() {
-        Ok(_) => eprintln!("[sound] playing {} via {player} (30% volume)", chime.as_str()),
+        Ok(_) => eprintln!("[sound] playing {} via {player} (50% volume, {})", chime.as_str(), path.display()),
         Err(e) => eprintln!("[sound] {} failed with {player}: {e}", chime.as_str()),
     }
 }
@@ -69,6 +71,11 @@ mod tests {
     fn test_embedded_audio_file() {
         let path = get_start_audio_file();
         assert!(path.exists(), "Embedded MP3 should be extracted to temp directory");
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            START_MP3_BYTES.len() as u64,
+            "Temp MP3 file size must match embedded byte length"
+        );
     }
 
     #[test]
