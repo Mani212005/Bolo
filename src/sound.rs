@@ -30,9 +30,20 @@ fn get_start_audio_file() -> PathBuf {
     tmp_path
 }
 
-/// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
+/// Fire-and-forget chime via afplay on macOS (at 50% volume) or paplay on Linux; never blocks the caller.
+/// Checks the latest `sounds` setting dynamically from active config so UI toggle changes apply live.
 pub fn play(cfg: &Config, chime: Chime) {
-    if !cfg.daemon.sounds {
+    // Dynamic real-time lookup of sounds preference from active config.toml
+    let sounds_enabled = if let Some(home) = std::env::var_os("HOME") {
+        let local_file = std::path::PathBuf::from("config.toml");
+        let conf_file = std::path::PathBuf::from(home).join(".config/bolo/config.toml");
+        let target = if local_file.exists() { &local_file } else { &conf_file };
+        Config::load(target).map(|c| c.daemon.sounds).unwrap_or(cfg.daemon.sounds)
+    } else {
+        cfg.daemon.sounds
+    };
+
+    if !sounds_enabled {
         return;
     }
 
