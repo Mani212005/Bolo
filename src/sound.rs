@@ -28,7 +28,7 @@ fn get_start_audio_file() -> PathBuf {
     tmp_path
 }
 
-/// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
+/// Fire-and-forget chime via afplay on macOS (at 30% volume) or paplay on Linux; never blocks the caller.
 pub fn play(cfg: &Config, chime: Chime) {
     if !cfg.daemon.sounds {
         return;
@@ -39,19 +39,24 @@ pub fn play(cfg: &Config, chime: Chime) {
         Chime::Stop => return, // Stop chime is disabled as requested by Captain
     };
 
-    let player = if cfg!(target_os = "macos") {
+    let is_macos = cfg!(target_os = "macos");
+    let player = if is_macos {
         "afplay"
     } else {
         "paplay"
     };
 
-    match std::process::Command::new(player)
-        .arg(&path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => eprintln!("[sound] playing {} via {player} ({})", chime.as_str(), path.display()),
+    let mut cmd = std::process::Command::new(player);
+    if is_macos {
+        // Reduce volume to 30% (-v 0.3) for a pleasant, non-jarring audio chime
+        cmd.arg("-v").arg("0.3");
+    }
+    cmd.arg(&path);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+
+    match cmd.spawn() {
+        Ok(_) => eprintln!("[sound] playing {} via {player} (30% volume)", chime.as_str()),
         Err(e) => eprintln!("[sound] {} failed with {player}: {e}", chime.as_str()),
     }
 }
