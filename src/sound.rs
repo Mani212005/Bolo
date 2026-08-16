@@ -1,5 +1,8 @@
 use crate::config::Config;
+use std::fs;
 use std::path::PathBuf;
+
+const START_MP3_BYTES: &[u8] = include_bytes!("../assets/49447089-game-start-317318.mp3");
 
 #[derive(Debug, Clone, Copy)]
 pub enum Chime {
@@ -8,12 +11,6 @@ pub enum Chime {
 }
 
 impl Chime {
-    fn file(self) -> Option<&'static str> {
-        match self {
-            Chime::Start => Some("49447089-game-start-317318.mp3"),
-            Chime::Stop => None,
-        }
-    }
     fn as_str(self) -> &'static str {
         match self {
             Chime::Start => "start",
@@ -22,32 +19,26 @@ impl Chime {
     }
 }
 
-/// assets/ next to the repo the binary was built in (target/release/bolo ->
-/// ../../assets), falling back to assets/ under the current directory.
-fn asset_path(name: &str) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("../../assets").join(name));
-        }
+/// Ensures the start audio MP3 is extracted from binary bytes to a temporary path.
+fn get_start_audio_file() -> PathBuf {
+    let tmp_path = std::env::temp_dir().join("bolo_start_chime.mp3");
+    if !tmp_path.exists() {
+        let _ = fs::write(&tmp_path, START_MP3_BYTES);
     }
-    candidates.push(PathBuf::from("assets").join(name));
-    candidates.into_iter().find(|p| p.exists())
+    tmp_path
 }
 
 /// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
-/// spawned with std::process (not tokio) - see ClipboardInjector for why.
 pub fn play(cfg: &Config, chime: Chime) {
     if !cfg.daemon.sounds {
         return;
     }
-    let Some(filename) = chime.file() else {
-        return;
+
+    let path = match chime {
+        Chime::Start => get_start_audio_file(),
+        Chime::Stop => return, // Stop chime is disabled as requested by Captain
     };
-    let Some(path) = asset_path(filename) else {
-        eprintln!("[sound] {} skipped: assets/{} not found", chime.as_str(), filename);
-        return;
-    };
+
     let player = if cfg!(target_os = "macos") {
         "afplay"
     } else {
@@ -60,8 +51,8 @@ pub fn play(cfg: &Config, chime: Chime) {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(_) => eprintln!("[sound] {}", chime.as_str()),
-        Err(e) => eprintln!("[sound] {} failed: {e}", chime.as_str()),
+        Ok(_) => eprintln!("[sound] playing {} via {player} ({})", chime.as_str(), path.display()),
+        Err(e) => eprintln!("[sound] {} failed with {player}: {e}", chime.as_str()),
     }
 }
 
@@ -70,24 +61,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_chime_mapping() {
-        assert_eq!(Chime::Start.file(), Some("49447089-game-start-317318.mp3"));
-        assert_eq!(Chime::Stop.file(), None);
-        assert_eq!(Chime::Start.as_str(), "start");
-        assert_eq!(Chime::Stop.as_str(), "stop");
-    }
-
-    #[test]
-    fn test_asset_path() {
-        let start_path = asset_path("49447089-game-start-317318.mp3");
-        assert!(start_path.is_some(), "assets/49447089-game-start-317318.mp3 should exist");
-        assert!(asset_path("stop.wav").is_none(), "assets/stop.wav should not exist");
+    fn test_embedded_audio_file() {
+        let path = get_start_audio_file();
+        assert!(path.exists(), "Embedded MP3 should be extracted to temp directory");
     }
 
     #[test]
     fn test_play_stop_is_noop() {
         if let Ok(cfg) = Config::load(std::path::Path::new("config.toml")) {
-            // play Chime::Stop should return without error or playing sound
             play(&cfg, Chime::Stop);
         }
     }
