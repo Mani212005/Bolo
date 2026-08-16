@@ -88,10 +88,16 @@ say "Building Bolo (release)…"
 # Install to ~/.local/bin and ~/.cargo/bin
 mkdir -p "$HOME/.local/bin" "$CONF_DIR"
 cp "$REPO/target/release/bolo" "$HOME/.local/bin/bolo"
+if [ "$OS" = "Darwin" ]; then
+    codesign --force --deep -s - "$HOME/.local/bin/bolo"
+fi
 say "Installed $HOME/.local/bin/bolo"
 
 if [ -d "$HOME/.cargo/bin" ]; then
     cp "$REPO/target/release/bolo" "$HOME/.cargo/bin/bolo"
+    if [ "$OS" = "Darwin" ]; then
+        codesign --force --deep -s - "$HOME/.cargo/bin/bolo"
+    fi
     say "Installed $HOME/.cargo/bin/bolo"
 fi
 
@@ -99,9 +105,11 @@ if [ "$OS" = "Darwin" ]; then
     say "Compiling native Cocoa popup app (bolo-ui)…"
     swiftc -O "$REPO/src/ui/BoloApp.swift" -o "$REPO/target/release/bolo-ui" -framework Cocoa -framework WebKit
     cp "$REPO/target/release/bolo-ui" "$HOME/.local/bin/bolo-ui"
+    codesign --force --deep -s - "$HOME/.local/bin/bolo-ui"
     say "Installed $HOME/.local/bin/bolo-ui"
     if [ -d "$HOME/.cargo/bin" ]; then
         cp "$REPO/target/release/bolo-ui" "$HOME/.cargo/bin/bolo-ui"
+        codesign --force --deep -s - "$HOME/.cargo/bin/bolo-ui"
         say "Installed $HOME/.cargo/bin/bolo-ui"
     fi
 fi
