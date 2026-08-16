@@ -4,6 +4,10 @@ Fast, private voice dictation and speech-to-text for macOS and Linux. An open-so
 
 Press a global hotkey, speak naturally, and high-accuracy transcribed text appears directly at your cursor in any application.
 
+<p align="center">
+  <video src="assets/bolo.mp4" controls="controls" width="100%" style="max-height: 500px; border-radius: 8px;"></video>
+</p>
+
 ---
 
 ## Bolo vs. Wispr Flow vs. Superwhisper
