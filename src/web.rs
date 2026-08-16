@@ -97,6 +97,12 @@ pub fn serve(
                     .with_header(
                         tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
                             .unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
                     ),
                 Ok(WebResponse::Json(v)) => tiny_http::Response::from_string(v.to_string())
                     .with_header(
@@ -104,6 +110,12 @@ pub fn serve(
                     )
                     .with_header(
                         tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
                     ),
                 Ok(WebResponse::Text(t)) => tiny_http::Response::from_string(t)
                     .with_header(
@@ -112,6 +124,12 @@ pub fn serve(
                             "text/plain; charset=utf-8",
                         )
                         .unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
                     ),
                 Ok(WebResponse::Audio(bytes)) => {
                     let len = bytes.len();
@@ -161,15 +179,16 @@ fn route(
     pipeline_tx: &Sender<PipelineMsg>,
     stt: &Arc<dyn SttProvider>,
 ) -> anyhow::Result<WebResponse> {
-    if method == "GET" && (url == "/" || url == "/index.html") {
+    let (clean_path, query_str) = url.split_once('?').unwrap_or((url, ""));
+    if (method == "GET" || method == "HEAD") && (clean_path == "/" || clean_path == "/index.html") {
         return Ok(WebResponse::Html(APP_HTML.to_string()));
     }
-    if method == "GET" && url == "/api/state" {
+    if method == "GET" && clean_path == "/api/state" {
         return Ok(WebResponse::Json(state(config_path, shared)?));
     }
-    if method == "GET" && url.starts_with("/api/audio") {
-        let id = if let Some(query) = url.split_once('?') {
-            query.1.split('&').find_map(|pair| {
+    if (method == "GET" || method == "HEAD") && clean_path.starts_with("/api/audio") {
+        let id = if !query_str.is_empty() {
+            query_str.split('&').find_map(|pair| {
                 let (k, v) = pair.split_once('=')?;
                 if k == "id" || k == "file" {
                     Some(v.to_string())
@@ -178,7 +197,7 @@ fn route(
                 }
             })
         } else {
-            url.strip_prefix("/api/audio/")
+            clean_path.strip_prefix("/api/audio/")
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
@@ -189,9 +208,9 @@ fn route(
         }
         return Ok(WebResponse::NotFound);
     }
-    if method == "DELETE" && url.starts_with("/api/history") {
-        let id = if let Some(query) = url.split_once('?') {
-            query.1.split('&').find_map(|pair| {
+    if method == "DELETE" && clean_path.starts_with("/api/history") {
+        let id = if !query_str.is_empty() {
+            query_str.split('&').find_map(|pair| {
                 let (k, v) = pair.split_once('=')?;
                 if k == "id" {
                     Some(v.to_string())
@@ -200,7 +219,7 @@ fn route(
                 }
             })
         } else {
-            url.strip_prefix("/api/history/")
+            clean_path.strip_prefix("/api/history/")
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
@@ -212,7 +231,7 @@ fn route(
             return Ok(WebResponse::Json(json!({ "ok": true, "cleared": true })));
         }
     }
-    if method == "POST" && url == "/api/toggle" {
+    if method == "POST" && clean_path == "/api/toggle" {
         let mut s = shared.lock().unwrap();
         let status = match s.phase {
             Phase::Idle => {
@@ -238,7 +257,7 @@ fn route(
         };
         return Ok(WebResponse::Json(json!({ "ok": true, "phase": status })));
     }
-    if method == "POST" && url == "/api/upload-transcribe" {
+    if method == "POST" && clean_path == "/api/upload-transcribe" {
         anyhow::ensure!(!body_bytes.is_empty(), "empty audio file");
         let runtime = tokio::runtime::Runtime::new()?;
         let stt = Arc::clone(stt);
@@ -256,7 +275,7 @@ fn route(
         }
         return Ok(WebResponse::Json(json!({ "ok": true, "text": text })));
     }
-    if method == "POST" && url == "/api/config" {
+    if method == "POST" && clean_path == "/api/config" {
         let changes: Value = serde_json::from_str(body).context("bad JSON body")?;
         let mut doc = ConfigDoc::load(config_path)?;
         if let Some(v) = changes["provider"].as_str() {
@@ -284,7 +303,7 @@ fn route(
         eprintln!("[web] config saved");
         return Ok(WebResponse::Json(json!({ "ok": true, "needs_restart": true })));
     }
-    if method == "POST" && url == "/api/restart" {
+    if method == "POST" && clean_path == "/api/restart" {
         // Reply first; the restart tears this process down.
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -302,25 +321,25 @@ fn route(
         });
         return Ok(WebResponse::Json(json!({ "ok": true })));
     }
-    if method == "GET" && url == "/api/vocab" {
+    if method == "GET" && clean_path == "/api/vocab" {
         return Ok(WebResponse::Text(vocab_terms().join("\n")));
     }
-    if method == "PUT" && url == "/api/vocab" {
+    if method == "PUT" && clean_path == "/api/vocab" {
         crate::userdata::write_keeping_comments("vocabulary.txt", body)?;
         return Ok(WebResponse::Json(json!({ "ok": true })));
     }
-    if method == "PUT" && url == "/api/enhance-prompt" {
+    if method == "PUT" && clean_path == "/api/enhance-prompt" {
         crate::userdata::write_keeping_comments("enhance_prompt.txt", body)?;
         return Ok(WebResponse::Json(json!({ "ok": true })));
     }
-    if method == "GET" && url == "/api/scratchpad" {
+    if method == "GET" && clean_path == "/api/scratchpad" {
         return Ok(WebResponse::Text(crate::userdata::read_scratchpad()));
     }
-    if method == "PUT" && url == "/api/scratchpad" {
+    if method == "PUT" && clean_path == "/api/scratchpad" {
         crate::userdata::write_scratchpad(body)?;
         return Ok(WebResponse::Json(json!({ "ok": true })));
     }
-    if method == "POST" && url == "/api/enhance" {
+    if method == "POST" && clean_path == "/api/enhance" {
         anyhow::ensure!(!body.trim().is_empty(), "nothing to enhance");
         let runtime = tokio::runtime::Runtime::new()?;
         let enhanced = runtime.block_on(crate::enhance::enhance(&cfg.enhance, body))?;
@@ -328,7 +347,7 @@ fn route(
         shared.lock().unwrap().last_text = Some(enhanced.clone());
         return Ok(WebResponse::Json(json!({ "text": enhanced })));
     }
-    if method == "POST" && url == "/api/hotkeys" {
+    if method == "POST" && clean_path == "/api/hotkeys" {
         let keys: Value = serde_json::from_str(body).context("bad JSON body")?;
         let get = |k: &str| -> anyhow::Result<String> {
             let v = keys[k].as_str().context("missing hotkey")?.trim();
@@ -346,7 +365,7 @@ fn route(
         anyhow::ensure!(status.success(), "install-hotkey.sh failed");
         return Ok(WebResponse::Json(json!({ "ok": true })));
     }
-    if method == "POST" && url == "/api/mic-test" {
+    if method == "POST" && clean_path == "/api/mic-test" {
         let fresh = Config::load(config_path)?;
         let phase = shared.lock().unwrap().phase;
         anyhow::ensure!(
@@ -354,8 +373,8 @@ fn route(
             "daemon is {} — finish the dictation first",
             phase.as_str()
         );
-        let text = crate::mictest::run(&fresh, 3)?;
-        return Ok(WebResponse::Json(json!({ "text": text })));
+        let (text, audio_id) = crate::mictest::run(&fresh, 3)?;
+        return Ok(WebResponse::Json(json!({ "text": text, "audio_id": audio_id })));
     }
     Ok(WebResponse::NotFound)
 }
