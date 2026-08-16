@@ -35,8 +35,6 @@ fn asset_path(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-/// Fire-and-forget chime via afplay (macOS) or paplay (Linux); never blocks the caller.
-/// spawned with std::process (not tokio) — see ClipboardInjector for why.
 /// Fire-and-forget chime via afplay on macOS or paplay on Linux; never blocks the caller.
 /// spawned with std::process (not tokio) - see ClipboardInjector for why.
 pub fn play(cfg: &Config, chime: Chime) {
@@ -48,11 +46,6 @@ pub fn play(cfg: &Config, chime: Chime) {
     };
     let Some(path) = asset_path(filename) else {
         eprintln!("[sound] {} skipped: assets/{} not found", chime.as_str(), filename);
-    let Some(file_name) = chime.file() else {
-        return;
-    };
-    let Some(path) = asset_path(file_name) else {
-        eprintln!("[sound] {} skipped: assets/{} not found", chime.as_str(), file_name);
         return;
     };
     let player = if cfg!(target_os = "macos") {
