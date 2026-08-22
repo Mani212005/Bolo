@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/Bolo.png" alt="Bolo Logo" width="120" />
+</p>
+
 # Bolo: Open-Source Voice Dictation for macOS & Linux
 
 Fast, private voice dictation and speech-to-text for macOS and Linux. An open-source alternative to Wispr Flow and Superwhisper with on-device local Whisper and ultra-fast Groq Whisper STT.
