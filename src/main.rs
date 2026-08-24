@@ -11,6 +11,7 @@ mod sound;
 mod stt;
 mod userdata;
 mod vad;
+mod vocab;
 mod web;
 
 use crate::config::{Config, PIPELINE_SAMPLE_RATE};

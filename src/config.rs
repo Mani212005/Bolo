@@ -23,6 +23,20 @@ pub struct Config {
     pub enhance: EnhanceConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub vocab: VocabConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VocabConfig {
+    pub enabled: bool,
+}
+
+impl Default for VocabConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +45,7 @@ pub struct UiConfig {
     /// Port for the settings app, served on 127.0.0.1 only.
     pub port: u16,
 }
+
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -99,16 +114,33 @@ impl Default for DaemonConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_restore_delay_ms() -> u64 {
+    300
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct InjectConfig {
     pub method: InjectMethod,
     pub type_delay_ms: u64,
+    #[serde(default = "default_true")]
+    pub restore_clipboard: bool,
+    #[serde(default = "default_restore_delay_ms")]
+    pub restore_delay_ms: u64,
 }
 
 impl Default for InjectConfig {
     fn default() -> Self {
-        Self { method: InjectMethod::Paste, type_delay_ms: 2 }
+        Self {
+            method: InjectMethod::Paste,
+            type_delay_ms: 2,
+            restore_clipboard: true,
+            restore_delay_ms: 300,
+        }
     }
 }
 
