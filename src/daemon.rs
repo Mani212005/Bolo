@@ -97,6 +97,12 @@ pub(crate) struct Shared {
     clip_snapshot: Option<String>,
     /// Most recent finished transcript (or enhanced text); what Alt+I types.
     pub(crate) last_text: Option<String>,
+    /// Vision circle gesture detector active for current session
+    pub(crate) vision_detector: Option<crate::vision::CircleGestureDetector>,
+    /// Directory of current recording session for saving context bundle
+    pub(crate) vision_session_dir: Option<PathBuf>,
+    /// Chronological context images captured during session
+    pub(crate) captured_context_images: Vec<PathBuf>,
 }
 
 pub(crate) enum PipelineMsg {
@@ -253,6 +259,9 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         toggle_t0: None,
         clip_snapshot: None,
         last_text: None,
+        vision_detector: None,
+        vision_session_dir: None,
+        captured_context_images: Vec::new(),
     }));
     let (start_tx, start_rx) = crossbeam_channel::unbounded::<()>();
     let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded::<PipelineMsg>();
@@ -600,26 +609,66 @@ fn finalize(
         );
         Ok(Some((used, text, last_audio_id, total_duration_s)))
     });
-    match outcome {
+    match &outcome {
         Ok(None) => {
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
         Ok(Some((used, text, audio_id, duration_s))) => {
-            let head = match used {
+            let head = match *used {
                 "paste" => "Pasted + on clipboard",
                 "portal" => "Typed + copied — Ctrl+V pastes it elsewhere",
                 _ => "On clipboard — paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
-            crate::userdata::append_history("dictation", &text, audio_id.as_deref(), Some(duration_s));
-            shared.lock().unwrap().last_text = Some(text);
+            crate::userdata::append_history("dictation", text, audio_id.as_deref(), Some(*duration_s));
+            shared.lock().unwrap().last_text = Some(text.clone());
         }
         Err(e) => {
             eprintln!("[daemon] session failed: {e:#}");
             notify(cfg, &format!("Error: {e}"));
         }
     }
+
+    let (vision_session_dir, captured_images, session_duration_s) = {
+        let mut s = shared.lock().unwrap();
+        let duration = s.toggle_t0.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+        let dir = s.vision_session_dir.take();
+        let images = std::mem::take(&mut s.captured_context_images);
+        s.vision_detector = None;
+        (dir, images, duration)
+    };
+
+    let transcript_text = match &outcome {
+        Ok(Some((_, text, _, _))) => text.as_str(),
+        _ => "",
+    };
+
+    let has_transcript = !transcript_text.trim().is_empty();
+    let has_context = !captured_images.is_empty();
+
+    if crate::vision::is_accidental_session(has_transcript, has_context, session_duration_s) {
+        eprintln!("[vision] accidental short recording (<2.5s) discarded");
+        if let Some(session_dir) = vision_session_dir {
+            let _ = std::fs::remove_dir_all(&session_dir);
+        }
+    } else if let Some(session_dir) = vision_session_dir {
+        match crate::vision::write_context_bundle(&session_dir, transcript_text, &captured_images) {
+            Ok(path) => eprintln!("[vision] saved context bundle: {}", path.display()),
+            Err(e) => eprintln!("[vision] failed writing context bundle: {e:#}"),
+        }
+        let sessions_dir = crate::userdata::sessions_dir();
+        if let Ok(removed) = crate::vision::prune_sessions(
+            &sessions_dir,
+            crate::vision::DEFAULT_MAX_AGE_SECS,
+            crate::vision::DEFAULT_MAX_BYTES,
+        ) {
+            if removed > 0 {
+                eprintln!("[vision] pruned {} old session folder(s)", removed);
+            }
+        }
+    }
+
     let mut s = shared.lock().unwrap();
     s.phase = Phase::Idle;
     s.clip_snapshot = None;
@@ -645,6 +694,16 @@ fn handle_client(
                 Phase::Idle => {
                     s.phase = Phase::Recording;
                     s.toggle_t0 = Some(Instant::now());
+                    if cfg.vision.enabled {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
+                        s.vision_detector = Some(crate::vision::CircleGestureDetector::new(cfg.vision.min_angle_degrees));
+                        s.vision_session_dir = Some(session_dir);
+                        s.captured_context_images.clear();
+                    }
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
                     notify(cfg, "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)");
@@ -670,6 +729,45 @@ fn handle_client(
                 }
                 Phase::Processing => "busy processing".to_string(),
             }
+        }
+        cmd if cmd.starts_with("mouse ") => {
+            let mut s = shared.lock().unwrap();
+            if s.phase == Phase::Recording && cfg.vision.enabled {
+                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    if let (Ok(x), Ok(y)) = (parts[1].parse::<f64>(), parts[2].parse::<f64>()) {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0);
+                        let detected = s
+                            .vision_detector
+                            .as_mut()
+                            .and_then(|detector| detector.add((x, y), now_secs));
+
+                        if let Some(gesture) = detected {
+                            let count = s.captured_context_images.len() + 1;
+                            if let Some(session_dir) = s.vision_session_dir.clone() {
+                                let img_path = session_dir.join(format!("context-{count}.png"));
+                                drop(s);
+                                match crate::vision::capture_screen(gesture, &img_path) {
+                                    Ok(()) => {
+                                        let mut s = shared.lock().unwrap();
+                                        s.captured_context_images.push(img_path.clone());
+                                        eprintln!("[vision] captured context image: {}", img_path.display());
+                                        notify(cfg, "Screen context captured 📸");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[vision] gesture recognized but screen capture failed: {e:#}");
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            "ok".to_string()
         }
         "pause" => {
             let mut s = shared.lock().unwrap();

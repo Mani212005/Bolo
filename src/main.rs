@@ -11,6 +11,7 @@ mod sound;
 mod stt;
 mod userdata;
 mod vad;
+mod vision;
 mod vocab;
 mod web;
 

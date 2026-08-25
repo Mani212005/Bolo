@@ -1,7 +1,6 @@
 use super::HotkeyListener;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::os::raw::c_void;
-use std::sync::Arc;
 
 type CGEventRef = *mut c_void;
 type CGEventTapProxy = *mut c_void;
@@ -22,6 +21,9 @@ const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
 const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
 
+const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
+const K_CG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
+const K_CG_EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
 const K_CG_EVENT_KEY_DOWN: u32 = 10;
 const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
 const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFFFFFF;
@@ -41,6 +43,13 @@ const KEY_V: i64 = 9;
 const KEY_P: i64 = 35;
 const KEY_I: i64 = 34;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapCreate(
@@ -54,6 +63,7 @@ extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+    fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -91,7 +101,13 @@ unsafe extern "C" fn event_tap_callback(
         return event;
     }
 
-    if event_type == K_CG_EVENT_KEY_DOWN {
+    if event_type == K_CG_EVENT_MOUSE_MOVED
+        || event_type == K_CG_EVENT_LEFT_MOUSE_DRAGGED
+        || event_type == K_CG_EVENT_RIGHT_MOUSE_DRAGGED
+    {
+        let loc = CGEventGetLocation(event);
+        (ctx.callback)(&format!("mouse {:.1} {:.1}", loc.x, loc.y));
+    } else if event_type == K_CG_EVENT_KEY_DOWN {
         let keycode = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE);
         let flags = CGEventGetFlags(event);
         let autorepeat = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT);
@@ -141,8 +157,11 @@ impl HotkeyListener for MacOsHotkeyListener {
     fn start(&self, callback: Box<dyn Fn(&str) + Send + Sync>) -> Result<()> {
         std::thread::spawn(move || {
             unsafe {
-                // Event mask: listen for KeyDown (1 << 10)
-                let event_mask: u64 = 1 << K_CG_EVENT_KEY_DOWN;
+                // Event mask: listen for KeyDown and Mouse movements/drags
+                let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN)
+                    | (1 << K_CG_EVENT_MOUSE_MOVED)
+                    | (1 << K_CG_EVENT_LEFT_MOUSE_DRAGGED)
+                    | (1 << K_CG_EVENT_RIGHT_MOUSE_DRAGGED);
 
                 let ctx_box = Box::new(TapContext {
                     callback,

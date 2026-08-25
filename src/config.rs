@@ -25,6 +25,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub vocab: VocabConfig,
+    #[serde(default)]
+    pub vision: VisionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,24 @@ pub struct VocabConfig {
 impl Default for VocabConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VisionConfig {
+    /// Enable pointer-guided visual screen context capture.
+    pub enabled: bool,
+    /// Minimum circle angle in degrees (default: 340).
+    pub min_angle_degrees: f64,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_angle_degrees: 340.0,
+        }
     }
 }
 

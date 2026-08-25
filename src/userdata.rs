@@ -24,6 +24,10 @@ pub fn recordings_dir() -> PathBuf {
     data_dir().join("recordings")
 }
 
+pub fn sessions_dir() -> PathBuf {
+    data_dir().join("sessions")
+}
+
 pub fn save_recording_wav(id: &str, wav_bytes: &[u8]) -> std::io::Result<PathBuf> {
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
