@@ -215,3 +215,10 @@ pub fn vocabulary_prompt() -> Option<String> {
 pub fn enhance_prompt() -> Option<String> {
     read_uncommented("enhance_prompt.txt")
 }
+
+pub fn read_user_vocabulary_terms() -> Vec<String> {
+    read_uncommented("vocabulary.txt")
+        .map(|terms| terms.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+

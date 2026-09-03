@@ -1,3 +1,4 @@
+pub mod restore;
 #[cfg(target_os = "linux")]
 pub mod clipboard;
 #[cfg(target_os = "macos")]

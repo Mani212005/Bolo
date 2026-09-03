@@ -8,7 +8,7 @@ use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector};
 use crate::inject::macos::MacOsTextInjector;
 use crate::stt::groq::encode_wav;
 use crate::vad::{self, Control, StopReason, Utterance};
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use crossbeam_channel::Sender;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,14 +32,14 @@ impl Injectors {
     fn new(cfg: &Config) -> Self {
         Self {
             portal: PortalInjector::new(cfg.inject.type_delay_ms),
-            clipboard: ClipboardInjector,
+            clipboard: ClipboardInjector::new(&cfg.inject),
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn new(_cfg: &Config) -> Self {
+    fn new(cfg: &Config) -> Self {
         Self {
-            macos: MacOsTextInjector::new(),
+            macos: MacOsTextInjector::new(&cfg.inject),
         }
     }
 
@@ -571,7 +571,12 @@ fn finalize(
         if texts.is_empty() {
             return Ok(None);
         }
-        let text = texts.join(" ");
+        let mut text = texts.join(" ");
+        if cfg.vocab.enabled {
+            let active_app = crate::vocab::detect_frontmost_app();
+            let user_terms = crate::userdata::read_user_vocabulary_terms();
+            text = crate::vocab::clean_text(&text, active_app.as_ref(), &user_terms);
+        }
         eprintln!("[assemble] pieces={} chars={}", n_pieces, text.chars().count());
         println!("[result]  {text}");
 

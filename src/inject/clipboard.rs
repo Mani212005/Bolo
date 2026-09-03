@@ -1,22 +1,24 @@
-use super::TextInjector;
+use super::{restore, TextInjector};
+use crate::config::InjectConfig;
 use anyhow::Context;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
-/// Fallback injector: put the transcript on the Wayland clipboard via
-/// wl-copy (which forks and serves the selection itself), and let the user
-/// paste. Used when the portal fails or when configured directly.
-///
-/// Uses std::process + spawn_blocking rather than tokio::process: tokio's
-/// SIGCHLD-driven reaping proved unreliable inside the daemon (observed
-/// 16s stalls waiting on an already-exited wl-copy), while a plain waitpid
-/// returns in ~50ms.
-pub struct ClipboardInjector;
+pub struct ClipboardInjector {
+    restore_clipboard: bool,
+    restore_delay_ms: u64,
+}
 
-/// Pipe `text` into a clipboard-setter command, bounded by coreutils
-/// `timeout` (exit 124). On GNOME, wl-copy must briefly focus an invisible
-/// window; focus-stealing prevention can block that forever while the user
-/// is typing — hence the bound and the xclip fallback below.
+impl ClipboardInjector {
+    pub fn new(cfg: &InjectConfig) -> Self {
+        Self {
+            restore_clipboard: cfg.restore_clipboard,
+            restore_delay_ms: cfg.restore_delay_ms,
+        }
+    }
+}
+
 fn pipe_to(cmd: &[&str], secs: &str, text: &str) -> anyhow::Result<()> {
     let mut child = Command::new("timeout")
         .arg(secs)
@@ -39,8 +41,6 @@ pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
     match pipe_to(&["wl-copy"], "3", text) {
         Ok(()) => Ok(()),
         Err(wl_err) => {
-            // XWayland bridge: mutter syncs the X clipboard to Wayland
-            // without needing focus.
             pipe_to(&["xclip", "-selection", "clipboard"], "2", text)
                 .map(|()| eprintln!("[clipboard] wl-copy stalled ({wl_err}); used xclip bridge"))
                 .map_err(|x_err| anyhow::anyhow!("wl-copy: {wl_err}; xclip: {x_err}"))
@@ -52,7 +52,40 @@ pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
 impl TextInjector for ClipboardInjector {
     async fn inject(&mut self, text: &str) -> anyhow::Result<()> {
         let text = text.to_owned();
-        tokio::task::spawn_blocking(move || set_clipboard(&text)).await?
+        let restore_clipboard = self.restore_clipboard;
+        let restore_delay_ms = self.restore_delay_ms;
+
+        tokio::task::spawn_blocking(move || {
+            let mut sm = restore::ClipboardStateMachine::new();
+
+            if restore_clipboard {
+                let snap = restore::snapshot_clipboard();
+                sm.record_snapshot(snap);
+            }
+
+            set_clipboard(&text)?;
+
+            let post_cc = restore::get_clipboard_change_count();
+            sm.record_paste(post_cc);
+
+            if restore_clipboard && sm.should_restore(post_cc) {
+                std::thread::sleep(Duration::from_millis(restore_delay_ms));
+                let curr_cc = restore::get_clipboard_change_count();
+                if sm.should_restore(curr_cc) {
+                    if let Some(snap) = sm.snapshot() {
+                        restore::restore_clipboard(snap);
+                        sm.record_restored();
+                    }
+                } else {
+                    sm.record_skipped();
+                }
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        Ok(())
     }
 
     fn name(&self) -> &'static str {
