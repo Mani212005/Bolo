@@ -65,7 +65,9 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
         type CFStringRef = *const c_void;
 
         #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {}
         #[link(name = "ImageIO", kind = "framework")]
+        extern "C" {}
         #[link(name = "CoreFoundation", kind = "framework")]
         extern "C" {
             fn CGMainDisplayID() -> u32;

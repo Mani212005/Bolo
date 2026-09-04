@@ -320,11 +320,10 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                                     break;
                                 }
                                 // 2. Insert the clipboard text right after the preceding spoken audio
-                                if !text_to_insert.trim().is_empty() {
-                                    if pipeline_tx.send(PipelineMsg::Insert(text_to_insert)).is_err() {
+                                if !text_to_insert.trim().is_empty()
+                                    && pipeline_tx.send(PipelineMsg::Insert(text_to_insert)).is_err() {
                                         break;
                                     }
-                                }
                                 // 3. Seamlessly continue audio capture without dropping the stream!
                                 continue;
                             }
@@ -513,7 +512,7 @@ async fn inject_text(
     #[cfg(target_os = "macos")]
     {
         injectors.macos.inject(text).await?;
-        return Ok("macos");
+        Ok("macos")
     }
 
     #[cfg(target_os = "linux")]

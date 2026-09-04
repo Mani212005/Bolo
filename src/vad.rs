@@ -206,7 +206,7 @@ pub fn run_endpointer(
                         }
                     }
 
-                    if state != prev_state || chunks % TRACE_EVERY_CHUNKS == 0 {
+                    if state != prev_state || chunks.is_multiple_of(TRACE_EVERY_CHUNKS) {
                         trace(total_ms, prob, state, speech_ms, silence_ms);
                     }
 

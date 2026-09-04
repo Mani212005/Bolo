@@ -25,19 +25,19 @@ impl DeveloperAppProfile {
 
         let ai_names = ["chatgpt", "claude", "codex"];
 
-        if name.as_ref().map_or(false, |n| terminal_names.iter().any(|t| n.contains(t)))
-            || identifier.as_ref().map_or(false, |id| terminal_ids.contains(&id.as_str()))
+        if name.as_ref().is_some_and(|n| terminal_names.iter().any(|t| n.contains(t)))
+            || identifier.as_ref().is_some_and(|id| terminal_ids.contains(&id.as_str()))
         {
             return DeveloperAppProfile::Terminal;
         }
 
-        if name.as_ref().map_or(false, |n| editor_names.iter().any(|e| n.contains(e)))
-            || identifier.as_ref().map_or(false, |id| editor_ids.contains(&id.as_str()))
+        if name.as_ref().is_some_and(|n| editor_names.iter().any(|e| n.contains(e)))
+            || identifier.as_ref().is_some_and(|id| editor_ids.contains(&id.as_str()))
         {
             return DeveloperAppProfile::Editor;
         }
 
-        if name.as_ref().map_or(false, |n| ai_names.iter().any(|a| n.contains(a))) {
+        if name.as_ref().is_some_and(|n| ai_names.iter().any(|a| n.contains(a))) {
             return DeveloperAppProfile::Ai;
         }
 

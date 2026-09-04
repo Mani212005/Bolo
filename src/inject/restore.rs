@@ -141,6 +141,7 @@ pub mod macos_pasteboard {
     type Sel = *mut c_void;
 
     #[link(name = "AppKit", kind = "framework")]
+    extern "C" {}
     #[link(name = "Foundation", kind = "framework")]
     extern "C" {
         fn objc_getClass(name: *const i8) -> Id;

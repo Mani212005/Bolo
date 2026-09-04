@@ -46,3 +46,9 @@ model = "llama-3.3-70b-versatile"
 [ui]
 # Settings app (bolo settings), served by the daemon on 127.0.0.1 only.
 port = 4525
+
+[vision]
+# Pointer-guided visual screen context capture
+enabled = true                      # capture screenshots when circling areas during dictation
+min_angle_degrees = 340.0           # minimum circle arc angle threshold
+
