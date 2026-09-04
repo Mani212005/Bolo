@@ -5,6 +5,9 @@ use std::path::Path;
 /// Captures display screenshot under cursor gesture on macOS,
 /// and draws a highlight indicator around the target gesture area.
 pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let temp_dir = std::env::temp_dir();
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -29,7 +32,13 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     // Try applying highlight ring around gesture center; fallback to unhighlighted image on error
     if let Err(e) = apply_circle_highlight(&raw_capture_path, output_path, gesture) {
         eprintln!("[vision] highlight rendering failed ({e:#}), saving unhighlighted capture");
-        std::fs::rename(&raw_capture_path, output_path)?;
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(&raw_capture_path, output_path).is_err() {
+            std::fs::copy(&raw_capture_path, output_path)?;
+            let _ = std::fs::remove_file(&raw_capture_path);
+        }
     } else {
         let _ = std::fs::remove_file(&raw_capture_path);
     }
@@ -38,6 +47,9 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
 }
 
 fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: CircleGesture) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     // macOS CoreGraphics FFI for rendering highlight overlay onto captured screenshot PNG
     #[cfg(target_os = "macos")]
     {
@@ -56,6 +68,9 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
         #[link(name = "ImageIO", kind = "framework")]
         #[link(name = "CoreFoundation", kind = "framework")]
         extern "C" {
+            fn CGMainDisplayID() -> u32;
+            fn CGDisplayBounds(display: u32) -> CGRect;
+
             fn CFURLCreateWithFileSystemPath(
                 allocator: *const c_void,
                 filePath: CFStringRef,
@@ -176,17 +191,38 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
             CGContextDrawImage(context, rect, image);
             CFRelease(image);
 
-            // Draw cyan highlight ring around gesture location
-            let cx = gesture.center.0;
-            let cy = gesture.center.1;
-            let r = gesture.radius.max(24.0);
+            // Compute scaling factor from logical display points to physical captured image pixels
+            let display_bounds = CGDisplayBounds(CGMainDisplayID());
+            let mut scale_x = if display_bounds.size.width > 0.0 {
+                (width as f64) / display_bounds.size.width
+            } else {
+                1.0
+            };
+            let mut scale_y = if display_bounds.size.height > 0.0 {
+                (height as f64) / display_bounds.size.height
+            } else {
+                1.0
+            };
+            if scale_x <= 0.0 || scale_x.is_nan() {
+                scale_x = 1.0;
+            }
+            if scale_y <= 0.0 || scale_y.is_nan() {
+                scale_y = 1.0;
+            }
+
+            // Draw cyan highlight ring around gesture location, scaled to physical pixels
+            let cx_rel = gesture.center.0 - display_bounds.origin.x;
+            let cy_rel = gesture.center.1 - display_bounds.origin.y;
+            let cx = cx_rel * scale_x;
+            let cy = cy_rel * scale_y;
+            let r = gesture.radius.max(24.0) * scale_x;
             let highlight_rect = CGRect {
                 origin: CGPoint { x: cx - r, y: (height as f64) - cy - r },
                 size: CGSize { width: r * 2.0, height: r * 2.0 },
             };
 
             CGContextSetRGBStrokeColor(context, 0.0, 0.75, 1.0, 0.9); // Cyan-blue stroke
-            CGContextSetLineWidth(context, (r * 0.08).clamp(3.0, 8.0));
+            CGContextSetLineWidth(context, (r * 0.08).clamp(3.0 * scale_x, 8.0 * scale_x));
             CGContextStrokeEllipseInRect(context, highlight_rect);
 
             let marked_image = CGBitmapContextCreateImage(context);

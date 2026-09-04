@@ -700,6 +700,9 @@ fn handle_client(
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
                         let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
+                        if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                            eprintln!("[vision] failed to create session dir {}: {e:#}", session_dir.display());
+                        }
                         s.vision_detector = Some(crate::vision::CircleGestureDetector::new(cfg.vision.min_angle_degrees));
                         s.vision_session_dir = Some(session_dir);
                         s.captured_context_images.clear();

@@ -38,6 +38,7 @@ pub struct Utterance {
     /// [capture] evidence line.
     pub native_samples: u64,
     pub speech_ms: u64,
+    #[allow(dead_code)]
     pub total_ms: u64,
     pub reason: StopReason,
 }

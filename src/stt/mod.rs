@@ -14,6 +14,7 @@ pub trait SttProvider: Send + Sync {
 pub struct Transcript {
     pub text: String,
     pub raw_json: String,
+    #[allow(dead_code)]
     pub latency_ms: u128,
 }
 

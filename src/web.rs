@@ -11,7 +11,6 @@ use crate::vad::Control;
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use serde_json::{json, Value};
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -41,7 +40,7 @@ pub fn serve(
     let server = loop {
         match tiny_http::Server::http(("127.0.0.1", port)) {
             Ok(s) => break s,
-            Err(e) if tries < 15 => {
+            Err(_e) if tries < 15 => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 tries += 1;
             }
