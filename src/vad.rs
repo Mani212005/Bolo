@@ -38,6 +38,7 @@ pub struct Utterance {
     /// [capture] evidence line.
     pub native_samples: u64,
     pub speech_ms: u64,
+    #[allow(dead_code)]
     pub total_ms: u64,
     pub reason: StopReason,
 }
@@ -205,7 +206,7 @@ pub fn run_endpointer(
                         }
                     }
 
-                    if state != prev_state || chunks % TRACE_EVERY_CHUNKS == 0 {
+                    if state != prev_state || chunks.is_multiple_of(TRACE_EVERY_CHUNKS) {
                         trace(total_ms, prob, state, speech_ms, silence_ms);
                     }
 

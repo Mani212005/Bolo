@@ -26,6 +26,9 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
 
 #[cfg(target_os = "linux")]
 async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     use ashpd::desktop::screenshot::Screenshot;
     let proxy = Screenshot::new().await?;
     let response = proxy.screenshot(true, true).await?.response()?;
@@ -37,6 +40,9 @@ async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Re
 
 /// Helper for unit/mock testing Linux capture behavior.
 pub fn capture_screen_mock(_gesture: CircleGesture, output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     // Generate a minimal valid 1x1 PNG file for unit tests
     let minimal_png: [u8; 67] = [
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
@@ -45,6 +51,6 @@ pub fn capture_screen_mock(_gesture: CircleGesture, output_path: &Path) -> Resul
         0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
         0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
-    std::fs::write(output_path, &minimal_png)?;
+    std::fs::write(output_path, minimal_png)?;
     Ok(())
 }

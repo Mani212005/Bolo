@@ -14,6 +14,9 @@ pub const ACCIDENTAL_THRESHOLD_SECS: f64 = 2.5;
 
 /// Cross-platform screen context capture entry point.
 pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     #[cfg(target_os = "macos")]
     {
         macos::capture_screen(gesture, output_path)
@@ -25,7 +28,7 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (gesture, output_path);
-        Err(anyhow!("Screen capture not supported on this operating system"))
+        Err(anyhow::anyhow!("Screen capture not supported on this operating system"))
     }
 }
 
@@ -235,6 +238,87 @@ mod tests {
         assert!(out_png.exists());
         let bytes = std::fs::read(&out_png)?;
         assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_capture_screen_creates_parent_directory() -> Result<()> {
+        let temp_dir = make_test_temp_dir("capture_nonexistent");
+        let non_existent_session_dir = temp_dir.join("nested_sessions").join("session_123");
+        assert!(!non_existent_session_dir.exists());
+
+        let out_png = non_existent_session_dir.join("context-1.png");
+        let gesture = CircleGesture::new((500.0, 300.0), 40.0);
+
+        capture_screen(gesture, &out_png)?;
+        assert!(out_png.exists());
+        assert!(non_existent_session_dir.exists());
+        let bytes = std::fs::read(&out_png)?;
+        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linux_mock_screen_capture_creates_nonexistent_dir() -> Result<()> {
+        let temp_dir = make_test_temp_dir("mock_cap_nonexistent");
+        let non_existent_session_dir = temp_dir.join("nested").join("session_456");
+        assert!(!non_existent_session_dir.exists());
+
+        let out_png = non_existent_session_dir.join("context-1.png");
+        let gesture = CircleGesture::new((500.0, 300.0), 40.0);
+
+        linux::capture_screen_mock(gesture, &out_png)?;
+        assert!(out_png.exists());
+        assert!(non_existent_session_dir.exists());
+        let bytes = std::fs::read(&out_png)?;
+        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_e2e_gesture_recognition_and_capture_flow() -> Result<()> {
+        use std::f64::consts::PI;
+
+        let temp_dir = make_test_temp_dir("e2e_flow");
+        let session_dir = temp_dir.join("session_99999");
+        assert!(!session_dir.exists());
+
+        // 1. Simulate gesture recognition during recording
+        let mut detector = CircleGestureDetector::default();
+        let mut detected_gesture = None;
+        let center = (400.0, 300.0);
+
+        for index in 0..48 {
+            let angle = (index as f64) / 47.0 * 2.0 * PI;
+            let point = (center.0 + 50.0 * angle.cos(), center.1 + 50.0 * angle.sin());
+            let time = (index as f64) / 60.0;
+            if let Some(g) = detector.add(point, time) {
+                detected_gesture = Some(g);
+            }
+        }
+
+        let gesture = detected_gesture.expect("Gesture detector should recognize the circle");
+
+        // 2. Perform capture into session directory (which might not exist prior to capture)
+        let img_path = session_dir.join("context-1.png");
+        capture_screen(gesture, &img_path)?;
+        assert!(img_path.exists());
+        let captured_images = vec![img_path];
+
+        // 3. Verify accidental session policy keeps session with context even if duration is short and no speech
+        assert!(!is_accidental_session(false, !captured_images.is_empty(), 1.0));
+
+        // 4. Bundle markdown
+        let md_path = write_context_bundle(&session_dir, "", &captured_images)?;
+        assert!(md_path.exists());
+        let md_content = std::fs::read_to_string(md_path)?;
+        assert!(md_content.contains("![Context 1](context-1.png)"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())

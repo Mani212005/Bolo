@@ -184,10 +184,8 @@ pub fn ensure_starter_files() {
     let _ = std::fs::create_dir_all(&dir);
     for (name, content) in [("vocabulary.txt", VOCAB_STARTER), ("enhance_prompt.txt", ENHANCE_STARTER)] {
         let path = dir.join(name);
-        if !path.exists() {
-            if std::fs::write(&path, content).is_ok() {
-                eprintln!("[userdata] created {}", path.display());
-            }
+        if !path.exists() && std::fs::write(&path, content).is_ok() {
+            eprintln!("[userdata] created {}", path.display());
         }
     }
 }

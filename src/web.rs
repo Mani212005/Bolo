@@ -11,8 +11,7 @@ use crate::vad::Control;
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use serde_json::{json, Value};
-use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -41,7 +40,7 @@ pub fn serve(
     let server = loop {
         match tiny_http::Server::http(("127.0.0.1", port)) {
             Ok(s) => break s,
-            Err(e) if tries < 15 => {
+            Err(_e) if tries < 15 => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 tries += 1;
             }
@@ -172,7 +171,7 @@ fn route(
     url: &str,
     body: &str,
     body_bytes: &[u8],
-    config_path: &PathBuf,
+    config_path: &Path,
     shared: &Arc<Mutex<Shared>>,
     cfg: &Config,
     start_tx: &Sender<()>,
@@ -430,7 +429,7 @@ fn read_hotkeys() -> Value {
     Value::Object(out)
 }
 
-fn state(config_path: &PathBuf, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Value> {
+fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Value> {
     let doc = ConfigDoc::load(config_path)?;
     let status = shared.lock().unwrap().phase.as_str().to_string();
     let enhance_prompt = crate::userdata::enhance_prompt().unwrap_or_default();

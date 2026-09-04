@@ -278,7 +278,7 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
             return Ok(());
         }
         let _ = std::process::Command::new("open").arg(&url).spawn();
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
