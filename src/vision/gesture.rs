@@ -7,6 +7,7 @@ pub struct CircleGesture {
 }
 
 impl CircleGesture {
+    #[allow(dead_code)]
     pub fn new(center: (f64, f64), radius: f64) -> Self {
         Self { center, radius }
     }
@@ -29,7 +30,7 @@ pub struct CircleGestureDetector {
 
 impl Default for CircleGestureDetector {
     fn default() -> Self {
-        Self::new(340.0)
+        Self::new(315.0)
     }
 }
 
@@ -52,6 +53,7 @@ impl CircleGestureDetector {
         self.waiting_for_exit = None;
     }
 
+    #[allow(dead_code)]
     pub fn minimum_angle_degrees(&self) -> f64 {
         self.minimum_angle_degrees
     }
@@ -71,7 +73,7 @@ impl CircleGestureDetector {
         }
 
         if let Some(previous) = self.samples.last() {
-            if time - previous.time > 0.45 {
+            if time - previous.time > 0.75 {
                 self.samples.clear();
             }
         }
@@ -80,7 +82,7 @@ impl CircleGestureDetector {
         let cutoff = time - self.window;
         self.samples.retain(|s| s.time >= cutoff);
 
-        if time < self.cooldown_until || self.samples.len() < 18 {
+        if time < self.cooldown_until || self.samples.len() < 12 {
             return None;
         }
 
@@ -95,10 +97,10 @@ impl CircleGestureDetector {
     fn recognized_gesture(&self) -> Option<CircleGesture> {
         let last = self.samples.last()?.point;
         let count = self.samples.len();
-        if count < 18 {
+        if count < 12 {
             return None;
         }
-        for start in (0..=(count - 18)).rev() {
+        for start in (0..=(count - 12)).rev() {
             let first = self.samples[start].point;
             if (first.0 - last.0).hypot(first.1 - last.1) < 160.0 {
                 if let Some(gesture) =
@@ -159,7 +161,7 @@ impl CircleGestureDetector {
         }
 
         let variance: f64 = distances.iter().map(|d| (d - radius).powi(2)).sum::<f64>() / count;
-        if variance.sqrt() / radius >= 0.32 {
+        if variance.sqrt() / radius >= 0.36 {
             return None;
         }
 
@@ -198,7 +200,7 @@ impl CircleGestureDetector {
 
         let circumference = 2.0 * PI * radius;
         let path_ratio = path_length / circumference;
-        if path_ratio <= 0.65 || path_ratio >= 1.9 {
+        if path_ratio <= 0.65 || path_ratio >= 2.4 {
             return None;
         }
 
@@ -214,7 +216,7 @@ mod tests {
     fn test_circle_threshold_clamping() {
         assert_eq!(
             CircleGestureDetector::default().minimum_angle_degrees(),
-            340.0
+            315.0
         );
         assert_eq!(
             CircleGestureDetector::new(290.0).minimum_angle_degrees(),
@@ -245,6 +247,225 @@ mod tests {
         assert!((res.center.0 - center.0).abs() <= 3.0);
         assert!((res.center.1 - center.1).abs() <= 3.0);
         assert!((res.radius - 52.0).abs() <= 3.0);
+    }
+
+    #[test]
+    fn test_recognizes_loose_arc_320_degrees() {
+        let center = (500.0, 400.0);
+        let start_angle = 0.30; // ~17.2 degrees
+        let end_angle = 5.97; // ~342.0 degrees (total angular travel ~324.8 degrees / 5.67 rad)
+
+        let generate_points = || {
+            let mut points = Vec::new();
+            for index in 0..40 {
+                let progress = (index as f64) / 39.0;
+                let angle = start_angle + progress * (end_angle - start_angle);
+                let point = (center.0 + 60.0 * angle.cos(), center.1 + 60.0 * angle.sin());
+                let time = (index as f64) / 40.0;
+                points.push((point, time));
+            }
+            points
+        };
+
+        // 1. With default detector (315.0 degrees), ~325 deg loop passes
+        let mut detector = CircleGestureDetector::default();
+        let mut result = None;
+        for (point, time) in generate_points() {
+            if let Some(res) = detector.add(point, time) {
+                result = Some(res);
+            }
+        }
+        assert!(
+            result.is_some(),
+            "Loose ~325-degree loop should be recognized with relaxed 315.0 default"
+        );
+
+        // 2. With old threshold (340.0 degrees), ~325 deg loop fails
+        let mut old_detector = CircleGestureDetector::new(340.0);
+        let mut old_result = None;
+        for (point, time) in generate_points() {
+            if let Some(res) = old_detector.add(point, time) {
+                old_result = Some(res);
+            }
+        }
+        assert!(
+            old_result.is_none(),
+            "Loose ~325-degree loop should fail under strict 340.0 threshold"
+        );
+    }
+
+    #[test]
+    fn test_pause_tolerance_below_and_above_750ms() {
+        let center = (500.0, 400.0);
+
+        // 1. Pause of 0.60s (< 0.75s) should NOT wipe buffer and should be recognized
+        let mut detector = CircleGestureDetector::default();
+        let mut result = None;
+        for index in 0..20 {
+            let angle = (index as f64) / 39.0 * 2.0 * PI;
+            let point = (center.0 + 60.0 * angle.cos(), center.1 + 60.0 * angle.sin());
+            let time = (index as f64) * 0.02;
+            let _ = detector.add(point, time);
+        }
+        let resume_time = 0.38 + 0.60;
+        for index in 20..40 {
+            let angle = (index as f64) / 39.0 * 2.0 * PI;
+            let point = (center.0 + 60.0 * angle.cos(), center.1 + 60.0 * angle.sin());
+            let time = resume_time + ((index - 20) as f64) * 0.02;
+            if let Some(res) = detector.add(point, time) {
+                result = Some(res);
+            }
+        }
+        assert!(
+            result.is_some(),
+            "Gesture with 600ms pause should be recognized"
+        );
+
+        // 2. Pause of 0.85s (> 0.75s) should wipe buffer and fail
+        let mut detector2 = CircleGestureDetector::default();
+        let mut result2 = None;
+        for index in 0..20 {
+            let angle = (index as f64) / 39.0 * 2.0 * PI;
+            let point = (center.0 + 60.0 * angle.cos(), center.1 + 60.0 * angle.sin());
+            let time = (index as f64) * 0.02;
+            let _ = detector2.add(point, time);
+        }
+        let resume_time2 = 0.38 + 0.85;
+        for index in 20..40 {
+            let angle = (index as f64) / 39.0 * 2.0 * PI;
+            let point = (center.0 + 60.0 * angle.cos(), center.1 + 60.0 * angle.sin());
+            let time = resume_time2 + ((index - 20) as f64) * 0.02;
+            if let Some(res) = detector2.add(point, time) {
+                result2 = Some(res);
+            }
+        }
+        assert!(
+            result2.is_none(),
+            "Gesture with 850ms pause should be wiped and fail"
+        );
+    }
+
+    #[test]
+    fn test_path_ratio_wobble_allowed_vs_excessive_rejected() {
+        let center = (500.0, 400.0);
+
+        // 1. Mild hand wobble producing path_ratio around 1.95 - 2.15 (< 2.4)
+        let mut detector = CircleGestureDetector::default();
+        let mut result = None;
+        for index in 0..48 {
+            let angle = (index as f64) / 47.0 * 2.0 * PI;
+            let wobble = if index % 2 == 0 { 5.5 } else { -5.5 };
+            let r = 50.0 + wobble;
+            let point = (center.0 + r * angle.cos(), center.1 + r * angle.sin());
+            let time = (index as f64) / 47.0;
+            if let Some(res) = detector.add(point, time) {
+                result = Some(res);
+            }
+        }
+        assert!(
+            result.is_some(),
+            "Circle with natural hand wobble (path_ratio < 2.4) should be recognized"
+        );
+
+        // 2. Severe jitter producing path_ratio >= 2.4 should be rejected
+        let mut detector2 = CircleGestureDetector::default();
+        let mut result2 = None;
+        for index in 0..48 {
+            let angle = (index as f64) / 47.0 * 2.0 * PI;
+            let wobble = if index % 2 == 0 { 9.0 } else { -9.0 };
+            let r = 50.0 + wobble;
+            let point = (center.0 + r * angle.cos(), center.1 + r * angle.sin());
+            let time = (index as f64) / 47.0;
+            if let Some(res) = detector2.add(point, time) {
+                result2 = Some(res);
+            }
+        }
+        assert!(
+            result2.is_none(),
+            "Excessive jitter/zigzag with path_ratio >= 2.4 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_radius_variance_tolerance() {
+        let center = (500.0, 400.0);
+
+        // 1. Moderate non-circular distortion with variance ~0.34 (< 0.36)
+        let mut detector = CircleGestureDetector::default();
+        let mut result = None;
+        for index in 0..64 {
+            let angle = (index as f64) / 63.0 * 2.0 * PI;
+            let radius = 60.0 * (1.0 + 0.48 * (angle * 2.0).sin());
+            let point = (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            );
+            let time = (index as f64) / 64.0;
+            if let Some(res) = detector.add(point, time) {
+                result = Some(res);
+            }
+        }
+        assert!(
+            result.is_some(),
+            "Loop with radius variance ~0.34 should be accepted under 0.36 tolerance"
+        );
+
+        // 2. Severe distortion with variance >= 0.36 should be rejected
+        let mut detector2 = CircleGestureDetector::default();
+        let mut result2 = None;
+        for index in 0..64 {
+            let angle = (index as f64) / 63.0 * 2.0 * PI;
+            let radius = 60.0 * (1.0 + 0.58 * (angle * 2.0).sin());
+            let point = (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            );
+            let time = (index as f64) / 64.0;
+            if let Some(res) = detector2.add(point, time) {
+                result2 = Some(res);
+            }
+        }
+        assert!(
+            result2.is_none(),
+            "Loop with radius variance >= 0.36 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_minimum_sample_count_12() {
+        let center = (500.0, 400.0);
+
+        // 14 samples (>= 12)
+        let mut detector = CircleGestureDetector::default();
+        let mut result = None;
+        for index in 0..14 {
+            let angle = (index as f64) / 13.0 * 2.0 * PI;
+            let point = (center.0 + 50.0 * angle.cos(), center.1 + 50.0 * angle.sin());
+            let time = (index as f64) * 0.015;
+            if let Some(res) = detector.add(point, time) {
+                result = Some(res);
+            }
+        }
+        assert!(
+            result.is_some(),
+            "Fast circle with 14 samples should be recognized"
+        );
+
+        // 10 samples (< 12)
+        let mut detector2 = CircleGestureDetector::default();
+        let mut result2 = None;
+        for index in 0..10 {
+            let angle = (index as f64) / 9.0 * 2.0 * PI;
+            let point = (center.0 + 50.0 * angle.cos(), center.1 + 50.0 * angle.sin());
+            let time = (index as f64) * 0.015;
+            if let Some(res) = detector2.add(point, time) {
+                result2 = Some(res);
+            }
+        }
+        assert!(
+            result2.is_none(),
+            "Circle with fewer than 12 samples should not be recognized"
+        );
     }
 
     #[test]

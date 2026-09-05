@@ -837,10 +837,17 @@ fn handle_client(
                     }
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(
-                        cfg,
-                        "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
-                    );
+                    if cfg.vision.enabled {
+                        notify(
+                            cfg,
+                            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
+                        );
+                    } else {
+                        notify(
+                            cfg,
+                            "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
+                        );
+                    }
                     "ok recording".to_string()
                 }
                 Phase::Recording => {
@@ -944,10 +951,17 @@ fn handle_client(
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    notify(
-                        cfg,
-                        "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
-                    );
+                    if cfg.vision.enabled {
+                        notify(
+                            cfg,
+                            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
+                        );
+                    } else {
+                        notify(
+                            cfg,
+                            "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
+                        );
+                    }
                     "ok recording".to_string()
                 }
                 phase => format!("err not recording (phase: {})", phase.as_str()),
