@@ -43,6 +43,7 @@ async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Re
 }
 
 /// Helper for unit/mock testing Linux capture behavior.
+#[allow(dead_code)]
 pub fn capture_screen_mock(_gesture: CircleGesture, output_path: &Path) -> Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;

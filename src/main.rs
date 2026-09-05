@@ -832,4 +832,83 @@ mod regression_audit_tests {
         assert_eq!(drained.len(), 3);
         assert!(shared.captured_context_images.is_empty());
     }
+
+    #[test]
+    fn test_feature_circle_to_capture_natural_hover_tolerances() {
+        use crate::vision::CircleGestureDetector;
+
+        // 1. Natural user hover circle with hand wobble (~2.1 path ratio) and ~325 deg angular arc
+        let center = (600.0, 450.0);
+        let mut tuned_detector = CircleGestureDetector::default();
+        let mut detected = None;
+
+        for index in 0..40 {
+            let progress = (index as f64) / 39.0;
+            let angle = 0.30 + progress * 5.67; // 324.8 deg
+            let wobble = if index % 2 == 0 { 4.0 } else { -4.0 };
+            let r = 55.0 + wobble;
+            let point = (center.0 + r * angle.cos(), center.1 + r * angle.sin());
+            let time = (index as f64) * 0.025; // 0.0 .. 1.0s
+            if let Some(g) = tuned_detector.add(point, time) {
+                detected = Some(g);
+            }
+        }
+        assert!(
+            detected.is_some(),
+            "Natural imperfect hover circle should be recognized"
+        );
+
+        // 2. Strict baseline detector (340 deg threshold) rejects the same natural gesture
+        let mut baseline_detector = CircleGestureDetector::new(340.0);
+        let mut baseline_detected = None;
+        for index in 0..40 {
+            let progress = (index as f64) / 39.0;
+            let angle = 0.30 + progress * 5.67;
+            let wobble = if index % 2 == 0 { 4.0 } else { -4.0 };
+            let r = 55.0 + wobble;
+            let point = (center.0 + r * angle.cos(), center.1 + r * angle.sin());
+            let time = (index as f64) * 0.025;
+            if let Some(g) = baseline_detector.add(point, time) {
+                baseline_detected = Some(g);
+            }
+        }
+        assert!(
+            baseline_detected.is_none(),
+            "Baseline 340.0 detector rejects loose natural loop"
+        );
+
+        // 3. Genuine non-circular motions remain rejected
+        let mut detector = CircleGestureDetector::default();
+        let mut zigzag_detected = None;
+        for index in 0..50 {
+            let y = if index % 2 == 0 { 30.0 } else { -30.0 };
+            let pt = (500.0 + (index as f64) * 3.0, 400.0 + y);
+            let t = (index as f64) * 0.02;
+            if let Some(g) = detector.add(pt, t) {
+                zigzag_detected = Some(g);
+            }
+        }
+        assert!(zigzag_detected.is_none(), "Zigzags must still be rejected");
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "feature": "Circle-to-capture hover parameter relaxation",
+                "verified": true,
+                "tuning": {
+                    "min_angle_degrees": 315.0,
+                    "pause_timeout_seconds": 0.75,
+                    "max_path_ratio": 2.4,
+                    "min_sample_count": 12,
+                    "radius_variance_tolerance": 0.36
+                },
+                "natural_hover_loop_recognized": detected.is_some(),
+                "baseline_detector_rejected_loose_loop": baseline_detected.is_none(),
+                "zigzag_motion_rejected": zigzag_detected.is_none()
+            });
+            let _ = std::fs::write(
+                dir.join("circle_capture_tuning_validation.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
 }

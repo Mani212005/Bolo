@@ -42,6 +42,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **One-Click AI Prompt Enhancement**: Refine raw speech and rambles into structured prompts using LLaMA-3.3-70B.
 - **Custom Vocabulary Biasing**: Add technical terms, proper nouns, and acronyms for accurate phonetic transcription.
 - **Audio File Drag and Drop**: Drop any audio file directly into the dashboard for immediate speech-to-text transcription.
+- **Circle-to-Capture Screen Context**: Hover pointer in a circle (hover only, do not click or press) during dictation to capture and attach screenshots of relevant UI or code.
 
 ---
 
@@ -125,6 +126,10 @@ Bolo configuration files live in `~/.config/bolo/`:
   [vad]
   auto_endpoint = false       # false = manual push-to-talk toggle
   max_utterance_ms = 1800000  # 30-minute maximum recording cap
+
+  [vision]
+  enabled = true              # hover pointer in a circle to capture screen context
+  min_angle_degrees = 315.0   # minimum circle arc angle threshold
   ```
 
 - **`~/.config/bolo/vocabulary.txt`**: Custom word prompts (names, brand terms, acronyms).

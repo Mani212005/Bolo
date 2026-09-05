@@ -3,8 +3,8 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Build & test: `cargo test` runs all unit tests including vision geometry and session context retention.
-- Architecture: `src/vision/` implements pointer-guided screen context capture (`CircleGestureDetector`, `capture_screen`, `write_context_bundle`, `prune_sessions`).
-- Config: `[vision]` in `config.toml` manages `enabled` (default `true`) and `min_angle_degrees` (default `340.0`).
+- Architecture: `src/vision/` implements hover-only pointer-guided screen context capture (`CircleGestureDetector`, `capture_screen`, `write_context_bundle`, `prune_sessions`).
+- Config: `[vision]` in `config.toml` manages `enabled` (default `true`) and `min_angle_degrees` (default `315.0`).
 - Session context: Completed dictation sessions write `context.md` + `context-N.png` into `~/.local/share/bolo/sessions/<session_id>/` and attach the last captured screenshot on paste (macOS).
 
 ## Maintaining this file
