@@ -33,6 +33,7 @@ impl ClipboardStateMachine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn state(&self) -> RestoreState {
         self.state
     }

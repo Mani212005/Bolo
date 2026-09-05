@@ -22,6 +22,7 @@ pub fn build_set_image_applescript(path: &Path) -> String {
 }
 
 /// Selects the last captured screenshot image from a session image list.
+#[allow(dead_code)]
 pub fn select_last_session_image(images: &[PathBuf]) -> Option<&Path> {
     images.last().map(|p| p.as_path())
 }
@@ -193,6 +194,7 @@ pub fn inject_macos_blocking(
     Ok(())
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasteStep {
     CopyText(String),
@@ -202,6 +204,7 @@ pub enum PasteStep {
 }
 
 /// Plans the sequential steps required for injecting text and optional screenshot.
+#[allow(dead_code)]
 pub fn plan_paste_sequence(
     text: &str,
     image_path: Option<&Path>,
@@ -227,6 +230,9 @@ pub fn plan_paste_sequence(
 mod tests {
     use super::*;
     use crate::inject::restore::{ClipboardItem, ClipboardSnapshot, RestoreState};
+    use std::sync::Mutex;
+
+    static CLIPBOARD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_select_last_session_image_selection() {
@@ -356,5 +362,65 @@ mod tests {
         // Complete restore
         sm.record_restored();
         assert_eq!(sm.state(), RestoreState::Restored);
+    }
+
+    #[test]
+    fn test_inject_macos_blocking_soft_failure_on_missing_image() {
+        let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap();
+        // When image path does not exist, text paste still succeeds and function returns Ok(())
+        let nonexistent = Path::new("/tmp/nonexistent_screenshot_path_12345.png");
+        let result =
+            inject_macos_blocking("Test text for soft failure", Some(nonexistent), false, 10);
+        assert!(
+            result.is_ok(),
+            "Expected soft failure to return Ok(()), got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_inject_macos_blocking_with_real_image_and_restore() {
+        let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap();
+        use std::io::Write;
+
+        // Create a real minimal valid 1x1 PNG file in temp dir
+        let temp_png = std::env::temp_dir().join(format!(
+            "bolo_test_img_{}_{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82";
+        std::fs::write(&temp_png, png_bytes).expect("write png");
+
+        // Seed clipboard with known initial content
+        let initial_text = format!("initial_user_clipboard_{}", std::process::id());
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("pbcopy");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(initial_text.as_bytes())
+            .unwrap();
+        child.wait().unwrap();
+
+        // Perform injection with image and restore enabled
+        let res = inject_macos_blocking("Hello with screenshot", Some(&temp_png), true, 50);
+        assert!(res.is_ok(), "Injection with image failed: {:?}", res);
+
+        // Sleep slightly to let the restore thread complete
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Read clipboard via pbpaste and verify initial content was restored
+        let output = Command::new("pbpaste").output().expect("pbpaste");
+        let pasted = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(pasted, initial_text);
+
+        let _ = std::fs::remove_file(&temp_png);
     }
 }
