@@ -101,7 +101,9 @@ impl CircleGestureDetector {
         for start in (0..=(count - 18)).rev() {
             let first = self.samples[start].point;
             if (first.0 - last.0).hypot(first.1 - last.1) < 160.0 {
-                if let Some(gesture) = Self::evaluate_subslice(&self.samples[start..], self.minimum_angle_degrees) {
+                if let Some(gesture) =
+                    Self::evaluate_subslice(&self.samples[start..], self.minimum_angle_degrees)
+                {
                     return Some(gesture);
                 }
             }
@@ -119,10 +121,18 @@ impl CircleGestureDetector {
         let mut max_y = samples[0].point.1;
 
         for s in samples.iter().skip(1) {
-            if s.point.0 < min_x { min_x = s.point.0; }
-            if s.point.0 > max_x { max_x = s.point.0; }
-            if s.point.1 < min_y { min_y = s.point.1; }
-            if s.point.1 > max_y { max_y = s.point.1; }
+            if s.point.0 < min_x {
+                min_x = s.point.0;
+            }
+            if s.point.0 > max_x {
+                max_x = s.point.0;
+            }
+            if s.point.1 < min_y {
+                min_y = s.point.1;
+            }
+            if s.point.1 > max_y {
+                max_y = s.point.1;
+            }
         }
 
         let width = max_x - min_x;
@@ -165,8 +175,12 @@ impl CircleGestureDetector {
             let current = (a.1 - center.1).atan2(a.0 - center.0);
             let next = (b.1 - center.1).atan2(b.0 - center.0);
             let mut delta = next - current;
-            while delta > PI { delta -= 2.0 * PI; }
-            while delta < -PI { delta += 2.0 * PI; }
+            while delta > PI {
+                delta -= 2.0 * PI;
+            }
+            while delta < -PI {
+                delta += 2.0 * PI;
+            }
             angle_travel += delta.abs();
         }
 
@@ -198,9 +212,18 @@ mod tests {
 
     #[test]
     fn test_circle_threshold_clamping() {
-        assert_eq!(CircleGestureDetector::default().minimum_angle_degrees(), 340.0);
-        assert_eq!(CircleGestureDetector::new(290.0).minimum_angle_degrees(), 300.0);
-        assert_eq!(CircleGestureDetector::new(370.0).minimum_angle_degrees(), 359.0);
+        assert_eq!(
+            CircleGestureDetector::default().minimum_angle_degrees(),
+            340.0
+        );
+        assert_eq!(
+            CircleGestureDetector::new(290.0).minimum_angle_degrees(),
+            300.0
+        );
+        assert_eq!(
+            CircleGestureDetector::new(370.0).minimum_angle_degrees(),
+            359.0
+        );
     }
 
     #[test]
@@ -271,7 +294,10 @@ mod tests {
             }
         }
 
-        assert!(result.is_some(), "Circle after linear movement should be recognized");
+        assert!(
+            result.is_some(),
+            "Circle after linear movement should be recognized"
+        );
     }
 
     #[test]
@@ -377,6 +403,9 @@ mod tests {
             }
         }
 
-        assert_eq!(captures, 1, "Continuous loop should capture exactly once until pointer leaves center");
+        assert_eq!(
+            captures, 1,
+            "Continuous loop should capture exactly once until pointer leaves center"
+        );
     }
 }

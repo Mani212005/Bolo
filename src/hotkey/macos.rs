@@ -19,6 +19,7 @@ type CGEventTapCallBack = unsafe extern "C" fn(
 // CoreGraphics Constants
 const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
 const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
 
 const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
@@ -84,6 +85,34 @@ struct TapContext {
     port: CFMachPortRef,
 }
 
+pub(crate) fn match_hotkey(keycode: i64, flags: u64, autorepeat: i64) -> Option<&'static str> {
+    if autorepeat != 0 {
+        return None;
+    }
+    let has_ctrl = (flags & K_CG_EVENT_FLAG_MASK_CONTROL) != 0;
+    let has_opt = (flags & K_CG_EVENT_FLAG_MASK_ALTERNATE) != 0;
+    let has_cmd = (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0;
+
+    // 1. Ctrl + Space (with NO Command held) -> Toggle Start / Stop
+    if keycode == KEY_SPACE && has_ctrl && !has_cmd {
+        Some("toggle")
+    }
+    // 2. Option + V -> Quick-Splice Clipboard into dictation
+    else if keycode == KEY_V && has_opt && !has_cmd {
+        Some("quick-splice")
+    }
+    // 3. Option + P -> Pause / Resume Recording
+    else if keycode == KEY_P && has_opt && !has_cmd {
+        Some("pause")
+    }
+    // 4. Option + I -> Re-Type Last Transcription
+    else if keycode == KEY_I && has_opt && !has_cmd {
+        Some("insert-last")
+    } else {
+        None
+    }
+}
+
 unsafe extern "C" fn event_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
@@ -96,7 +125,9 @@ unsafe extern "C" fn event_tap_callback(
     let ctx = &*(user_info as *const TapContext);
 
     // Auto-recover if macOS temporarily disables event tap on load/timeout
-    if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT || event_type == K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT {
+    if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
+        || event_type == K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT
+    {
         CGEventTapEnable(ctx.port, true);
         return event;
     }
@@ -112,33 +143,10 @@ unsafe extern "C" fn event_tap_callback(
         let flags = CGEventGetFlags(event);
         let autorepeat = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT);
 
-        // Kernel-level hardware repeat filtering:
-        // When autorepeat != 0, it is an OS repeat while key is held -> DROP IMMEDIATELY!
-        if autorepeat == 0 {
-            let has_ctrl = (flags & K_CG_EVENT_FLAG_MASK_CONTROL) != 0;
-            let has_opt = (flags & K_CG_EVENT_FLAG_MASK_ALTERNATE) != 0;
-            let has_cmd = (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0;
-
-            // 1. Ctrl + Space (with NO Command held) -> Toggle Start / Stop
-            if keycode == KEY_SPACE && has_ctrl && !has_cmd {
-                eprintln!("[macos-hotkey] Ctrl+Space -> toggle");
-                (ctx.callback)("toggle");
-            }
-            // 2. Option + V -> Quick-Splice Clipboard into dictation
-            else if keycode == KEY_V && has_opt && !has_cmd {
-                eprintln!("[macos-hotkey] Option+V -> quick-splice");
-                (ctx.callback)("quick-splice");
-            }
-            // 3. Option + P -> Pause / Resume Recording
-            else if keycode == KEY_P && has_opt && !has_cmd {
-                eprintln!("[macos-hotkey] Option+P -> pause");
-                (ctx.callback)("pause");
-            }
-            // 4. Option + I -> Re-Type Last Transcription
-            else if keycode == KEY_I && has_opt && !has_cmd {
-                eprintln!("[macos-hotkey] Option+I -> insert-last");
-                (ctx.callback)("insert-last");
-            }
+        if let Some(cmd) = match_hotkey(keycode, flags, autorepeat) {
+            eprintln!("[macos-hotkey] {cmd} matched -> swallowing event");
+            (ctx.callback)(cmd);
+            return std::ptr::null_mut();
         }
     }
 
@@ -169,17 +177,28 @@ impl HotkeyListener for MacOsHotkeyListener {
                 });
                 let ctx_raw = Box::into_raw(ctx_box);
 
-                let port = CGEventTapCreate(
+                let mut port = CGEventTapCreate(
                     K_CG_SESSION_EVENT_TAP,
                     K_CG_HEAD_INSERT_EVENT_TAP,
-                    K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                    K_CG_EVENT_TAP_OPTION_DEFAULT,
                     event_mask,
                     event_tap_callback,
                     ctx_raw as *mut c_void,
                 );
 
                 if port.is_null() {
-                    eprintln!("[macos-hotkey] CGEventTapCreate failed — ensure Accessibility permissions are granted to Bolo in macOS System Settings");
+                    port = CGEventTapCreate(
+                        K_CG_SESSION_EVENT_TAP,
+                        K_CG_HEAD_INSERT_EVENT_TAP,
+                        K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                        event_mask,
+                        event_tap_callback,
+                        ctx_raw as *mut c_void,
+                    );
+                }
+
+                if port.is_null() {
+                    eprintln!("[macos-hotkey] CGEventTapCreate failed - ensure Accessibility permissions are granted to Bolo in macOS System Settings");
                     return;
                 }
 
@@ -202,5 +221,56 @@ impl HotkeyListener for MacOsHotkeyListener {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hotkey_matching_and_swallowing() {
+        // Ctrl+Space -> "toggle"
+        assert_eq!(
+            match_hotkey(KEY_SPACE, K_CG_EVENT_FLAG_MASK_CONTROL, 0),
+            Some("toggle")
+        );
+
+        // Option+V -> "quick-splice"
+        assert_eq!(
+            match_hotkey(KEY_V, K_CG_EVENT_FLAG_MASK_ALTERNATE, 0),
+            Some("quick-splice")
+        );
+
+        // Option+P -> "pause"
+        assert_eq!(
+            match_hotkey(KEY_P, K_CG_EVENT_FLAG_MASK_ALTERNATE, 0),
+            Some("pause")
+        );
+
+        // Option+I -> "insert-last"
+        assert_eq!(
+            match_hotkey(KEY_I, K_CG_EVENT_FLAG_MASK_ALTERNATE, 0),
+            Some("insert-last")
+        );
+
+        // Autorepeat should be dropped (None)
+        assert_eq!(
+            match_hotkey(KEY_SPACE, K_CG_EVENT_FLAG_MASK_CONTROL, 1),
+            None
+        );
+
+        // Command modifier present should not match bolo hotkeys
+        assert_eq!(
+            match_hotkey(
+                KEY_V,
+                K_CG_EVENT_FLAG_MASK_ALTERNATE | K_CG_EVENT_FLAG_MASK_COMMAND,
+                0
+            ),
+            None
+        );
+
+        // Unrelated key should not match
+        assert_eq!(match_hotkey(12, K_CG_EVENT_FLAG_MASK_CONTROL, 0), None);
     }
 }

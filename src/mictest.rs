@@ -13,8 +13,11 @@ pub fn run(cfg: &Config, seconds: u64) -> anyhow::Result<(String, String)> {
     while Instant::now() < deadline {
         if let Ok(chunk) = audio_rx.recv_timeout(Duration::from_millis(100)) {
             let resampled = resampler.process(&chunk)?;
-            samples
-                .extend(resampled.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16));
+            samples.extend(
+                resampled
+                    .iter()
+                    .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
+            );
         }
     }
     drop(stream);

@@ -309,7 +309,12 @@ pub mod macos_pasteboard {
                 let type_c_str = std::ffi::CString::new(item.mime_type.as_str()).unwrap();
                 let type_nsstr: Id = msg_send_str(cls_nsstr, sel_str_utf8, type_c_str.as_ptr());
 
-                let data_ns: Id = msg_send_data(cls_nsdata, sel_data_bytes, item.data.as_ptr(), item.data.len());
+                let data_ns: Id = msg_send_data(
+                    cls_nsdata,
+                    sel_data_bytes,
+                    item.data.as_ptr(),
+                    item.data.len(),
+                );
 
                 msg_send_set_data(pb_item, sel_set_data, data_ns, type_nsstr);
             }
@@ -412,7 +417,13 @@ pub mod linux_clipboard {
 
             let x_res = Command::new("timeout")
                 .arg("2")
-                .args(&["xclip", "-selection", "clipboard", "-target", &item.mime_type])
+                .args(&[
+                    "xclip",
+                    "-selection",
+                    "clipboard",
+                    "-target",
+                    &item.mime_type,
+                ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

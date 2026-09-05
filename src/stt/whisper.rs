@@ -19,8 +19,7 @@ pub fn models_dir() -> PathBuf {
     // Deliberately HOME-based, not XDG_DATA_HOME: snap-spawned shells (e.g.
     // VS Code's terminal) point XDG_DATA_HOME into ~/snap/<app>/, which would
     // scatter 1.6GB models across per-app dirs.
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-        .join(".local/share/bolo/models")
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/bolo/models")
 }
 
 pub fn model_path(name: &str) -> PathBuf {
@@ -58,9 +57,12 @@ pub fn ensure_model_blocking(name: &str) -> anyhow::Result<PathBuf> {
     let tmp = path.with_extension("bin.partial");
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let resp = reqwest::get(&url).await?.error_for_status().with_context(|| {
-            format!("model \"{name}\" not found upstream (check [stt.whisper] model name)")
-        })?;
+        let resp = reqwest::get(&url)
+            .await?
+            .error_for_status()
+            .with_context(|| {
+                format!("model \"{name}\" not found upstream (check [stt.whisper] model name)")
+            })?;
         let total = resp.content_length().unwrap_or(0);
         let mut file = std::fs::File::create(&tmp)?;
         let mut resp = resp;
@@ -96,7 +98,9 @@ impl WhisperStt {
             ctx_params,
         )
         .with_context(|| format!("failed to load whisper model {}", path.display()))?;
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as i32;
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as i32;
         eprintln!(
             "[whisper] model={} loaded in {}ms threads={}",
             cfg.model,
@@ -144,7 +148,9 @@ impl SttProvider for WhisperStt {
 
             let t0 = Instant::now();
             let mut state = ctx.create_state().context("whisper create_state failed")?;
-            state.full(params, &samples).context("whisper inference failed")?;
+            state
+                .full(params, &samples)
+                .context("whisper inference failed")?;
             let latency_ms = t0.elapsed().as_millis();
 
             let n = state.full_n_segments();
@@ -171,7 +177,11 @@ impl SttProvider for WhisperStt {
                 audio_s,
                 latency_ms as f64 / 1000.0 / audio_s.max(0.001)
             );
-            Ok(Transcript { text, raw_json, latency_ms })
+            Ok(Transcript {
+                text,
+                raw_json,
+                latency_ms,
+            })
         })
         .await
         .context("whisper task panicked")?

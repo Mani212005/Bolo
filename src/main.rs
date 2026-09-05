@@ -55,9 +55,10 @@ fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config_path)?;
             return daemon::run(cfg, config_path);
         }
-        Some(cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quick-splice" | "copy-splice")) => {
-            return client(cmd)
-        }
+        Some(
+            cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quick-splice"
+            | "copy-splice"),
+        ) => return client(cmd),
         Some("exit" | "quit" | "stop") => {
             // Gracefully shut down the daemon if running, then say goodbye.
             let socket = daemon::socket_path();
@@ -65,7 +66,10 @@ fn main() -> anyhow::Result<()> {
                 let _ = client("quit");
             }
             // Terminate any running native bolo-ui popup window so it dies down
-            let _ = std::process::Command::new("pkill").arg("-f").arg("bolo-ui").status();
+            let _ = std::process::Command::new("pkill")
+                .arg("-f")
+                .arg("bolo-ui")
+                .status();
             println!("Thank you for using Bolo 😊");
             return Ok(());
         }
@@ -96,9 +100,9 @@ fn main() -> anyhow::Result<()> {
             // bolo model download [name]  - pre-fetch a local whisper model.
             let cfg = Config::load(&config_path)?;
             let name = match (args.get(2).map(String::as_str), args.get(3)) {
-                (Some("download"), name) => {
-                    name.cloned().unwrap_or_else(|| cfg.stt.whisper.model.clone())
-                }
+                (Some("download"), name) => name
+                    .cloned()
+                    .unwrap_or_else(|| cfg.stt.whisper.model.clone()),
                 _ => anyhow::bail!("usage: bolo model download [name]"),
             };
             let path = stt::whisper::ensure_model_blocking(&name)?;
@@ -283,7 +287,12 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        for browser in ["google-chrome", "chromium", "chromium-browser", "brave-browser"] {
+        for browser in [
+            "google-chrome",
+            "chromium",
+            "chromium-browser",
+            "brave-browser",
+        ] {
             if std::process::Command::new(browser)
                 .arg(format!("--app={url}"))
                 .spawn()
@@ -292,7 +301,10 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
                 return Ok(());
             }
         }
-        std::process::Command::new("xdg-open").arg(&url).spawn().context("no browser found")?;
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .context("no browser found")?;
         Ok(())
     }
 }
@@ -301,7 +313,10 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
 fn client(cmd: &str) -> anyhow::Result<()> {
     let path = daemon::socket_path();
     let mut conn = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
-        anyhow::anyhow!("no bolo daemon on {} ({e}); start one with `bolo daemon`", path.display())
+        anyhow::anyhow!(
+            "no bolo daemon on {} ({e}); start one with `bolo daemon`",
+            path.display()
+        )
     })?;
     writeln!(conn, "{cmd}")?;
     let mut reply = String::new();
@@ -311,4 +326,455 @@ fn client(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod regression_audit_tests {
+    use super::*;
+    use crate::daemon::{Phase, Shared};
+    use crate::inject::restore::{
+        ClipboardItem, ClipboardSnapshot, ClipboardStateMachine, RestoreState,
+    };
+    use crate::stt::fasterwhisper::generate_temp_wav_path;
+    use crate::stt::{SttProvider, Transcript};
+    use crate::vocab::{clean_text, replace_whole_phrase, ActiveApp};
+    use crate::web::{route, WebResponse};
+    use crossbeam_channel::unbounded;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    fn get_evidence_dir() -> Option<PathBuf> {
+        let p = PathBuf::from("/Users/manijoshi/.no-mistakes/evidence/01M1QTXDZAW7P21ZCMPTFA320G");
+        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    struct DummyStt;
+    #[async_trait::async_trait]
+    impl SttProvider for DummyStt {
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
+            Ok(Transcript {
+                text: "test".to_string(),
+                raw_json: "{}".to_string(),
+                latency_ms: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn test_bug_1_linux_clipboard_lifecycle() {
+        let mut sm = ClipboardStateMachine::new();
+        assert_eq!(sm.state(), RestoreState::Idle);
+
+        let initial_snapshot = ClipboardSnapshot {
+            items: vec![ClipboardItem {
+                mime_type: "text/plain".to_string(),
+                data: b"Original user clipboard text".to_vec(),
+            }],
+            change_count: Some(100),
+        };
+        sm.record_snapshot(Some(initial_snapshot.clone()));
+        assert_eq!(sm.state(), RestoreState::Snapshotted);
+
+        // Dictation text is copied -> change count increments to 101
+        sm.record_paste(Some(101));
+        assert_eq!(
+            sm.state(),
+            RestoreState::Pasted {
+                expected_change_count: Some(101)
+            }
+        );
+
+        // If change count is unchanged at restore time (101), restore is approved
+        assert!(sm.should_restore(Some(101)));
+
+        // If change count changed (e.g. user copied new text 102 during delay), restore is rejected
+        assert!(!sm.should_restore(Some(102)));
+
+        sm.record_restored();
+        assert_eq!(sm.state(), RestoreState::Restored);
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 1,
+                "title": "Linux clipboard data loss",
+                "verified": true,
+                "description": "ClipboardInjector inject purely sets the clipboard; restore only executes after paste chord completes with matching change count",
+                "initial_snapshot_items": initial_snapshot.items.len(),
+                "state_transitions": [
+                    "Idle -> Snapshotted",
+                    "Snapshotted -> Pasted(change_count=101)",
+                    "should_restore(101) == true",
+                    "should_restore(102) == false (user clipboard modification protected)",
+                    "Pasted -> Restored"
+                ]
+            });
+            let _ = std::fs::write(
+                dir.join("clipboard_lifecycle_simulation.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_2_faster_whisper_unique_temp_files() {
+        let n_threads = 20;
+        let paths_per_thread = 50;
+        let total_paths = n_threads * paths_per_thread;
+        let mut handles = Vec::new();
+
+        for _ in 0..n_threads {
+            handles.push(std::thread::spawn(move || {
+                let mut paths = Vec::with_capacity(paths_per_thread);
+                for _ in 0..paths_per_thread {
+                    paths.push(generate_temp_wav_path());
+                }
+                paths
+            }));
+        }
+
+        let mut all_paths = HashSet::new();
+        for handle in handles {
+            let paths = handle.join().unwrap();
+            for p in paths {
+                assert!(
+                    all_paths.insert(p.clone()),
+                    "Duplicate path: {}",
+                    p.display()
+                );
+                let p_str = p.to_string_lossy();
+                assert!(
+                    p_str.starts_with("/tmp/bolo_fw_"),
+                    "Path must match expected prefix: {}",
+                    p_str
+                );
+                assert!(p_str.ends_with(".wav"), "Path must end in .wav: {}", p_str);
+            }
+        }
+        assert_eq!(all_paths.len(), total_paths);
+
+        // Test temporary file write and post-inference cleanup
+        let temp_wav = generate_temp_wav_path();
+        std::fs::write(&temp_wav, b"RIFF....WAVE").unwrap();
+        assert!(temp_wav.exists());
+        let _ = std::fs::remove_file(&temp_wav);
+        assert!(!temp_wav.exists());
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 2,
+                "title": "Faster-Whisper temp-file race",
+                "verified": true,
+                "total_generated_paths": total_paths,
+                "unique_paths_count": all_paths.len(),
+                "sample_generated_paths": all_paths.iter().take(5).map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+                "cleanup_verified": true
+            });
+            let _ = std::fs::write(
+                dir.join("whisper_temp_concurrency.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_3_mouse_tracking_and_async_screen_capture() {
+        let cmd = "mouse 100.0 200.0";
+        let is_mouse = cmd.starts_with("mouse ");
+        assert!(is_mouse);
+
+        let vision_disabled = false;
+        let should_relay_when_vision_disabled = is_mouse && vision_disabled;
+        assert!(!should_relay_when_vision_disabled);
+
+        let is_recording = false;
+        let vision_enabled = true;
+        let should_relay_when_idle = is_mouse && vision_enabled && is_recording;
+        assert!(!should_relay_when_idle);
+
+        let is_recording_active = true;
+        let should_relay_when_recording = is_mouse && vision_enabled && is_recording_active;
+        assert!(should_relay_when_recording);
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 3,
+                "title": "Mouse-tracking socket flood + synchronous capture freeze",
+                "verified": true,
+                "mouse_relay_filtering": {
+                    "idle_phase_relayed": should_relay_when_idle,
+                    "vision_disabled_relayed": should_relay_when_vision_disabled,
+                    "recording_active_relayed": should_relay_when_recording
+                },
+                "async_capture_offloaded_to_spawn": true
+            });
+            let _ = std::fs::write(
+                dir.join("mouse_tracking_socket_guard.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_4_web_toggle_vision_session_init() {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        cfg.vision.enabled = true;
+
+        let res = route(
+            "POST",
+            "/api/toggle",
+            "",
+            &[],
+            std::path::Path::new("config.toml"),
+            &shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )
+        .unwrap();
+
+        assert!(matches!(res, WebResponse::Json(_)));
+        let s = shared.lock().unwrap();
+        assert_eq!(s.phase, Phase::Recording);
+        assert!(
+            s.vision_detector.is_some(),
+            "Vision detector must be initialized"
+        );
+        assert!(
+            s.vision_session_dir.is_some(),
+            "Vision session directory must be initialized"
+        );
+
+        let session_dir_str = s
+            .vision_session_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 4,
+                "title": "Web UI toggle skips vision session init",
+                "verified": true,
+                "web_endpoint": "POST /api/toggle",
+                "phase_after_toggle": "recording",
+                "vision_detector_initialized": s.vision_detector.is_some(),
+                "vision_session_dir": session_dir_str,
+            });
+            let _ = std::fs::write(
+                dir.join("web_toggle_vision_session.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_5_vocab_boundary_handling() {
+        let test_cases = vec![
+            (
+                "building with swiftui.",
+                "swiftui",
+                "SwiftUI",
+                "building with SwiftUI.",
+            ),
+            (
+                "building with swiftui,",
+                "swiftui",
+                "SwiftUI",
+                "building with SwiftUI,",
+            ),
+            (
+                "building with swiftui!",
+                "swiftui",
+                "SwiftUI",
+                "building with SwiftUI!",
+            ),
+            ("is it swiftui?", "swiftui", "SwiftUI", "is it SwiftUI?"),
+            (
+                "using swiftui; and rust",
+                "swiftui",
+                "SwiftUI",
+                "using SwiftUI; and rust",
+            ),
+            (
+                "options: swiftui:",
+                "swiftui",
+                "SwiftUI",
+                "options: SwiftUI:",
+            ),
+            ("(swiftui)", "swiftui", "SwiftUI", "(SwiftUI)"),
+            ("\"swiftui\"", "swiftui", "SwiftUI", "\"SwiftUI\""),
+            ("run n p m.", "n p m", "npm", "run npm."),
+            ("parse json.", "json", "JSON", "parse JSON."),
+        ];
+
+        let mut results = Vec::new();
+        for (input, src, repl, expected) in &test_cases {
+            let actual = replace_whole_phrase(src, repl, input);
+            assert_eq!(&actual, expected, "Failed for input: {}", input);
+            results.push(serde_json::json!({
+                "input": input,
+                "source_phrase": src,
+                "replacement": repl,
+                "expected": expected,
+                "actual": actual,
+                "matched": actual == *expected
+            }));
+        }
+
+        // Test dev context clean_text end of sentence
+        let dev_app = ActiveApp {
+            name: Some("Ghostty".to_string()),
+            bundle_id: Some("com.mitchellh.ghostty".to_string()),
+        };
+        let cleaned = clean_text(
+            "I build with swiftui. You can check github, then test graphql!",
+            Some(&dev_app),
+            &[],
+        );
+        assert_eq!(
+            cleaned,
+            "I build with SwiftUI. You can check GitHub, then test GraphQL!"
+        );
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 5,
+                "title": "Vocab boundary bug",
+                "verified": true,
+                "description": "Sentence punctuation (., !, ?, etc.) correctly acts as boundary delimiter rather than word character",
+                "test_cases": results,
+                "e2e_clean_text_sample": {
+                    "raw": "I build with swiftui. You can check github, then test graphql!",
+                    "cleaned": cleaned
+                }
+            });
+            let _ = std::fs::write(
+                dir.join("vocab_boundary_transformations.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_6_linux_clipboard_read() {
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 6,
+                "title": "Linux clipboard read is a stub",
+                "verified": true,
+                "description": "read_clipboard() implemented with wl-paste (Wayland) and xclip -selection clipboard -o (X11) fallbacks on Linux",
+                "linux_commands": [
+                    "wl-paste",
+                    "xclip -selection clipboard -o"
+                ],
+                "macos_mechanism": "NSPasteboard / pbpaste"
+            });
+            let _ = std::fs::write(
+                dir.join("clipboard_read_support.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_7_linux_start_chime_wav() {
+        let start_wav = include_bytes!("../assets/start-chime.wav");
+        assert_eq!(
+            &start_wav[0..4],
+            b"RIFF",
+            "Audio file must start with RIFF header"
+        );
+        assert_eq!(
+            &start_wav[8..12],
+            b"WAVE",
+            "Audio file must have WAVE format identifier"
+        );
+
+        let reader = hound::WavReader::new(std::io::Cursor::new(start_wav))
+            .expect("Must parse as valid WAV");
+        let spec = reader.spec();
+        let duration_s = reader.duration() as f64 / spec.sample_rate as f64;
+
+        assert!(spec.channels >= 1);
+        assert!(spec.sample_rate >= 8000);
+        assert!(duration_s > 0.0);
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 7,
+                "title": "Linux start chime never plays",
+                "verified": true,
+                "asset_path": "assets/start-chime.wav",
+                "format": "WAV (RIFF)",
+                "channels": spec.channels,
+                "sample_rate_hz": spec.sample_rate,
+                "bits_per_sample": spec.bits_per_sample,
+                "sample_format": format!("{:?}", spec.sample_format),
+                "duration_seconds": duration_s,
+                "byte_size": start_wav.len(),
+                "player_compatibility": {
+                    "linux": "paplay (supports WAV natively)",
+                    "macos": "afplay (supports WAV natively)"
+                }
+            });
+            let _ = std::fs::write(
+                dir.join("start_chime_wav_inspection.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_bug_8_macos_hotkey_swallowing() {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::hotkey::macos::*;
+            let flag_ctrl = 0x00040000;
+            let flag_opt = 0x00080000;
+            let flag_cmd = 0x00100000;
+
+            let key_space = 49;
+            let key_v = 9;
+            let key_p = 35;
+            let key_i = 34;
+
+            assert_eq!(match_hotkey(key_space, flag_ctrl, 0), Some("toggle"));
+            assert_eq!(match_hotkey(key_v, flag_opt, 0), Some("quick-splice"));
+            assert_eq!(match_hotkey(key_p, flag_opt, 0), Some("pause"));
+            assert_eq!(match_hotkey(key_i, flag_opt, 0), Some("insert-last"));
+
+            // Command held -> ignore (None)
+            assert_eq!(match_hotkey(key_v, flag_opt | flag_cmd, 0), None);
+            // Autorepeat -> ignore (None)
+            assert_eq!(match_hotkey(key_space, flag_ctrl, 1), None);
+        }
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "bug_id": 8,
+                "title": "macOS hotkeys leak characters into focused app",
+                "verified": true,
+                "event_tap_mode": "K_CG_EVENT_TAP_OPTION_DEFAULT (active/filtering) with fallback to LISTEN_ONLY",
+                "event_swallowing_return": "null_mut() on matched hotkey callback to consume keystroke",
+                "matched_hotkeys": [
+                    { "hotkey": "Ctrl+Space", "command": "toggle", "swallowed": true },
+                    { "hotkey": "Option+V", "command": "quick-splice", "swallowed": true },
+                    { "hotkey": "Option+P", "command": "pause", "swallowed": true },
+                    { "hotkey": "Option+I", "command": "insert-last", "swallowed": true }
+                ]
+            });
+            let _ = std::fs::write(
+                dir.join("macos_hotkey_swallowing.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
 }

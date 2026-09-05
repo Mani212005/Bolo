@@ -41,7 +41,11 @@ impl TextInjector for MacOsTextInjector {
                 .stderr(Stdio::null())
                 .spawn()
                 .context("failed to run pbcopy")?;
-            child.stdin.take().expect("piped stdin").write_all(text.as_bytes())?;
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(text.as_bytes())?;
             let status = child.wait()?;
             anyhow::ensure!(status.success(), "pbcopy exited with {status}");
 

@@ -20,7 +20,9 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (gesture, output_path);
-        Err(anyhow!("Linux portal screenshot unavailable on non-Linux platform"))
+        Err(anyhow!(
+            "Linux portal screenshot unavailable on non-Linux platform"
+        ))
     }
 }
 
@@ -33,7 +35,9 @@ async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Re
     let proxy = Screenshot::new().await?;
     let response = proxy.screenshot(true, true).await?.response()?;
     let uri = response.uri();
-    let src_path = uri.to_file_path().map_err(|_| anyhow!("invalid screenshot URI path"))?;
+    let src_path = uri
+        .to_file_path()
+        .map_err(|_| anyhow!("invalid screenshot URI path"))?;
     std::fs::copy(&src_path, output_path)?;
     Ok(())
 }

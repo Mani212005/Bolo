@@ -37,7 +37,10 @@ impl StreamResampler {
                 .context("failed to create resampler")?,
             )
         };
-        Ok(Self { inner, pending: Vec::new() })
+        Ok(Self {
+            inner,
+            pending: Vec::new(),
+        })
     }
 
     /// Feed native-rate samples, get whatever 16kHz output is ready.
@@ -67,7 +70,9 @@ mod tests {
         let input_rate = 48_000u32;
         let secs = 2.0;
         let input: Vec<f32> = (0..(input_rate as f64 * secs) as usize)
-            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / input_rate as f64).sin() as f32)
+            .map(|i| {
+                (2.0 * std::f64::consts::PI * 440.0 * i as f64 / input_rate as f64).sin() as f32
+            })
             .collect();
 
         let mut rs = StreamResampler::new(input_rate).unwrap();
@@ -82,7 +87,10 @@ mod tests {
 
         // 440Hz has 880 zero crossings/sec; skip the filter warm-up at the start.
         let steady = &out[PIPELINE_SAMPLE_RATE as usize / 4..];
-        let crossings = steady.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
+        let crossings = steady
+            .windows(2)
+            .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+            .count();
         let hz = crossings as f64 / 2.0 / (steady.len() as f64 / PIPELINE_SAMPLE_RATE as f64);
         assert!(
             (hz - 440.0).abs() < 5.0,

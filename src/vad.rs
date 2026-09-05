@@ -130,7 +130,13 @@ pub fn run_endpointer(
             total_ms,
             speech_ms
         );
-        Utterance { samples_16k, native_samples, speech_ms, total_ms, reason }
+        Utterance {
+            samples_16k,
+            native_samples,
+            speech_ms,
+            total_ms,
+            reason,
+        }
     };
 
     loop {

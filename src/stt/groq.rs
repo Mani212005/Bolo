@@ -16,7 +16,11 @@ pub struct GroqStt {
 impl GroqStt {
     pub fn new(config: GroqConfig) -> anyhow::Result<Self> {
         let api_key = crate::enhance::get_groq_api_key()?;
-        Ok(Self { client: reqwest::Client::new(), api_key, config })
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            config,
+        })
     }
 
     fn form(&self, wav_bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Form> {
@@ -76,7 +80,11 @@ impl GroqStt {
             self.config.model,
             latency_ms
         );
-        Ok(Transcript { text, raw_json: body, latency_ms })
+        Ok(Transcript {
+            text,
+            raw_json: body,
+            latency_ms,
+        })
     }
 }
 

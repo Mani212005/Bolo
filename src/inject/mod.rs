@@ -1,10 +1,10 @@
-pub mod restore;
 #[cfg(target_os = "linux")]
 pub mod clipboard;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod portal;
+pub mod restore;
 
 #[async_trait::async_trait]
 pub trait TextInjector: Send + Sync {

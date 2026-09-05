@@ -50,7 +50,11 @@ pub fn start_capture(tx: Sender<Vec<f32>>) -> anyhow::Result<(cpal::Stream, Capt
         cpal::SampleFormat::U16 => device.build_input_stream(
             &stream_config,
             move |data: &[u16], _| {
-                send_mono(&tx, data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0), channels)
+                send_mono(
+                    &tx,
+                    data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0),
+                    channels,
+                )
             },
             err_fn,
             None,

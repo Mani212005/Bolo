@@ -66,7 +66,6 @@ pub struct UiConfig {
     pub port: u16,
 }
 
-
 impl Default for UiConfig {
     fn default() -> Self {
         Self { port: 4525 }
@@ -82,7 +81,10 @@ pub struct SttConfig {
 
 impl Default for SttConfig {
     fn default() -> Self {
-        Self { provider: SttBackend::Groq, whisper: WhisperConfig::default() }
+        Self {
+            provider: SttBackend::Groq,
+            whisper: WhisperConfig::default(),
+        }
     }
 }
 
@@ -105,7 +107,9 @@ pub struct WhisperConfig {
 
 impl Default for WhisperConfig {
     fn default() -> Self {
-        Self { model: "large-v3-turbo".to_string() }
+        Self {
+            model: "large-v3-turbo".to_string(),
+        }
     }
 }
 
@@ -117,7 +121,9 @@ pub struct EnhanceConfig {
 
 impl Default for EnhanceConfig {
     fn default() -> Self {
-        Self { model: "llama-3.3-70b-versatile".to_string() }
+        Self {
+            model: "llama-3.3-70b-versatile".to_string(),
+        }
     }
 }
 
@@ -130,7 +136,10 @@ pub struct DaemonConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { notifications: true, sounds: true }
+        Self {
+            notifications: true,
+            sounds: true,
+        }
     }
 }
 
