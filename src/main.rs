@@ -777,4 +777,59 @@ mod regression_audit_tests {
             );
         }
     }
+
+    #[test]
+    fn test_feature_attach_screenshot_to_paste_session_flow() {
+        use crate::inject::macos::{plan_paste_sequence, select_last_session_image, PasteStep};
+
+        let mut shared = Shared::default();
+
+        // 1. Session without any circle gestures -> no screenshots captured
+        assert!(shared.captured_context_images.is_empty());
+        let last_img_none = select_last_session_image(&shared.captured_context_images);
+        assert_eq!(last_img_none, None);
+
+        let plan_no_img = plan_paste_sequence("transcribed text", last_img_none, true);
+        assert_eq!(
+            plan_no_img,
+            vec![
+                PasteStep::CopyText("transcribed text".to_string()),
+                PasteStep::TriggerPasteChord,
+                PasteStep::RestoreOriginalClipboard,
+            ]
+        );
+
+        // 2. Session with multiple circle gestures -> captures context-1, context-2, context-3
+        let session_dir = PathBuf::from("/tmp/bolo_session_test_42");
+        let img1 = session_dir.join("context-1.png");
+        let img2 = session_dir.join("context-2.png");
+        let img3 = session_dir.join("context-3.png");
+
+        shared.captured_context_images.push(img1.clone());
+        shared.captured_context_images.push(img2.clone());
+        shared.captured_context_images.push(img3.clone());
+
+        // Must select only the LAST captured image (img3, not img1 or img2)
+        let last_img = select_last_session_image(&shared.captured_context_images);
+        assert_eq!(last_img, Some(img3.as_path()));
+        assert_ne!(last_img, Some(img1.as_path()));
+        assert_ne!(last_img, Some(img2.as_path()));
+
+        let plan_with_img = plan_paste_sequence("dictated message", last_img, true);
+        assert_eq!(
+            plan_with_img,
+            vec![
+                PasteStep::CopyText("dictated message".to_string()),
+                PasteStep::TriggerPasteChord,
+                PasteStep::CopyImage(img3.clone()),
+                PasteStep::TriggerPasteChord,
+                PasteStep::RestoreOriginalClipboard,
+            ]
+        );
+
+        // 3. Clear per-session state as finalize does
+        let drained = std::mem::take(&mut shared.captured_context_images);
+        assert_eq!(drained.len(), 3);
+        assert!(shared.captured_context_images.is_empty());
+    }
 }

@@ -3,6 +3,7 @@ use crate::config::InjectMethod;
 use crate::config::{Config, SttBackend, PIPELINE_SAMPLE_RATE};
 #[cfg(target_os = "macos")]
 use crate::inject::macos::MacOsTextInjector;
+#[cfg(target_os = "linux")]
 use crate::inject::TextInjector;
 #[cfg(target_os = "linux")]
 use crate::inject::{clipboard::ClipboardInjector, portal::PortalInjector};
@@ -525,7 +526,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
             }
             PipelineMsg::InsertLast(text) => {
-                let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg));
+                let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg, None));
                 match outcome {
                     Ok(used) => {
                         eprintln!(
@@ -574,63 +575,69 @@ async fn inject_text(
     text: &str,
     injectors: &mut Injectors,
     #[allow(unused)] cfg: &Config,
+    image_path: Option<&std::path::Path>,
 ) -> anyhow::Result<&'static str> {
     #[cfg(target_os = "macos")]
     {
-        injectors.macos.inject(text).await?;
+        injectors.macos.inject_with_image(text, image_path).await?;
         Ok("macos")
     }
 
     #[cfg(target_os = "linux")]
-    match cfg.inject.method {
-        InjectMethod::Paste => {
-            let restore_clipboard = cfg.inject.restore_clipboard;
-            let restore_delay_ms = cfg.inject.restore_delay_ms;
-            let snap = if restore_clipboard {
-                crate::inject::restore::snapshot_clipboard()
-            } else {
-                None
-            };
-            // Copy first; even if the chord fails the text is one Ctrl+V away.
-            injectors.clipboard.inject(text).await?;
-            let post_cc = crate::inject::restore::get_clipboard_change_count();
-            let mut sm = crate::inject::restore::ClipboardStateMachine::new();
-            sm.record_snapshot(snap);
-            sm.record_paste(post_cc);
-
-            match injectors.portal.paste_chord().await {
-                Ok(()) => {
-                    if restore_clipboard && sm.should_restore(post_cc) {
-                        tokio::task::spawn_blocking(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(restore_delay_ms));
-                            let curr_cc = crate::inject::restore::get_clipboard_change_count();
-                            if sm.should_restore(curr_cc) {
-                                if let Some(snap) = sm.snapshot() {
-                                    crate::inject::restore::restore_clipboard(snap);
-                                    sm.record_restored();
-                                }
-                            }
-                        });
-                    }
-                    Ok("paste")
-                }
-                Err(e) => {
-                    eprintln!("[inject] paste chord failed ({e:#}); text is on the clipboard");
-                    Ok("clipboard")
-                }
-            }
-        }
-        InjectMethod::Portal => match injectors.portal.inject(text).await {
-            Ok(()) => Ok("portal"),
-            Err(e) => {
-                eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
+    {
+        let _ = image_path;
+        match cfg.inject.method {
+            InjectMethod::Paste => {
+                let restore_clipboard = cfg.inject.restore_clipboard;
+                let restore_delay_ms = cfg.inject.restore_delay_ms;
+                let snap = if restore_clipboard {
+                    crate::inject::restore::snapshot_clipboard()
+                } else {
+                    None
+                };
+                // Copy first; even if the chord fails the text is one Ctrl+V away.
                 injectors.clipboard.inject(text).await?;
-                Ok("clipboard-fallback")
+                let post_cc = crate::inject::restore::get_clipboard_change_count();
+                let mut sm = crate::inject::restore::ClipboardStateMachine::new();
+                sm.record_snapshot(snap);
+                sm.record_paste(post_cc);
+
+                match injectors.portal.paste_chord().await {
+                    Ok(()) => {
+                        if restore_clipboard && sm.should_restore(post_cc) {
+                            tokio::task::spawn_blocking(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    restore_delay_ms,
+                                ));
+                                let curr_cc = crate::inject::restore::get_clipboard_change_count();
+                                if sm.should_restore(curr_cc) {
+                                    if let Some(snap) = sm.snapshot() {
+                                        crate::inject::restore::restore_clipboard(snap);
+                                        sm.record_restored();
+                                    }
+                                }
+                            });
+                        }
+                        Ok("paste")
+                    }
+                    Err(e) => {
+                        eprintln!("[inject] paste chord failed ({e:#}); text is on the clipboard");
+                        Ok("clipboard")
+                    }
+                }
             }
-        },
-        InjectMethod::Clipboard => {
-            injectors.clipboard.inject(text).await?;
-            Ok("clipboard")
+            InjectMethod::Portal => match injectors.portal.inject(text).await {
+                Ok(()) => Ok("portal"),
+                Err(e) => {
+                    eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
+                    injectors.clipboard.inject(text).await?;
+                    Ok("clipboard-fallback")
+                }
+            },
+            InjectMethod::Clipboard => {
+                injectors.clipboard.inject(text).await?;
+                Ok("clipboard")
+            }
         }
     }
 }
@@ -689,8 +696,15 @@ fn finalize(
             );
             println!("[result]  {text}");
 
+            let last_image = shared
+                .lock()
+                .unwrap()
+                .captured_context_images
+                .last()
+                .cloned();
+
             let t_inject = Instant::now();
-            let used = inject_text(&text, injectors, cfg).await?;
+            let used = inject_text(&text, injectors, cfg, last_image.as_deref()).await?;
             // Safety net: the transcript is always on the clipboard too, so a
             // missed portal paste never means digging through daemon logs. The
             // text was already typed, so a copy failure is non-fatal.

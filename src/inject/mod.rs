@@ -9,7 +9,18 @@ pub mod restore;
 #[async_trait::async_trait]
 pub trait TextInjector: Send + Sync {
     /// Deliver `text` to the user's focused application.
+    #[allow(dead_code)]
     async fn inject(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Deliver `text` and optionally an accompanying image to the user's focused application.
+    #[allow(dead_code)]
+    async fn inject_with_image(
+        &mut self,
+        text: &str,
+        image_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        let _ = image_path;
+        self.inject(text).await
+    }
     /// Human-readable name for logs/notifications.
     #[allow(dead_code)]
     fn name(&self) -> &'static str;
