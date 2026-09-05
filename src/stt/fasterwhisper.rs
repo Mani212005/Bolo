@@ -107,7 +107,7 @@ impl Inner {
         match io_result {
             Ok(n) if n > 0 => {}
             _ => {
-                // Sidecar died — drop it so the next call respawns.
+                // Sidecar died - drop it so the next call respawns.
                 let _ = sc.child.kill();
                 let _ = sc.child.wait();
                 *guard = None;
@@ -125,18 +125,35 @@ impl Inner {
     }
 }
 
+static REQ_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn generate_temp_wav_path() -> PathBuf {
+    let req_id = REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    PathBuf::from(format!("/tmp/bolo_fw_{}_{}_{}.wav", std::process::id(), now_ns, req_id))
+}
+
 #[async_trait::async_trait]
 impl SttProvider for FasterWhisperStt {
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
         let audio_s = (wav_bytes.len().saturating_sub(44)) as f64
             / (2.0 * crate::config::PIPELINE_SAMPLE_RATE as f64);
-        let wav_path = format!("/tmp/bolo_fw_{}.wav", std::process::id());
+        let wav_path = generate_temp_wav_path();
         std::fs::write(&wav_path, &wav_bytes)?;
         let inner = Arc::clone(&self.inner);
         let t0 = Instant::now();
-        // Blocking pipe I/O behind the Mutex — off the async runtime.
+        let wav_path_str = wav_path.to_string_lossy().to_string();
+        let wav_path_cleanup = wav_path.clone();
+        // Blocking pipe I/O behind the Mutex - off the async runtime.
         let (text, sidecar_ms) =
-            tokio::task::spawn_blocking(move || inner.request(&wav_path))
+            tokio::task::spawn_blocking(move || {
+                let outcome = inner.request(&wav_path_str);
+                let _ = std::fs::remove_file(&wav_path_cleanup);
+                outcome
+            })
                 .await
                 .context("faster-whisper task panicked")??;
         let latency_ms = t0.elapsed().as_millis();
@@ -154,5 +171,17 @@ impl SttProvider for FasterWhisperStt {
             latency_ms as f64 / 1000.0 / audio_s.max(0.001)
         );
         Ok(Transcript { text, raw_json, latency_ms })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unique_temp_wav_paths() {
+        let p1 = generate_temp_wav_path();
+        let p2 = generate_temp_wav_path();
+        assert_ne!(p1, p2, "Consecutive temp WAV paths must be unique");
     }
 }

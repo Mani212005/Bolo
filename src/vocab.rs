@@ -243,8 +243,8 @@ pub static DEV_TERMS: &[(&str, &str)] = &[
 
 pub static AMBIGUOUS_TERMS: &[&str] = &["rest", "rag", "crud", "whisper", "parakeet", "ai"];
 
-fn is_word_boundary_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-'
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 pub fn replace_whole_phrase(source: &str, replacement: &str, text: &str) -> String {
@@ -267,7 +267,7 @@ pub fn replace_whole_phrase(source: &str, replacement: &str, text: &str) -> Stri
         // Check character before start
         let prev_char = text[..start].chars().next_back();
         if let Some(c) = prev_char {
-            if is_word_boundary_char(c) {
+            if is_word_char(c) {
                 continue;
             }
         }
@@ -275,7 +275,7 @@ pub fn replace_whole_phrase(source: &str, replacement: &str, text: &str) -> Stri
         // Check character after end
         let next_char = text[end..].chars().next();
         if let Some(c) = next_char {
-            if is_word_boundary_char(c) {
+            if is_word_char(c) {
                 continue;
             }
         }
@@ -386,18 +386,29 @@ mod tests {
             "run npm install"
         );
         assert_eq!(
+            replace_whole_phrase("n p m", "npm", "Run n p m."),
+            "Run npm."
+        );
+        assert_eq!(
             replace_whole_phrase("swiftui", "SwiftUI", "building with swiftui today"),
             "building with SwiftUI today"
+        );
+        assert_eq!(
+            replace_whole_phrase("swiftui", "SwiftUI", "building with swiftui."),
+            "building with SwiftUI."
+        );
+        assert_eq!(
+            replace_whole_phrase("swiftui", "SwiftUI", "is it swiftui? yes, swiftui!"),
+            "is it SwiftUI? yes, SwiftUI!"
         );
         // Word boundary check: "myswiftui" shouldn't match "swiftui"
         assert_eq!(
             replace_whole_phrase("swiftui", "SwiftUI", "myswiftui app"),
             "myswiftui app"
         );
-        // "json-file" has '-' which is a word boundary char, so "json" won't replace inside "json-file"
         assert_eq!(
-            replace_whole_phrase("json", "JSON", "parse json-file"),
-            "parse json-file"
+            replace_whole_phrase("swiftui", "SwiftUI", "swiftui2 app"),
+            "swiftui2 app"
         );
     }
 

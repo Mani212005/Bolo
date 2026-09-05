@@ -236,6 +236,19 @@ fn route(
             Phase::Idle => {
                 s.phase = Phase::Recording;
                 s.toggle_t0 = Some(Instant::now());
+                if cfg.vision.enabled {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
+                    if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                        eprintln!("[vision] failed to create session dir {}: {e:#}", session_dir.display());
+                    }
+                    s.vision_detector = Some(crate::vision::CircleGestureDetector::new(cfg.vision.min_angle_degrees));
+                    s.vision_session_dir = Some(session_dir);
+                    s.captured_context_images.clear();
+                }
                 drop(s);
                 let _ = start_tx.send(());
                 "recording"
@@ -449,4 +462,53 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "history": crate::userdata::read_history(100),
         "models": MODELS.iter().map(|(m, s)| json!({ "name": m, "speed": s })).collect::<Vec<_>>(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stt::Transcript;
+    use crossbeam_channel::unbounded;
+
+    struct DummyStt;
+    #[async_trait::async_trait]
+    impl SttProvider for DummyStt {
+        async fn transcribe(&self, _wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
+            Ok(Transcript {
+                text: "test".to_string(),
+                raw_json: "{}".to_string(),
+                latency_ms: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn test_web_toggle_initializes_vision_session() {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        cfg.vision.enabled = true;
+
+        let res = route(
+            "POST",
+            "/api/toggle",
+            "",
+            &[],
+            Path::new("config.toml"),
+            &shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )
+        .unwrap();
+
+        assert!(matches!(res, WebResponse::Json(_)));
+        let s = shared.lock().unwrap();
+        assert_eq!(s.phase, Phase::Recording);
+        assert!(s.vision_detector.is_some(), "Vision detector should be initialized on toggle");
+        assert!(s.vision_session_dir.is_some(), "Vision session dir should be initialized on toggle");
+    }
 }

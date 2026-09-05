@@ -1,21 +1,14 @@
-use super::{restore, TextInjector};
+use super::TextInjector;
 use crate::config::InjectConfig;
 use anyhow::Context;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
-pub struct ClipboardInjector {
-    restore_clipboard: bool,
-    restore_delay_ms: u64,
-}
+pub struct ClipboardInjector;
 
 impl ClipboardInjector {
-    pub fn new(cfg: &InjectConfig) -> Self {
-        Self {
-            restore_clipboard: cfg.restore_clipboard,
-            restore_delay_ms: cfg.restore_delay_ms,
-        }
+    pub fn new(_cfg: &InjectConfig) -> Self {
+        Self
     }
 }
 
@@ -52,36 +45,8 @@ pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
 impl TextInjector for ClipboardInjector {
     async fn inject(&mut self, text: &str) -> anyhow::Result<()> {
         let text = text.to_owned();
-        let restore_clipboard = self.restore_clipboard;
-        let restore_delay_ms = self.restore_delay_ms;
-
         tokio::task::spawn_blocking(move || {
-            let mut sm = restore::ClipboardStateMachine::new();
-
-            if restore_clipboard {
-                let snap = restore::snapshot_clipboard();
-                sm.record_snapshot(snap);
-            }
-
-            set_clipboard(&text)?;
-
-            let post_cc = restore::get_clipboard_change_count();
-            sm.record_paste(post_cc);
-
-            if restore_clipboard && sm.should_restore(post_cc) {
-                std::thread::sleep(Duration::from_millis(restore_delay_ms));
-                let curr_cc = restore::get_clipboard_change_count();
-                if sm.should_restore(curr_cc) {
-                    if let Some(snap) = sm.snapshot() {
-                        restore::restore_clipboard(snap);
-                        sm.record_restored();
-                    }
-                } else {
-                    sm.record_skipped();
-                }
-            }
-
-            Ok::<(), anyhow::Error>(())
+            set_clipboard(&text)
         })
         .await??;
 
@@ -90,5 +55,16 @@ impl TextInjector for ClipboardInjector {
 
     fn name(&self) -> &'static str {
         "clipboard"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clipboard_injector_name() {
+        let injector = ClipboardInjector;
+        assert_eq!(injector.name(), "clipboard");
     }
 }

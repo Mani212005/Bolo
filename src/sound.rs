@@ -2,7 +2,7 @@ use crate::config::Config;
 use std::fs;
 use std::path::PathBuf;
 
-const START_MP3_BYTES: &[u8] = include_bytes!("../assets/49447089-game-start-317318.mp3");
+const START_WAV_BYTES: &[u8] = include_bytes!("../assets/start-chime.wav");
 
 #[derive(Debug, Clone, Copy)]
 pub enum Chime {
@@ -19,13 +19,13 @@ impl Chime {
     }
 }
 
-/// Ensures the start audio MP3 is extracted from binary bytes to a temporary path.
+/// Ensures the start audio WAV is extracted from binary bytes to a temporary path.
 fn get_start_audio_file() -> PathBuf {
-    let tmp_path = std::env::temp_dir().join("bolo_start_chime.mp3");
+    let tmp_path = std::env::temp_dir().join("bolo_start_chime.wav");
     let needs_write = !tmp_path.exists()
-        || fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0) != START_MP3_BYTES.len() as u64;
+        || fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0) != START_WAV_BYTES.len() as u64;
     if needs_write {
-        let _ = fs::write(&tmp_path, START_MP3_BYTES);
+        let _ = fs::write(&tmp_path, START_WAV_BYTES);
     }
     tmp_path
 }
@@ -81,11 +81,11 @@ mod tests {
     #[test]
     fn test_embedded_audio_file() {
         let path = get_start_audio_file();
-        assert!(path.exists(), "Embedded MP3 should be extracted to temp directory");
+        assert!(path.exists(), "Embedded WAV should be extracted to temp directory");
         assert_eq!(
             fs::metadata(&path).unwrap().len(),
-            START_MP3_BYTES.len() as u64,
-            "Temp MP3 file size must match embedded byte length"
+            START_WAV_BYTES.len() as u64,
+            "Temp WAV file size must match embedded byte length"
         );
     }
 

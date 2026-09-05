@@ -19,6 +19,7 @@ type CGEventTapCallBack = unsafe extern "C" fn(
 // CoreGraphics Constants
 const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
 const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
 
 const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
@@ -123,21 +124,25 @@ unsafe extern "C" fn event_tap_callback(
             if keycode == KEY_SPACE && has_ctrl && !has_cmd {
                 eprintln!("[macos-hotkey] Ctrl+Space -> toggle");
                 (ctx.callback)("toggle");
+                return std::ptr::null_mut();
             }
             // 2. Option + V -> Quick-Splice Clipboard into dictation
             else if keycode == KEY_V && has_opt && !has_cmd {
                 eprintln!("[macos-hotkey] Option+V -> quick-splice");
                 (ctx.callback)("quick-splice");
+                return std::ptr::null_mut();
             }
             // 3. Option + P -> Pause / Resume Recording
             else if keycode == KEY_P && has_opt && !has_cmd {
                 eprintln!("[macos-hotkey] Option+P -> pause");
                 (ctx.callback)("pause");
+                return std::ptr::null_mut();
             }
             // 4. Option + I -> Re-Type Last Transcription
             else if keycode == KEY_I && has_opt && !has_cmd {
                 eprintln!("[macos-hotkey] Option+I -> insert-last");
                 (ctx.callback)("insert-last");
+                return std::ptr::null_mut();
             }
         }
     }
@@ -169,17 +174,28 @@ impl HotkeyListener for MacOsHotkeyListener {
                 });
                 let ctx_raw = Box::into_raw(ctx_box);
 
-                let port = CGEventTapCreate(
+                let mut port = CGEventTapCreate(
                     K_CG_SESSION_EVENT_TAP,
                     K_CG_HEAD_INSERT_EVENT_TAP,
-                    K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                    K_CG_EVENT_TAP_OPTION_DEFAULT,
                     event_mask,
                     event_tap_callback,
                     ctx_raw as *mut c_void,
                 );
 
                 if port.is_null() {
-                    eprintln!("[macos-hotkey] CGEventTapCreate failed — ensure Accessibility permissions are granted to Bolo in macOS System Settings");
+                    port = CGEventTapCreate(
+                        K_CG_SESSION_EVENT_TAP,
+                        K_CG_HEAD_INSERT_EVENT_TAP,
+                        K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                        event_mask,
+                        event_tap_callback,
+                        ctx_raw as *mut c_void,
+                    );
+                }
+
+                if port.is_null() {
+                    eprintln!("[macos-hotkey] CGEventTapCreate failed - ensure Accessibility permissions are granted to Bolo in macOS System Settings");
                     return;
                 }
 
