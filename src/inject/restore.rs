@@ -54,7 +54,10 @@ impl ClipboardStateMachine {
     }
 
     pub fn record_paste(&mut self, post_change_count: Option<i64>) {
-        if self.state == RestoreState::Snapshotted {
+        if matches!(
+            self.state,
+            RestoreState::Snapshotted | RestoreState::Pasted { .. }
+        ) {
             self.state = RestoreState::Pasted {
                 expected_change_count: post_change_count,
             };
