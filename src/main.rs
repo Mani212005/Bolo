@@ -344,7 +344,13 @@ mod regression_audit_tests {
     use std::sync::{Arc, Mutex};
 
     fn get_evidence_dir() -> Option<PathBuf> {
-        let p = PathBuf::from("/Users/manijoshi/.no-mistakes/evidence/01M1QTXDZAW7P21ZCMPTFA320G");
+        if let Ok(dir) = std::env::var("NO_MISTAKES_EVIDENCE_DIR") {
+            let p = PathBuf::from(dir);
+            if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+                return Some(p);
+            }
+        }
+        let p = PathBuf::from("/Users/manijoshi/.no-mistakes/evidence/01M1RMRZAZTFG1T41ZQ5X5RZZW");
         if p.exists() || std::fs::create_dir_all(&p).is_ok() {
             Some(p)
         } else {

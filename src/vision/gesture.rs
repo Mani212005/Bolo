@@ -396,7 +396,10 @@ mod tests {
         for index in 0..64 {
             let angle = (index as f64) / 63.0 * 2.0 * PI;
             let radius = 60.0 * (1.0 + 0.48 * (angle * 2.0).sin());
-            let point = (center.0 + radius * angle.cos(), center.1 + radius * angle.sin());
+            let point = (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            );
             let time = (index as f64) / 64.0;
             if let Some(res) = detector.add(point, time) {
                 result = Some(res);
@@ -413,7 +416,10 @@ mod tests {
         for index in 0..64 {
             let angle = (index as f64) / 63.0 * 2.0 * PI;
             let radius = 60.0 * (1.0 + 0.58 * (angle * 2.0).sin());
-            let point = (center.0 + radius * angle.cos(), center.1 + radius * angle.sin());
+            let point = (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            );
             let time = (index as f64) / 64.0;
             if let Some(res) = detector2.add(point, time) {
                 result2 = Some(res);

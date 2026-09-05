@@ -48,7 +48,7 @@ model = "llama-3.3-70b-versatile"
 port = 4525
 
 [vision]
-# Pointer-guided visual screen context capture
-enabled = true                      # capture screenshots when circling areas during dictation
+# Hover-only pointer-guided visual screen context capture
+enabled = true                      # hover pointer in a circle to capture screen context
 min_angle_degrees = 315.0           # minimum circle arc angle threshold
 
