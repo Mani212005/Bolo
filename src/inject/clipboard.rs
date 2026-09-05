@@ -21,7 +21,11 @@ fn pipe_to(cmd: &[&str], secs: &str, text: &str) -> anyhow::Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("failed to run {}", cmd[0]))?;
-    child.stdin.take().expect("piped stdin").write_all(text.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(text.as_bytes())?;
     let status = child.wait()?;
     if status.code() == Some(124) {
         anyhow::bail!("{} timed out (focus-stealing prevention?)", cmd[0]);
@@ -33,11 +37,9 @@ fn pipe_to(cmd: &[&str], secs: &str, text: &str) -> anyhow::Result<()> {
 pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
     match pipe_to(&["wl-copy"], "3", text) {
         Ok(()) => Ok(()),
-        Err(wl_err) => {
-            pipe_to(&["xclip", "-selection", "clipboard"], "2", text)
-                .map(|()| eprintln!("[clipboard] wl-copy stalled ({wl_err}); used xclip bridge"))
-                .map_err(|x_err| anyhow::anyhow!("wl-copy: {wl_err}; xclip: {x_err}"))
-        }
+        Err(wl_err) => pipe_to(&["xclip", "-selection", "clipboard"], "2", text)
+            .map(|()| eprintln!("[clipboard] wl-copy stalled ({wl_err}); used xclip bridge"))
+            .map_err(|x_err| anyhow::anyhow!("wl-copy: {wl_err}; xclip: {x_err}")),
     }
 }
 
@@ -45,10 +47,7 @@ pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
 impl TextInjector for ClipboardInjector {
     async fn inject(&mut self, text: &str) -> anyhow::Result<()> {
         let text = text.to_owned();
-        tokio::task::spawn_blocking(move || {
-            set_clipboard(&text)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || set_clipboard(&text)).await??;
 
         Ok(())
     }

@@ -32,7 +32,9 @@ pub fn get_groq_api_key() -> anyhow::Result<String> {
             }
         }
     }
-    Err(anyhow!("GROQ_API_KEY is not set (add it to ~/.env or export it)"))
+    Err(anyhow!(
+        "GROQ_API_KEY is not set (add it to ~/.env or export it)"
+    ))
 }
 
 /// Rewrite a transcript as a better LLM prompt via Groq's chat API.
@@ -72,7 +74,11 @@ pub async fn enhance(cfg: &EnhanceConfig, text: &str) -> anyhow::Result<String> 
     eprintln!(
         "[enhance] model={} prompt={} latency_ms={} in_chars={} out_chars={}",
         cfg.model,
-        if custom.is_some() { "custom" } else { "default" },
+        if custom.is_some() {
+            "custom"
+        } else {
+            "default"
+        },
         t0.elapsed().as_millis(),
         text.chars().count(),
         enhanced.chars().count()

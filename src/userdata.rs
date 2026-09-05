@@ -72,8 +72,10 @@ pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s
         "duration_s": duration_s,
     });
     use std::io::Write;
-    if let Ok(mut f) =
-        std::fs::File::options().create(true).append(true).open(history_path())
+    if let Ok(mut f) = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(history_path())
     {
         let _ = writeln!(f, "{line}");
     }
@@ -105,10 +107,14 @@ pub fn delete_history_item(id: &str) -> bool {
         .enumerate()
         .filter_map(|(i, l)| {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(l) {
-                let item_id = val.get("id").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| {
-                    let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
-                    format!("hist_{ts}_{i}")
-                });
+                let item_id = val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        let ts = val.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                        format!("hist_{ts}_{i}")
+                    });
                 if item_id == id {
                     found = true;
                     let audio_path = recordings_dir().join(format!("{id}.wav"));
@@ -150,8 +156,10 @@ pub fn write_scratchpad(text: &str) -> std::io::Result<()> {
 pub fn write_keeping_comments(name: &str, body: &str) -> std::io::Result<()> {
     let path = config_dir().join(name);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let header: Vec<&str> =
-        existing.lines().take_while(|l| l.trim_start().starts_with('#')).collect();
+    let header: Vec<&str> = existing
+        .lines()
+        .take_while(|l| l.trim_start().starts_with('#'))
+        .collect();
     let mut out = header.join("\n");
     if !out.is_empty() {
         out.push('\n');
@@ -182,7 +190,10 @@ const ENHANCE_STARTER: &str = "\
 pub fn ensure_starter_files() {
     let dir = config_dir();
     let _ = std::fs::create_dir_all(&dir);
-    for (name, content) in [("vocabulary.txt", VOCAB_STARTER), ("enhance_prompt.txt", ENHANCE_STARTER)] {
+    for (name, content) in [
+        ("vocabulary.txt", VOCAB_STARTER),
+        ("enhance_prompt.txt", ENHANCE_STARTER),
+    ] {
         let path = dir.join(name);
         if !path.exists() && std::fs::write(&path, content).is_ok() {
             eprintln!("[userdata] created {}", path.display());
@@ -220,7 +231,12 @@ pub fn enhance_prompt() -> Option<String> {
 
 pub fn read_user_vocabulary_terms() -> Vec<String> {
     read_uncommented("vocabulary.txt")
-        .map(|terms| terms.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|terms| {
+            terms
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
-

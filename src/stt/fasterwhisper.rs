@@ -54,7 +54,12 @@ fn ensure_venv() -> anyhow::Result<PathBuf> {
 impl FasterWhisperStt {
     pub fn new(model: &str) -> anyhow::Result<Self> {
         ensure_venv()?; // fail fast at startup, before any recording
-        let threads = std::cmp::min(4, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+        let threads = std::cmp::min(
+            4,
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        );
         let inner = Arc::new(Inner {
             sidecar: Mutex::new(None),
             model: model.to_string(),
@@ -72,7 +77,10 @@ impl Inner {
         let python = ensure_venv()?;
         let script = data_dir().join("fw_server.py");
         std::fs::write(&script, include_str!("fw_server.py"))?;
-        eprintln!("[fw] starting sidecar model={} threads={}", self.model, self.threads);
+        eprintln!(
+            "[fw] starting sidecar model={} threads={}",
+            self.model, self.threads
+        );
         let mut child = Command::new(python)
             .arg(&script)
             .arg(&self.model)
@@ -87,7 +95,11 @@ impl Inner {
             .context("failed to start faster-whisper sidecar")?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Ok(Sidecar { child, stdin, stdout })
+        Ok(Sidecar {
+            child,
+            stdin,
+            stdout,
+        })
     }
 
     fn request(&self, wav_path: &str) -> anyhow::Result<(String, u128)> {
@@ -111,7 +123,9 @@ impl Inner {
                 let _ = sc.child.kill();
                 let _ = sc.child.wait();
                 *guard = None;
-                return Err(anyhow!("faster-whisper sidecar died; will restart on next use"));
+                return Err(anyhow!(
+                    "faster-whisper sidecar died; will restart on next use"
+                ));
             }
         }
         let json: serde_json::Value =
@@ -133,7 +147,12 @@ pub(crate) fn generate_temp_wav_path() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/bolo_fw_{}_{}_{}.wav", std::process::id(), now_ns, req_id))
+    PathBuf::from(format!(
+        "/tmp/bolo_fw_{}_{}_{}.wav",
+        std::process::id(),
+        now_ns,
+        req_id
+    ))
 }
 
 #[async_trait::async_trait]
@@ -148,14 +167,13 @@ impl SttProvider for FasterWhisperStt {
         let wav_path_str = wav_path.to_string_lossy().to_string();
         let wav_path_cleanup = wav_path.clone();
         // Blocking pipe I/O behind the Mutex - off the async runtime.
-        let (text, sidecar_ms) =
-            tokio::task::spawn_blocking(move || {
-                let outcome = inner.request(&wav_path_str);
-                let _ = std::fs::remove_file(&wav_path_cleanup);
-                outcome
-            })
-                .await
-                .context("faster-whisper task panicked")??;
+        let (text, sidecar_ms) = tokio::task::spawn_blocking(move || {
+            let outcome = inner.request(&wav_path_str);
+            let _ = std::fs::remove_file(&wav_path_cleanup);
+            outcome
+        })
+        .await
+        .context("faster-whisper task panicked")??;
         let latency_ms = t0.elapsed().as_millis();
         let raw_json = serde_json::json!({
             "model": self.inner.model, "engine": "faster-whisper", "text": text,
@@ -170,18 +188,53 @@ impl SttProvider for FasterWhisperStt {
             audio_s,
             latency_ms as f64 / 1000.0 / audio_s.max(0.001)
         );
-        Ok(Transcript { text, raw_json, latency_ms })
+        Ok(Transcript {
+            text,
+            raw_json,
+            latency_ms,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_unique_temp_wav_paths() {
         let p1 = generate_temp_wav_path();
         let p2 = generate_temp_wav_path();
         assert_ne!(p1, p2, "Consecutive temp WAV paths must be unique");
+    }
+
+    #[test]
+    fn test_concurrent_temp_wav_paths_unique() {
+        let n_threads = 10;
+        let paths_per_thread = 50;
+        let mut handles = Vec::new();
+
+        for _ in 0..n_threads {
+            handles.push(std::thread::spawn(move || {
+                let mut paths = Vec::with_capacity(paths_per_thread);
+                for _ in 0..paths_per_thread {
+                    paths.push(generate_temp_wav_path());
+                }
+                paths
+            }));
+        }
+
+        let mut all_paths = HashSet::new();
+        for handle in handles {
+            let paths = handle.join().unwrap();
+            for p in paths {
+                assert!(
+                    all_paths.insert(p.clone()),
+                    "Found duplicate temp WAV path: {}",
+                    p.display()
+                );
+            }
+        }
+        assert_eq!(all_paths.len(), n_threads * paths_per_thread);
     }
 }

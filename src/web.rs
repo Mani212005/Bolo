@@ -16,8 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const APP_HTML: &str = include_str!("ui/app.html");
-const HOTKEY_ACTIONS: [(&str, &str); 3] =
-    [("toggle", "Bolo toggle"), ("pause", "Bolo pause"), ("insert", "Bolo insert")];
+const HOTKEY_ACTIONS: [(&str, &str); 3] = [
+    ("toggle", "Bolo toggle"),
+    ("pause", "Bolo pause"),
+    ("insert", "Bolo insert"),
+];
 
 pub enum WebResponse {
     Html(String),
@@ -56,7 +59,10 @@ pub fn serve(
         }
     };
     let _ = std::fs::create_dir_all(crate::userdata::data_dir());
-    let _ = std::fs::write(crate::userdata::data_dir().join("port.txt"), port.to_string());
+    let _ = std::fs::write(
+        crate::userdata::data_dir().join("port.txt"),
+        port.to_string(),
+    );
     eprintln!("[web] settings & history dashboard on http://127.0.0.1:{port}");
     for mut request in server.incoming_requests() {
         let config_path = config_path.clone();
@@ -98,11 +104,13 @@ pub fn serve(
                             .unwrap(),
                     )
                     .with_header(
-                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
+                        tiny_http::Header::from_bytes(
+                            "Cache-Control",
+                            "no-store, no-cache, must-revalidate",
+                        )
+                        .unwrap(),
                     )
-                    .with_header(
-                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
-                    ),
+                    .with_header(tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap()),
                 Ok(WebResponse::Json(v)) => tiny_http::Response::from_string(v.to_string())
                     .with_header(
                         tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
@@ -111,25 +119,26 @@ pub fn serve(
                         tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
                     )
                     .with_header(
-                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
-                    )
-                    .with_header(
-                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
-                    ),
-                Ok(WebResponse::Text(t)) => tiny_http::Response::from_string(t)
-                    .with_header(
                         tiny_http::Header::from_bytes(
-                            "Content-Type",
-                            "text/plain; charset=utf-8",
+                            "Cache-Control",
+                            "no-store, no-cache, must-revalidate",
                         )
                         .unwrap(),
                     )
+                    .with_header(tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap()),
+                Ok(WebResponse::Text(t)) => tiny_http::Response::from_string(t)
                     .with_header(
-                        tiny_http::Header::from_bytes("Cache-Control", "no-store, no-cache, must-revalidate").unwrap(),
+                        tiny_http::Header::from_bytes("Content-Type", "text/plain; charset=utf-8")
+                            .unwrap(),
                     )
                     .with_header(
-                        tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap(),
-                    ),
+                        tiny_http::Header::from_bytes(
+                            "Cache-Control",
+                            "no-store, no-cache, must-revalidate",
+                        )
+                        .unwrap(),
+                    )
+                    .with_header(tiny_http::Header::from_bytes("Pragma", "no-cache").unwrap()),
                 Ok(WebResponse::Audio(bytes)) => {
                     let len = bytes.len();
                     tiny_http::Response::from_data(bytes)
@@ -137,20 +146,19 @@ pub fn serve(
                             tiny_http::Header::from_bytes("Content-Type", "audio/wav").unwrap(),
                         )
                         .with_header(
-                            tiny_http::Header::from_bytes("Content-Length", len.to_string()).unwrap(),
+                            tiny_http::Header::from_bytes("Content-Length", len.to_string())
+                                .unwrap(),
                         )
                         .with_header(
                             tiny_http::Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
                         )
                         .with_header(
-                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*")
+                                .unwrap(),
                         )
                         .with_header(
-                            tiny_http::Header::from_bytes(
-                                "Cache-Control",
-                                "public, max-age=86400",
-                            )
-                            .unwrap(),
+                            tiny_http::Header::from_bytes("Cache-Control", "public, max-age=86400")
+                                .unwrap(),
                         )
                 }
                 Ok(WebResponse::NotFound) => {
@@ -166,7 +174,7 @@ pub fn serve(
     }
 }
 
-fn route(
+pub(crate) fn route(
     method: &str,
     url: &str,
     body: &str,
@@ -196,7 +204,8 @@ fn route(
                 }
             })
         } else {
-            clean_path.strip_prefix("/api/audio/")
+            clean_path
+                .strip_prefix("/api/audio/")
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
@@ -218,7 +227,8 @@ fn route(
                 }
             })
         } else {
-            clean_path.strip_prefix("/api/history/")
+            clean_path
+                .strip_prefix("/api/history/")
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
@@ -241,11 +251,17 @@ fn route(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
+                    let session_dir =
+                        crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
                     if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                        eprintln!("[vision] failed to create session dir {}: {e:#}", session_dir.display());
+                        eprintln!(
+                            "[vision] failed to create session dir {}: {e:#}",
+                            session_dir.display()
+                        );
                     }
-                    s.vision_detector = Some(crate::vision::CircleGestureDetector::new(cfg.vision.min_angle_degrees));
+                    s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
+                        cfg.vision.min_angle_degrees,
+                    ));
                     s.vision_session_dir = Some(session_dir);
                     s.captured_context_images.clear();
                 }
@@ -313,7 +329,9 @@ fn route(
         }
         doc.save()?;
         eprintln!("[web] config saved");
-        return Ok(WebResponse::Json(json!({ "ok": true, "needs_restart": true })));
+        return Ok(WebResponse::Json(
+            json!({ "ok": true, "needs_restart": true }),
+        ));
     }
     if method == "POST" && clean_path == "/api/restart" {
         // Reply first; the restart tears this process down.
@@ -386,15 +404,16 @@ fn route(
             phase.as_str()
         );
         let (text, audio_id) = crate::mictest::run(&fresh, 3)?;
-        return Ok(WebResponse::Json(json!({ "text": text, "audio_id": audio_id })));
+        return Ok(WebResponse::Json(
+            json!({ "text": text, "audio_id": audio_id }),
+        ));
     }
     Ok(WebResponse::NotFound)
 }
 
 fn vocab_terms() -> Vec<String> {
-    let text =
-        std::fs::read_to_string(crate::userdata::config_dir().join("vocabulary.txt"))
-            .unwrap_or_default();
+    let text = std::fs::read_to_string(crate::userdata::config_dir().join("vocabulary.txt"))
+        .unwrap_or_default();
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -426,7 +445,10 @@ fn read_hotkeys() -> Value {
                 .args(["get", &format!("{SCHEMA}.custom-keybinding:{slot}"), key])
                 .output()
                 .ok()?;
-            let s = String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_string();
+            let s = String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .trim_matches('\'')
+                .to_string();
             (!s.is_empty()).then_some(s)
         };
         if let Some(name) = get("name") {
@@ -508,7 +530,49 @@ mod tests {
         assert!(matches!(res, WebResponse::Json(_)));
         let s = shared.lock().unwrap();
         assert_eq!(s.phase, Phase::Recording);
-        assert!(s.vision_detector.is_some(), "Vision detector should be initialized on toggle");
-        assert!(s.vision_session_dir.is_some(), "Vision session dir should be initialized on toggle");
+        assert!(
+            s.vision_detector.is_some(),
+            "Vision detector should be initialized on toggle"
+        );
+        assert!(
+            s.vision_session_dir.is_some(),
+            "Vision session dir should be initialized on toggle"
+        );
+    }
+
+    #[test]
+    fn test_web_toggle_disabled_vision() {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        cfg.vision.enabled = false;
+
+        let res = route(
+            "POST",
+            "/api/toggle",
+            "",
+            &[],
+            Path::new("config.toml"),
+            &shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )
+        .unwrap();
+
+        assert!(matches!(res, WebResponse::Json(_)));
+        let s = shared.lock().unwrap();
+        assert_eq!(s.phase, Phase::Recording);
+        assert!(
+            s.vision_detector.is_none(),
+            "Vision detector must not be initialized when disabled"
+        );
+        assert!(
+            s.vision_session_dir.is_none(),
+            "Vision session dir must not be initialized when disabled"
+        );
     }
 }

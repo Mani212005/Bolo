@@ -46,7 +46,11 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     Ok(())
 }
 
-fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: CircleGesture) -> Result<()> {
+fn apply_circle_highlight(
+    input_path: &Path,
+    output_path: &Path,
+    gesture: CircleGesture,
+) -> Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -86,8 +90,15 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
             ) -> CFStringRef;
             fn CFRelease(cf: *const c_void);
 
-            fn CGImageSourceCreateWithURL(url: CFURLRef, options: *const c_void) -> CGImageSourceRef;
-            fn CGImageSourceCreateImageAtIndex(source: CGImageSourceRef, index: usize, options: *const c_void) -> CGImageRef;
+            fn CGImageSourceCreateWithURL(
+                url: CFURLRef,
+                options: *const c_void,
+            ) -> CGImageSourceRef;
+            fn CGImageSourceCreateImageAtIndex(
+                source: CGImageSourceRef,
+                index: usize,
+                options: *const c_void,
+            ) -> CGImageRef;
 
             fn CGImageGetWidth(image: CGImageRef) -> usize;
             fn CGImageGetHeight(image: CGImageRef) -> usize;
@@ -103,7 +114,13 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
                 bitmapInfo: u32,
             ) -> CGContextRef;
             fn CGContextDrawImage(c: CGContextRef, rect: CGRect, image: CGImageRef);
-            fn CGContextSetRGBStrokeColor(c: CGContextRef, red: f64, green: f64, blue: f64, alpha: f64);
+            fn CGContextSetRGBStrokeColor(
+                c: CGContextRef,
+                red: f64,
+                green: f64,
+                blue: f64,
+                alpha: f64,
+            );
             fn CGContextSetLineWidth(c: CGContextRef, width: f64);
             fn CGContextStrokeEllipseInRect(c: CGContextRef, rect: CGRect);
             fn CGBitmapContextCreateImage(c: CGContextRef) -> CGImageRef;
@@ -114,7 +131,11 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
                 count: usize,
                 options: *const c_void,
             ) -> CGImageDestinationRef;
-            fn CGImageDestinationAddImage(idst: CGImageDestinationRef, image: CGImageRef, properties: *const c_void);
+            fn CGImageDestinationAddImage(
+                idst: CGImageDestinationRef,
+                image: CGImageRef,
+                properties: *const c_void,
+            );
             fn CGImageDestinationFinalize(idst: CGImageDestinationRef) -> bool;
         }
 
@@ -145,7 +166,11 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
 
         unsafe {
             let k_cf_string_encoding_utf8 = 0x08000100;
-            let cf_in_path = CFStringCreateWithCString(std::ptr::null(), in_str.as_ptr(), k_cf_string_encoding_utf8);
+            let cf_in_path = CFStringCreateWithCString(
+                std::ptr::null(),
+                in_str.as_ptr(),
+                k_cf_string_encoding_utf8,
+            );
             let url_in = CFURLCreateWithFileSystemPath(std::ptr::null(), cf_in_path, 0, false);
             CFRelease(cf_in_path);
 
@@ -188,7 +213,10 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
 
             let rect = CGRect {
                 origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize { width: width as f64, height: height as f64 },
+                size: CGSize {
+                    width: width as f64,
+                    height: height as f64,
+                },
             };
             CGContextDrawImage(context, rect, image);
             CFRelease(image);
@@ -219,8 +247,14 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
             let cy = cy_rel * scale_y;
             let r = gesture.radius.max(24.0) * scale_x;
             let highlight_rect = CGRect {
-                origin: CGPoint { x: cx - r, y: (height as f64) - cy - r },
-                size: CGSize { width: r * 2.0, height: r * 2.0 },
+                origin: CGPoint {
+                    x: cx - r,
+                    y: (height as f64) - cy - r,
+                },
+                size: CGSize {
+                    width: r * 2.0,
+                    height: r * 2.0,
+                },
             };
 
             CGContextSetRGBStrokeColor(context, 0.0, 0.75, 1.0, 0.9); // Cyan-blue stroke
@@ -234,11 +268,19 @@ fn apply_circle_highlight(input_path: &Path, output_path: &Path, gesture: Circle
                 return Err(anyhow!("failed producing marked image"));
             }
 
-            let cf_out_path = CFStringCreateWithCString(std::ptr::null(), out_str.as_ptr(), k_cf_string_encoding_utf8);
+            let cf_out_path = CFStringCreateWithCString(
+                std::ptr::null(),
+                out_str.as_ptr(),
+                k_cf_string_encoding_utf8,
+            );
             let url_out = CFURLCreateWithFileSystemPath(std::ptr::null(), cf_out_path, 0, false);
             CFRelease(cf_out_path);
 
-            let type_png = CFStringCreateWithCString(std::ptr::null(), png_str.as_ptr(), k_cf_string_encoding_utf8);
+            let type_png = CFStringCreateWithCString(
+                std::ptr::null(),
+                png_str.as_ptr(),
+                k_cf_string_encoding_utf8,
+            );
             let dest = CGImageDestinationCreateWithURL(url_out, type_png, 1, std::ptr::null());
             CFRelease(url_out);
             CFRelease(type_png);

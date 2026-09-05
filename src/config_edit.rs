@@ -19,17 +19,27 @@ impl ConfigDoc {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        Ok(Self { path: path.to_path_buf(), doc: text.parse().context("config.toml parse failed")? })
+        Ok(Self {
+            path: path.to_path_buf(),
+            doc: text.parse().context("config.toml parse failed")?,
+        })
     }
 
     pub fn str_at(&self, path: &[&str], default: &str) -> String {
-        self.item_at(path).and_then(|i| i.as_str()).unwrap_or(default).to_string()
+        self.item_at(path)
+            .and_then(|i| i.as_str())
+            .unwrap_or(default)
+            .to_string()
     }
     pub fn bool_at(&self, path: &[&str], default: bool) -> bool {
-        self.item_at(path).and_then(|i| i.as_bool()).unwrap_or(default)
+        self.item_at(path)
+            .and_then(|i| i.as_bool())
+            .unwrap_or(default)
     }
     pub fn int_at(&self, path: &[&str], default: i64) -> i64 {
-        self.item_at(path).and_then(|i| i.as_integer()).unwrap_or(default)
+        self.item_at(path)
+            .and_then(|i| i.as_integer())
+            .unwrap_or(default)
     }
     fn item_at(&self, path: &[&str]) -> Option<&toml_edit::Item> {
         let mut item: &toml_edit::Item = self.doc.as_item();

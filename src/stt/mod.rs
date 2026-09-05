@@ -30,8 +30,8 @@ pub fn make_provider(cfg: &Config) -> anyhow::Result<Arc<dyn SttProvider>> {
             &cfg.groq.language,
         )?)),
         // Shares the [stt.whisper] model knob: one "local model" setting.
-        SttBackend::FasterWhisper => {
-            Ok(Arc::new(fasterwhisper::FasterWhisperStt::new(&cfg.stt.whisper.model)?))
-        }
+        SttBackend::FasterWhisper => Ok(Arc::new(fasterwhisper::FasterWhisperStt::new(
+            &cfg.stt.whisper.model,
+        )?)),
     }
 }

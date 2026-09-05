@@ -20,24 +20,41 @@ impl DeveloperAppProfile {
             "com.mitchellh.ghostty",
         ];
 
-        let editor_names = ["xcode", "visual studio code", "cursor", "windsurf", "neovim"];
+        let editor_names = [
+            "xcode",
+            "visual studio code",
+            "cursor",
+            "windsurf",
+            "neovim",
+        ];
         let editor_ids = ["com.apple.dt.xcode", "com.microsoft.vscode"];
 
         let ai_names = ["chatgpt", "claude", "codex"];
 
-        if name.as_ref().is_some_and(|n| terminal_names.iter().any(|t| n.contains(t)))
-            || identifier.as_ref().is_some_and(|id| terminal_ids.contains(&id.as_str()))
+        if name
+            .as_ref()
+            .is_some_and(|n| terminal_names.iter().any(|t| n.contains(t)))
+            || identifier
+                .as_ref()
+                .is_some_and(|id| terminal_ids.contains(&id.as_str()))
         {
             return DeveloperAppProfile::Terminal;
         }
 
-        if name.as_ref().is_some_and(|n| editor_names.iter().any(|e| n.contains(e)))
-            || identifier.as_ref().is_some_and(|id| editor_ids.contains(&id.as_str()))
+        if name
+            .as_ref()
+            .is_some_and(|n| editor_names.iter().any(|e| n.contains(e)))
+            || identifier
+                .as_ref()
+                .is_some_and(|id| editor_ids.contains(&id.as_str()))
         {
             return DeveloperAppProfile::Editor;
         }
 
-        if name.as_ref().is_some_and(|n| ai_names.iter().any(|a| n.contains(a))) {
+        if name
+            .as_ref()
+            .is_some_and(|n| ai_names.iter().any(|a| n.contains(a)))
+        {
             return DeveloperAppProfile::Ai;
         }
 
@@ -87,8 +104,14 @@ tell application "System Events" to get {name of frontApp, bundle identifier of 
         {
             if output.status.success() {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    let class_name = val.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let title = val.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let class_name = val
+                        .get("class")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let title = val
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     if class_name.is_some() || title.is_some() {
                         return Some(ActiveApp {
                             name: title,
@@ -108,9 +131,18 @@ tell application "System Events" to get {name of frontApp, bundle identifier of 
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
                     fn find_focused(node: &serde_json::Value) -> Option<ActiveApp> {
                         if node.get("focused").and_then(|v| v.as_bool()) == Some(true) {
-                            let name = node.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let app_id = node.get("app_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            return Some(ActiveApp { name, bundle_id: app_id });
+                            let name = node
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let app_id = node
+                                .get("app_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            return Some(ActiveApp {
+                                name,
+                                bundle_id: app_id,
+                            });
                         }
                         if let Some(nodes) = node.get("nodes").and_then(|v| v.as_array()) {
                             for child in nodes {
@@ -335,7 +367,9 @@ pub fn clean_text(text: &str, app: Option<&ActiveApp>, user_terms: &[String]) ->
     // 3. User vocabulary terms that were not in DEV_TERMS
     for user_term in user_terms {
         let lower = user_term.to_lowercase();
-        let in_dev_terms = DEV_TERMS.iter().any(|(s, _)| s.eq_ignore_ascii_case(&lower));
+        let in_dev_terms = DEV_TERMS
+            .iter()
+            .any(|(s, _)| s.eq_ignore_ascii_case(&lower));
         let in_acronyms = SPOKEN_ACRONYMS
             .iter()
             .any(|(s, r)| s.eq_ignore_ascii_case(&lower) || r.eq_ignore_ascii_case(&lower));
@@ -445,6 +479,20 @@ mod tests {
         assert_eq!(
             clean_text("taking a rest api", Some(&general_app), &[]),
             "taking a rest API"
+        );
+
+        // Punctuation boundary checks at end of sentence
+        assert_eq!(
+            clean_text("I love swiftui.", Some(&dev_app), &[]),
+            "I love SwiftUI."
+        );
+        assert_eq!(
+            clean_text("Check github, then use typescript!", Some(&dev_app), &[]),
+            "Check GitHub, then use TypeScript!"
+        );
+        assert_eq!(
+            clean_text("Is it json? Yes, parse json.", Some(&dev_app), &[]),
+            "Is it JSON? Yes, parse JSON."
         );
     }
 

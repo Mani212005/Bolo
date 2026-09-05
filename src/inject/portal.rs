@@ -26,14 +26,17 @@ pub struct PortalInjector {
 
 impl PortalInjector {
     pub fn new(type_delay_ms: u64) -> Self {
-        Self { delay: std::time::Duration::from_millis(type_delay_ms), session: None }
+        Self {
+            delay: std::time::Duration::from_millis(type_delay_ms),
+            session: None,
+        }
     }
 
-    async fn ensure_session(
-        &mut self,
-    ) -> anyhow::Result<()> {
+    async fn ensure_session(&mut self) -> anyhow::Result<()> {
         if self.session.is_none() {
-            let proxy = RemoteDesktop::new().await.context("RemoteDesktop portal unavailable")?;
+            let proxy = RemoteDesktop::new()
+                .await
+                .context("RemoteDesktop portal unavailable")?;
             let session = proxy
                 .create_session(Default::default())
                 .await
@@ -65,7 +68,12 @@ impl PortalInjector {
     async fn key(&self, keysym: u32, state: KeyState) -> anyhow::Result<()> {
         let (proxy, session) = self.session.as_ref().expect("session ensured before key");
         proxy
-            .notify_keyboard_keysym(session, keysym as i32, state, NotifyKeyboardKeysymOptions::default())
+            .notify_keyboard_keysym(
+                session,
+                keysym as i32,
+                state,
+                NotifyKeyboardKeysymOptions::default(),
+            )
             .await?;
         Ok(())
     }

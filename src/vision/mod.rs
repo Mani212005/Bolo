@@ -28,7 +28,9 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (gesture, output_path);
-        Err(anyhow::anyhow!("Screen capture not supported on this operating system"))
+        Err(anyhow::anyhow!(
+            "Screen capture not supported on this operating system"
+        ))
     }
 }
 
@@ -82,11 +84,7 @@ pub struct StoredSession {
 }
 
 /// Enforces the disk quota and 7-day age retention policy.
-pub fn prune_sessions(
-    sessions_dir: &Path,
-    max_age_secs: u64,
-    max_bytes: u64,
-) -> Result<usize> {
+pub fn prune_sessions(sessions_dir: &Path, max_age_secs: u64, max_bytes: u64) -> Result<usize> {
     if !sessions_dir.exists() {
         return Ok(0);
     }
@@ -312,7 +310,11 @@ mod tests {
         let captured_images = vec![img_path];
 
         // 3. Verify accidental session policy keeps session with context even if duration is short and no speech
-        assert!(!is_accidental_session(false, !captured_images.is_empty(), 1.0));
+        assert!(!is_accidental_session(
+            false,
+            !captured_images.is_empty(),
+            1.0
+        ));
 
         // 4. Bundle markdown
         let md_path = write_context_bundle(&session_dir, "", &captured_images)?;
