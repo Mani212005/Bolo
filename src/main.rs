@@ -786,16 +786,19 @@ mod regression_audit_tests {
 
     #[test]
     fn test_feature_attach_screenshot_to_paste_session_flow() {
-        use crate::inject::macos::{plan_paste_sequence, select_last_session_image, PasteStep};
+        use crate::inject::macos::{format_image_paths_for_cli, plan_paste_sequence, PasteStep};
 
         let mut shared = Shared::default();
 
         // 1. Session without any circle gestures -> no screenshots captured
         assert!(shared.captured_context_images.is_empty());
-        let last_img_none = select_last_session_image(&shared.captured_context_images);
-        assert_eq!(last_img_none, None);
 
-        let plan_no_img = plan_paste_sequence("transcribed text", last_img_none, true);
+        let plan_no_img = plan_paste_sequence(
+            "transcribed text",
+            &shared.captured_context_images,
+            true,
+            false,
+        );
         assert_eq!(
             plan_no_img,
             vec![
@@ -815,19 +818,44 @@ mod regression_audit_tests {
         shared.captured_context_images.push(img2.clone());
         shared.captured_context_images.push(img3.clone());
 
-        // Must select only the LAST captured image (img3, not img1 or img2)
-        let last_img = select_last_session_image(&shared.captured_context_images);
-        assert_eq!(last_img, Some(img3.as_path()));
-        assert_ne!(last_img, Some(img1.as_path()));
-        assert_ne!(last_img, Some(img2.as_path()));
+        // All captured images are retained and pasted sequentially
+        assert_eq!(shared.captured_context_images.len(), 3);
 
-        let plan_with_img = plan_paste_sequence("dictated message", last_img, true);
+        let plan_with_img = plan_paste_sequence(
+            "dictated message",
+            &shared.captured_context_images,
+            true,
+            false,
+        );
         assert_eq!(
             plan_with_img,
             vec![
                 PasteStep::CopyText("dictated message".to_string()),
                 PasteStep::TriggerPasteChord,
+                PasteStep::CopyImage(img1.clone()),
+                PasteStep::TriggerPasteChord,
+                PasteStep::CopyImage(img2.clone()),
+                PasteStep::TriggerPasteChord,
                 PasteStep::CopyImage(img3.clone()),
+                PasteStep::TriggerPasteChord,
+                PasteStep::RestoreOriginalClipboard,
+            ]
+        );
+
+        // Terminal fallback plans text stream insertion with space-separated quoted file paths
+        let plan_terminal = plan_paste_sequence(
+            "terminal command",
+            &shared.captured_context_images,
+            true,
+            true,
+        );
+        assert_eq!(
+            plan_terminal,
+            vec![
+                PasteStep::CopyText(format!(
+                    "terminal command {}",
+                    format_image_paths_for_cli(&shared.captured_context_images)
+                )),
                 PasteStep::TriggerPasteChord,
                 PasteStep::RestoreOriginalClipboard,
             ]

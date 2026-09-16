@@ -113,6 +113,10 @@ pub(crate) fn match_hotkey(keycode: i64, flags: u64, autorepeat: i64) -> Option<
     }
 }
 
+pub(crate) fn is_mouse_modifier_active(flags: u64) -> bool {
+    (flags & K_CG_EVENT_FLAG_MASK_CONTROL) != 0
+}
+
 unsafe extern "C" fn event_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
@@ -136,8 +140,11 @@ unsafe extern "C" fn event_tap_callback(
         || event_type == K_CG_EVENT_LEFT_MOUSE_DRAGGED
         || event_type == K_CG_EVENT_RIGHT_MOUSE_DRAGGED
     {
-        let loc = CGEventGetLocation(event);
-        (ctx.callback)(&format!("mouse {:.1} {:.1}", loc.x, loc.y));
+        let flags = CGEventGetFlags(event);
+        if is_mouse_modifier_active(flags) {
+            let loc = CGEventGetLocation(event);
+            (ctx.callback)(&format!("mouse {:.1} {:.1}", loc.x, loc.y));
+        }
     } else if event_type == K_CG_EVENT_KEY_DOWN {
         let keycode = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE);
         let flags = CGEventGetFlags(event);
@@ -272,5 +279,26 @@ mod tests {
 
         // Unrelated key should not match
         assert_eq!(match_hotkey(12, K_CG_EVENT_FLAG_MASK_CONTROL, 0), None);
+    }
+
+    #[test]
+    fn test_mouse_modifier_active_flags() {
+        // Control key held down -> true
+        assert!(is_mouse_modifier_active(K_CG_EVENT_FLAG_MASK_CONTROL));
+        // Control + Option -> true
+        assert!(is_mouse_modifier_active(
+            K_CG_EVENT_FLAG_MASK_CONTROL | K_CG_EVENT_FLAG_MASK_ALTERNATE
+        ));
+        // Control + Command -> true
+        assert!(is_mouse_modifier_active(
+            K_CG_EVENT_FLAG_MASK_CONTROL | K_CG_EVENT_FLAG_MASK_COMMAND
+        ));
+
+        // No modifier -> false
+        assert!(!is_mouse_modifier_active(0));
+        // Option only -> false
+        assert!(!is_mouse_modifier_active(K_CG_EVENT_FLAG_MASK_ALTERNATE));
+        // Command only -> false
+        assert!(!is_mouse_modifier_active(K_CG_EVENT_FLAG_MASK_COMMAND));
     }
 }
