@@ -381,6 +381,76 @@ pub fn clean_text(text: &str, app: Option<&ActiveApp>, user_terms: &[String]) ->
     result
 }
 
+/// Detects if the text represents a multi-line code snippet.
+/// If it does and is not already wrapped in triple backticks, wraps it in ```\n...\n```.
+pub fn format_smart_code(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+    if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        return text.to_string();
+    }
+    if is_code_snippet(trimmed) {
+        format!("```\n{}\n```", trimmed)
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn is_code_snippet(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() < 2 {
+        return false;
+    }
+
+    let code_keywords = [
+        "function ", "def ", "fn ", "const ", "let ", "var ", "class ", "struct ",
+        "impl ", "pub ", "import ", "export ", "from ", "return ", "if ", "for ",
+        "while ", "switch ", "case ", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
+        "CREATE ", "WHERE ", "async ", "await ", "typedef ", "interface ", "enum ",
+        "package ", "namespace ", "#include", "val ", "using ", "echo ", "console.",
+    ];
+
+    let code_syntax_markers = [
+        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||",
+        ":=", "</", "/>", "/*", "*/", "//", "#!/", "$ ",
+    ];
+
+    let mut code_line_score = 0;
+    let mut strong_signal_count = 0;
+
+    for line in &lines {
+        let mut is_line_code = false;
+        for kw in &code_keywords {
+            if line.starts_with(kw) || line.contains(&format!(" {kw}")) {
+                is_line_code = true;
+                strong_signal_count += 1;
+                break;
+            }
+        }
+        if !is_line_code {
+            for marker in &code_syntax_markers {
+                if line.contains(marker) {
+                    is_line_code = true;
+                    break;
+                }
+            }
+        }
+        if is_line_code {
+            code_line_score += 1;
+        }
+    }
+
+    // Must have at least 2 strong signals or >= 60% of lines matching code patterns
+    let ratio = (code_line_score as f64) / (lines.len() as f64);
+    (strong_signal_count >= 2 && ratio >= 0.5) || ratio >= 0.7
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +582,30 @@ mod tests {
             clean_text("run n p m with mycustomlib", Some(&dev_app), &user_terms),
             "run NPM with MyCustomLib"
         );
+    }
+
+    #[test]
+    fn test_smart_code_detection_and_formatting() {
+        let code_sample = "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
+        assert!(is_code_snippet(code_sample));
+        assert_eq!(
+            format_smart_code(code_sample),
+            "```\nconst total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;\n```"
+        );
+
+        let python_sample = "def calculate_sum(a, b):\n    return a + b";
+        assert!(is_code_snippet(python_sample));
+        assert_eq!(
+            format_smart_code(python_sample),
+            "```\ndef calculate_sum(a, b):\n    return a + b\n```"
+        );
+
+        let prose_sample = "Hey captain, the build succeeded.\nLet's deploy the update to production.";
+        assert!(!is_code_snippet(prose_sample));
+        assert_eq!(format_smart_code(prose_sample), prose_sample);
+
+        // Already formatted with backticks should remain unchanged
+        let already_formatted = "```\nconst a = 1;\nconst b = 2;\n```";
+        assert_eq!(format_smart_code(already_formatted), already_formatted);
     }
 }

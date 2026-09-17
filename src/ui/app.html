@@ -271,6 +271,147 @@
   .badge-uploaded { background: rgba(56, 189, 248, 0.18); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
   .badge-duration { background: rgba(255, 255, 255, 0.06); color: var(--muted); }
 
+  /* Card image context thumbnails */
+  .card-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+    margin-bottom: 6px;
+  }
+  .card-image-thumb {
+    position: relative;
+    width: 88px;
+    height: 64px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .card-image-thumb:hover {
+    border-color: var(--accent);
+    transform: scale(1.03);
+    box-shadow: 0 4px 14px rgba(56, 189, 248, 0.25);
+  }
+  .card-image-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .thumb-hover-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    color: #fff;
+  }
+  .card-image-thumb:hover .thumb-hover-overlay {
+    opacity: 1;
+  }
+
+  /* Fullscreen Image Lightbox Modal */
+  .lightbox-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(7, 11, 20, 0.88);
+    backdrop-filter: blur(16px);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: fadeIn 0.18s ease-out forwards;
+  }
+  .lightbox-modal.active {
+    display: flex;
+  }
+  .lightbox-content {
+    position: relative;
+    max-width: 90vw;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .lightbox-img-wrapper {
+    max-width: 85vw;
+    max-height: 75vh;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7);
+    background: #0f172a;
+  }
+  .lightbox-img-wrapper img {
+    max-width: 100%;
+    max-height: 75vh;
+    object-fit: contain;
+    display: block;
+  }
+  .lightbox-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .lightbox-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    border-radius: 10px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.15s ease;
+  }
+  .lightbox-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: var(--accent);
+  }
+  .lightbox-btn.primary {
+    background: var(--accent);
+    color: #070b14;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .lightbox-btn.primary:hover {
+    background: #7dd3fc;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+  }
+  .lightbox-close {
+    position: absolute;
+    top: -16px;
+    right: -16px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .lightbox-close:hover {
+    background: rgba(244, 63, 94, 0.2);
+    border-color: rgba(244, 63, 94, 0.4);
+    color: var(--danger);
+  }
+
   .card-actions {
     display: flex;
     align-items: center;
@@ -935,16 +1076,66 @@
         </div>
       </div>
 
-      <!-- Enhance Prompt Customization -->
+      <!-- Smart Code Formatting -->
+      <div class="settings-group">
+        <div class="settings-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          Smart Code Pasting
+        </div>
+        <p class="setting-desc">Automatically detect multi-line programming code and wrap it in triple backtick markdown blocks (```).</p>
+        <div class="setting-row" style="margin-top: 10px;">
+          <div>
+            <div class="setting-label">Format Code Blocks in Markdown</div>
+            <div class="setting-hint">Wraps structured functions, classes, and code syntax in ``` for instant IDE/chat pasting</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingSmartCode" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Enhance & Groq API Key Configuration -->
       <div class="settings-group">
         <div class="settings-title">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg>
-          AI Prompt Enhance Template
+          AI Prompt Enhance & Groq API
         </div>
-        <p class="setting-desc">Instructions for the Groq LLM when clicking the Enhance button.</p>
-        <textarea id="enhancePromptInput" rows="5" style="width:100%; margin-top:10px;" placeholder="Leave empty for built-in prompt optimization defaults…"></textarea>
-        <div style="display:flex; justify-content:flex-end; margin-top:8px;">
-          <button class="action-btn" id="saveEnhancePrompt">Save Enhance Prompt</button>
+        <p class="setting-desc">Configure LLM model and API credentials for prompt rewriting and smart structuring.</p>
+        
+        <div class="setting-row" style="margin-top: 10px;">
+          <div>
+            <div class="setting-label">Enhance LLM Model</div>
+            <div class="setting-hint">Model used to restructure and refine raw voice transcripts</div>
+          </div>
+          <select class="setting-select" id="enhanceModelSelect">
+            <option value="llama-3.3-70b-versatile">LLaMA-3.3 70B Versatile (Recommended)</option>
+            <option value="llama-3.1-8b-instant">LLaMA-3.1 8B Instant (Ultra Fast)</option>
+            <option value="mixtral-8x7b-32768">Mixtral 8x7B (32k Context)</option>
+          </select>
+        </div>
+
+        <div style="margin-top: 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label class="setting-label" style="font-size:12.5px;">Groq API Key</label>
+            <span id="groqKeyStatusBadge" class="badge" style="background:rgba(255,255,255,0.06); color:var(--muted);">Checking…</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="groqApiKeyInput" placeholder="gsk_…" style="flex:1;">
+            <button class="action-btn" id="toggleGroqKeyVisibility" title="Show/Hide Key">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            </button>
+            <button class="action-btn" id="saveGroqApiKeyBtn">Save Key</button>
+          </div>
+        </div>
+
+        <div style="margin-top: 16px;">
+          <div class="setting-label" style="font-size:12.5px; margin-bottom:4px;">Custom Enhance Prompt Template</div>
+          <div class="setting-hint" style="margin-bottom:8px;">Custom system prompt instructions for prompt refinement.</div>
+          <textarea id="enhancePromptInput" rows="4" style="width:100%;" placeholder="Leave empty for built-in prompt optimization defaults…"></textarea>
+          <div style="display:flex; justify-content:flex-end; margin-top:8px;">
+            <button class="action-btn" id="saveEnhancePrompt">Save Enhance Prompt</button>
+          </div>
         </div>
       </div>
 
@@ -997,6 +1188,28 @@
 
   <!-- Toast Element -->
   <div class="toast" id="toast">Copied to clipboard</div>
+
+  <!-- Fullscreen Image Lightbox Modal -->
+  <div class="lightbox-modal" id="imageLightboxModal">
+    <div class="lightbox-content">
+      <button class="lightbox-close" id="lightboxCloseBtn" title="Close (Esc)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+      <div class="lightbox-img-wrapper">
+        <img id="lightboxImage" src="" alt="Screen Context Preview" />
+      </div>
+      <div class="lightbox-actions">
+        <button class="lightbox-btn primary" id="lightboxCopyBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          Copy Image
+        </button>
+        <button class="lightbox-btn" id="lightboxDownloadBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          Download PNG
+        </button>
+      </div>
+    </div>
+  </div>
 
 </div>
 
@@ -1118,6 +1331,21 @@
     $("settingMaxLen").value = String(state.max_len || 1800000);
     $("settingSounds").checked = !!state.sounds;
     $("settingNotifications").checked = !!state.notifications;
+    if ($("settingSmartCode")) $("settingSmartCode").checked = state.smart_code !== false;
+    if ($("enhanceModelSelect")) $("enhanceModelSelect").value = state.enhance_model || "llama-3.3-70b-versatile";
+
+    const keyBadge = $("groqKeyStatusBadge");
+    if (keyBadge) {
+      if (state.has_groq_api_key) {
+        keyBadge.textContent = "Configured";
+        keyBadge.style.background = "rgba(16, 185, 129, 0.18)";
+        keyBadge.style.color = "#34d399";
+      } else {
+        keyBadge.textContent = "Not Set";
+        keyBadge.style.background = "rgba(244, 63, 94, 0.18)";
+        keyBadge.style.color = "#f87171";
+      }
+    }
   }
 
   // Dedicated Web Audio & HTML5 Audio playback manager
@@ -1343,10 +1571,24 @@
       const isLong = (item.text || "").length > 180 || (item.text || "").includes("\n\n");
       const hasAudio = !!(item.audio_id || item.id);
       const audioId = item.audio_id || item.id;
+      const hasImages = Array.isArray(item.images) && item.images.length > 0;
+      const imagesHtml = hasImages ? `
+        <div class="card-images">
+          ${item.images.map((img, idx) => `
+            <div class="card-image-thumb" data-img-path="${escapeAttr(img)}" title="Click to view and copy screenshot">
+              <img src="/api/image?path=${encodeURIComponent(img)}" alt="Screen Context ${idx + 1}" loading="lazy" />
+              <div class="thumb-hover-overlay">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
       
       card.innerHTML = `
         <div class="card-text ${isLong ? 'truncated' : ''}" id="text-${itemId}">${escapeHtml(item.text)}</div>
         ${isLong ? `<button class="show-more-btn" data-id="${itemId}">Show more ∨</button>` : ''}
+        ${imagesHtml}
         
         <div id="audio-container-${itemId}"></div>
 
@@ -1377,6 +1619,15 @@
           </div>
         </div>
       `;
+
+      // Image Lightbox handlers
+      card.querySelectorAll('.card-image-thumb').forEach(thumb => {
+        thumb.onclick = (e) => {
+          e.stopPropagation();
+          const imgPath = thumb.dataset.imgPath;
+          openLightbox(`/api/image?path=${encodeURIComponent(imgPath)}`, imgPath);
+        };
+      });
 
       // Show more / less handler
       const toggleBtn = card.querySelector(".show-more-btn");
@@ -1410,6 +1661,12 @@
 
       // Enhance Action
       card.querySelector('[data-action="enhance"]').onclick = async (e) => {
+        if (!state.has_groq_api_key) {
+          toast("Groq API key required — Configure in Settings");
+          document.querySelector('[data-tab="settings"]').click();
+          setTimeout(() => { if ($("groqApiKeyInput")) $("groqApiKeyInput").focus(); }, 150);
+          return;
+        }
         const btn = e.currentTarget;
         btn.innerHTML = `<svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg> Enhancing…`;
         try {
@@ -1543,6 +1800,12 @@
   $("enhanceScratchpad").onclick = async () => {
     const val = $("scratchpadInput").value.trim();
     if (!val) return toast("Scratchpad is empty");
+    if (!state.has_groq_api_key) {
+      toast("Groq API key required — Configure in Settings");
+      document.querySelector('[data-tab="settings"]').click();
+      setTimeout(() => { if ($("groqApiKeyInput")) $("groqApiKeyInput").focus(); }, 150);
+      return;
+    }
     const btn = $("enhanceScratchpad");
     btn.innerHTML = `<svg class="spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg> Enhancing…`;
     try {
@@ -1553,7 +1816,7 @@
     } catch (err) {
       toast("Enhance failed: " + err.message);
     } finally {
-      btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path></svg> Enhance`;
+      btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3Z"></path></svg> Enhance`;
     }
   };
 
@@ -1565,6 +1828,8 @@
       max_utterance_ms: parseInt($("settingMaxLen").value, 10),
       sounds: $("settingSounds").checked,
       notifications: $("settingNotifications").checked,
+      smart_code: $("settingSmartCode") ? $("settingSmartCode").checked : true,
+      enhance_model: $("enhanceModelSelect") ? $("enhanceModelSelect").value : "llama-3.3-70b-versatile",
     };
     await api("config", { method: "POST", body: JSON.stringify(payload) });
     toast("Settings saved (applies to next dictation)");
@@ -1574,11 +1839,96 @@
   $("settingMaxLen").onchange = saveConfig;
   $("settingSounds").onchange = saveConfig;
   $("settingNotifications").onchange = saveConfig;
+  if ($("settingSmartCode")) $("settingSmartCode").onchange = saveConfig;
+  if ($("enhanceModelSelect")) $("enhanceModelSelect").onchange = saveConfig;
 
   // Save Enhance Prompt
   $("saveEnhancePrompt").onclick = async () => {
     await api("enhance-prompt", { method: "PUT", body: $("enhancePromptInput").value });
     toast("Enhance prompt template saved");
+  };
+
+  // Groq API Key
+  if ($("toggleGroqKeyVisibility")) {
+    $("toggleGroqKeyVisibility").onclick = () => {
+      const inp = $("groqApiKeyInput");
+      inp.type = inp.type === "password" ? "text" : "password";
+    };
+  }
+
+  if ($("saveGroqApiKeyBtn")) {
+    $("saveGroqApiKeyBtn").onclick = async () => {
+      const key = $("groqApiKeyInput").value.trim();
+      if (!key) return toast("Enter a valid Groq API key (gsk_…)");
+      await api("config", { method: "POST", body: JSON.stringify({ groq_api_key: key }) });
+      $("groqApiKeyInput").value = "";
+      toast("Groq API key saved successfully!");
+      loadState();
+    };
+  }
+
+  // Lightbox Modal Controller
+  let currentLightboxImgUrl = "";
+  let currentLightboxPath = "";
+
+  function openLightbox(imgUrl, imgPath) {
+    currentLightboxImgUrl = imgUrl;
+    currentLightboxPath = imgPath || "";
+    $("lightboxImage").src = imgUrl;
+    $("imageLightboxModal").classList.add("active");
+  }
+
+  function closeLightbox() {
+    $("imageLightboxModal").classList.remove("active");
+    $("lightboxImage").src = "";
+    currentLightboxImgUrl = "";
+    currentLightboxPath = "";
+  }
+
+  $("lightboxCloseBtn").onclick = closeLightbox;
+  $("imageLightboxModal").onclick = (e) => {
+    if (e.target === $("imageLightboxModal")) {
+      closeLightbox();
+    }
+  };
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("imageLightboxModal").classList.contains("active")) {
+      closeLightbox();
+    }
+  });
+
+  $("lightboxCopyBtn").onclick = async () => {
+    if (!currentLightboxImgUrl) return;
+    const btn = $("lightboxCopyBtn");
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = `<svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"></circle></svg> Copying…`;
+    try {
+      const res = await fetch(currentLightboxImgUrl);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const blob = await res.blob();
+      const pngBlob = blob.type === "image/png" ? blob : new Blob([await blob.arrayBuffer()], { type: "image/png" });
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": pngBlob })
+      ]);
+      toast("Screenshot copied to clipboard!");
+    } catch (err) {
+      console.error("Image copy failed:", err);
+      toast("Failed to copy image: " + err.message);
+    } finally {
+      btn.innerHTML = originalHtml;
+    }
+  };
+
+  $("lightboxDownloadBtn").onclick = () => {
+    if (!currentLightboxImgUrl) return;
+    const a = document.createElement("a");
+    a.href = currentLightboxImgUrl;
+    a.download = "bolo-screenshot.png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast("Downloaded screenshot");
   };
 
   // Mic Test & Voice Playback

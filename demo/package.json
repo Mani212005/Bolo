@@ -1,0 +1,11 @@
+{
+  "name": "bolo-web-demo",
+  "version": "1.0.0",
+  "description": "Interactive Web Demo & Speech Playground for Bolo voice dictation",
+  "scripts": {
+    "start": "npx serve ."
+  },
+  "keywords": ["speech-to-text", "voice-dictation", "whisper", "groq", "ai-prompts"],
+  "author": "Mani Joshi",
+  "license": "MIT"
+}
