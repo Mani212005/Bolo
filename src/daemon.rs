@@ -526,7 +526,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
             }
             PipelineMsg::InsertLast(text) => {
-                let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg, None));
+                let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg, &[]));
                 match outcome {
                     Ok(used) => {
                         eprintln!(
@@ -575,17 +575,17 @@ async fn inject_text(
     text: &str,
     injectors: &mut Injectors,
     #[allow(unused)] cfg: &Config,
-    image_path: Option<&std::path::Path>,
+    images: &[std::path::PathBuf],
 ) -> anyhow::Result<&'static str> {
     #[cfg(target_os = "macos")]
     {
-        injectors.macos.inject_with_image(text, image_path).await?;
+        injectors.macos.inject_with_images(text, images).await?;
         Ok("macos")
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = image_path;
+        let _ = images;
         match cfg.inject.method {
             InjectMethod::Paste => {
                 let restore_clipboard = cfg.inject.restore_clipboard;
@@ -696,15 +696,14 @@ fn finalize(
             );
             println!("[result]  {text}");
 
-            let last_image = shared
+            let images = shared
                 .lock()
                 .unwrap()
                 .captured_context_images
-                .last()
-                .cloned();
+                .clone();
 
             let t_inject = Instant::now();
-            let used = inject_text(&text, injectors, cfg, last_image.as_deref()).await?;
+            let used = inject_text(&text, injectors, cfg, &images).await?;
             // Safety net: the transcript is always on the clipboard too, so a
             // missed portal paste never means digging through daemon logs. The
             // text was already typed, so a copy failure is non-fatal.
