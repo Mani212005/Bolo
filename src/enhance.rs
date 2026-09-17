@@ -18,6 +18,9 @@ pub fn get_groq_api_key() -> anyhow::Result<String> {
             return Ok(trimmed.to_string());
         }
     }
+    if let Some(key) = crate::userdata::read_saved_groq_api_key() {
+        return Ok(key);
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let env_path = std::path::PathBuf::from(home).join(".env");
         if let Ok(content) = std::fs::read_to_string(&env_path) {
@@ -33,7 +36,7 @@ pub fn get_groq_api_key() -> anyhow::Result<String> {
         }
     }
     Err(anyhow!(
-        "GROQ_API_KEY is not set (add it to ~/.env or export it)"
+        "GROQ_API_KEY is not set (configure it in Settings, ~/.env, or export GROQ_API_KEY)"
     ))
 }
 

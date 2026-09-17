@@ -50,7 +50,30 @@ pub fn read_recording_wav(id: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s: Option<f64>) {
+pub fn save_groq_api_key(key: &str) -> std::io::Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("groq_api_key.txt"), key.trim())
+}
+
+pub fn read_saved_groq_api_key() -> Option<String> {
+    let path = config_dir().join("groq_api_key.txt");
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+pub fn append_history(
+    kind: &str,
+    text: &str,
+    audio_id: Option<&str>,
+    duration_s: Option<f64>,
+    images: Option<&[PathBuf]>,
+) {
     let _ = std::fs::create_dir_all(data_dir());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -63,6 +86,11 @@ pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s
     let id = audio_id
         .map(String::from)
         .unwrap_or_else(|| format!("rec_{now_ms}"));
+    let img_list: Option<Vec<String>> = images.map(|imgs| {
+        imgs.iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect()
+    });
     let line = serde_json::json!({
         "id": id,
         "ts": now,
@@ -70,6 +98,7 @@ pub fn append_history(kind: &str, text: &str, audio_id: Option<&str>, duration_s
         "text": text,
         "audio_id": audio_id,
         "duration_s": duration_s,
+        "images": img_list,
     });
     use std::io::Write;
     if let Ok(mut f) = std::fs::File::options()

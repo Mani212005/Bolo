@@ -27,7 +27,27 @@ pub enum WebResponse {
     Json(Value),
     Text(String),
     Audio(Vec<u8>),
+    Image(Vec<u8>),
     NotFound,
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let h1 = chars.next();
+            let h2 = chars.next();
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                if let Ok(num) = u8::from_str_radix(&format!("{}{}", h1 as char, h2 as char), 16) {
+                    bytes.push(num);
+                    continue;
+                }
+            }
+        }
+        bytes.push(b);
+    }
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 pub fn serve(
@@ -161,6 +181,25 @@ pub fn serve(
                                 .unwrap(),
                         )
                 }
+                Ok(WebResponse::Image(bytes)) => {
+                    let len = bytes.len();
+                    tiny_http::Response::from_data(bytes)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "image/png").unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Length", len.to_string())
+                                .unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*")
+                                .unwrap(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Cache-Control", "public, max-age=86400")
+                                .unwrap(),
+                        )
+                }
                 Ok(WebResponse::NotFound) => {
                     tiny_http::Response::from_string("not found").with_status_code(404)
                 }
@@ -212,6 +251,41 @@ pub(crate) fn route(
         if let Some(id) = id {
             if let Some(bytes) = crate::userdata::read_recording_wav(&id) {
                 return Ok(WebResponse::Audio(bytes));
+            }
+        }
+        return Ok(WebResponse::NotFound);
+    }
+    if (method == "GET" || method == "HEAD") && clean_path.starts_with("/api/image") {
+        let img_path = if !query_str.is_empty() {
+            query_str.split('&').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k == "path" || k == "file" {
+                    Some(v.to_string())
+                } else {
+                    None
+                }
+            })
+        } else {
+            clean_path
+                .strip_prefix("/api/image/")
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        if let Some(raw_path) = img_path {
+            let decoded = percent_decode(&raw_path);
+            let path = PathBuf::from(decoded);
+            let sessions_dir = crate::userdata::sessions_dir();
+            let data_dir = crate::userdata::data_dir();
+            let temp_dir = std::env::temp_dir();
+            let is_allowed = path.starts_with(&sessions_dir)
+                || path.starts_with(&data_dir)
+                || path.starts_with("/tmp")
+                || path.starts_with("/private/tmp")
+                || path.starts_with(&temp_dir);
+            if is_allowed && path.exists() && path.is_file() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    return Ok(WebResponse::Image(bytes));
+                }
             }
         }
         return Ok(WebResponse::NotFound);
@@ -299,7 +373,7 @@ pub(crate) fn route(
                 .unwrap_or(0);
             let audio_id = format!("upload_{now_ms}");
             let _ = crate::userdata::save_recording_wav(&audio_id, body_bytes);
-            crate::userdata::append_history("uploaded", &text, Some(&audio_id), None);
+            crate::userdata::append_history("uploaded", &text, Some(&audio_id), None, None);
         }
         return Ok(WebResponse::Json(json!({ "ok": true, "text": text })));
     }
@@ -326,6 +400,18 @@ pub(crate) fn route(
         }
         if let Some(v) = changes["max_utterance_ms"].as_i64() {
             doc.set(&["vad", "max_utterance_ms"], v.into());
+        }
+        if let Some(v) = changes["enhance_model"].as_str() {
+            doc.set(&["enhance", "model"], v.into());
+        }
+        if let Some(v) = changes["groq_api_key"].as_str() {
+            let key = v.trim();
+            if !key.is_empty() {
+                let _ = crate::userdata::save_groq_api_key(key);
+            }
+        }
+        if let Some(v) = changes["smart_code"].as_bool() {
+            doc.set(&["formatting", "smart_code"], v.into());
         }
         doc.save()?;
         eprintln!("[web] config saved");
@@ -373,7 +459,7 @@ pub(crate) fn route(
         anyhow::ensure!(!body.trim().is_empty(), "nothing to enhance");
         let runtime = tokio::runtime::Runtime::new()?;
         let enhanced = runtime.block_on(crate::enhance::enhance(&cfg.enhance, body))?;
-        crate::userdata::append_history("enhanced", &enhanced, None, None);
+        crate::userdata::append_history("enhanced", &enhanced, None, None, None);
         shared.lock().unwrap().last_text = Some(enhanced.clone());
         return Ok(WebResponse::Json(json!({ "text": enhanced })));
     }
@@ -480,6 +566,9 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "hotkeys": read_hotkeys(),
         "vocab": vocab_terms(),
         "enhance_prompt": enhance_prompt,
+        "enhance_model": doc.str_at(&["enhance", "model"], "llama-3.3-70b-versatile"),
+        "has_groq_api_key": crate::enhance::get_groq_api_key().is_ok(),
+        "smart_code": doc.bool_at(&["formatting", "smart_code"], true),
         "scratchpad": crate::userdata::read_scratchpad(),
         "history": crate::userdata::read_history(100),
         "models": MODELS.iter().map(|(m, s)| json!({ "name": m, "speed": s })).collect::<Vec<_>>(),
@@ -574,5 +663,68 @@ mod tests {
             s.vision_session_dir.is_none(),
             "Vision session dir must not be initialized when disabled"
         );
+    }
+
+    #[test]
+    fn test_image_route_serves_valid_image_and_rejects_unauthorized() {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+
+        // 1. Create a dummy image in temp dir
+        let temp_dir = std::env::temp_dir();
+        let test_img_path = temp_dir.join("bolo_test_context_image.png");
+        std::fs::write(&test_img_path, b"mock-png-data").unwrap();
+
+        // 2. Request image via route
+        let res = route(
+            "GET",
+            &format!("/api/image?path={}", test_img_path.to_string_lossy()),
+            "",
+            &[],
+            Path::new("config.toml"),
+            &shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )
+        .unwrap();
+
+        match res {
+            WebResponse::Image(bytes) => assert_eq!(bytes, b"mock-png-data"),
+            _ => panic!("Expected WebResponse::Image"),
+        }
+
+        // 3. Unauthorized path traversal check (e.g. /etc/passwd or /var/log)
+        let unauth_res = route(
+            "GET",
+            "/api/image?path=/etc/passwd",
+            "",
+            &[],
+            Path::new("config.toml"),
+            &shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )
+        .unwrap();
+
+        assert!(matches!(unauth_res, WebResponse::NotFound));
+
+        // Clean up
+        let _ = std::fs::remove_file(test_img_path);
+    }
+
+    #[test]
+    fn test_state_includes_enhance_and_smart_code() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let s = state(Path::new("config.toml"), &shared).unwrap();
+        assert!(s.get("enhance_model").is_some());
+        assert!(s.get("has_groq_api_key").is_some());
+        assert!(s.get("smart_code").is_some());
     }
 }

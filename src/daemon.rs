@@ -554,7 +554,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 match outcome {
                     Ok(enhanced) => {
                         println!("[enhanced] {enhanced}");
-                        crate::userdata::append_history("enhanced", &enhanced, None, None);
+                        crate::userdata::append_history("enhanced", &enhanced, None, None, None);
                         shared.lock().unwrap().last_text = Some(enhanced);
                         notify(&cfg, "Enhanced & copied - Alt+I types it at your cursor, Cmd+V (Mac) or Ctrl+V pastes");
                     }
@@ -689,6 +689,9 @@ fn finalize(
                 let user_terms = crate::userdata::read_user_vocabulary_terms();
                 text = crate::vocab::clean_text(&text, active_app.as_ref(), &user_terms);
             }
+            if cfg.formatting.smart_code {
+                text = crate::vocab::format_smart_code(&text);
+            }
             eprintln!(
                 "[assemble] pieces={} chars={}",
                 n_pieces,
@@ -734,11 +737,17 @@ fn finalize(
                 _ => "On clipboard - paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
+            let images_for_history = shared.lock().unwrap().captured_context_images.clone();
             crate::userdata::append_history(
                 "dictation",
                 text,
                 audio_id.as_deref(),
                 Some(*duration_s),
+                if images_for_history.is_empty() {
+                    None
+                } else {
+                    Some(&images_for_history)
+                },
             );
             shared.lock().unwrap().last_text = Some(text.clone());
         }

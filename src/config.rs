@@ -27,6 +27,21 @@ pub struct Config {
     pub vocab: VocabConfig,
     #[serde(default)]
     pub vision: VisionConfig,
+    #[serde(default)]
+    pub formatting: FormattingConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FormattingConfig {
+    /// Automatically format multi-line code blocks in markdown backticks
+    pub smart_code: bool,
+}
+
+impl Default for FormattingConfig {
+    fn default() -> Self {
+        Self { smart_code: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
