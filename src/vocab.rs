@@ -381,8 +381,112 @@ pub fn clean_text(text: &str, app: Option<&ActiveApp>, user_terms: &[String]) ->
     result
 }
 
+pub const CODE_KEYWORDS: &[&str] = &[
+    "function ", "def ", "fn ", "const ", "let ", "var ", "class ", "struct ",
+    "impl ", "pub ", "import ", "export ", "from ", "return ", "if ", "for ",
+    "while ", "switch ", "case ", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
+    "CREATE ", "WHERE ", "async ", "await ", "typedef ", "interface ", "enum ",
+    "package ", "namespace ", "#include", "val ", "using ", "echo ", "console.",
+];
+
+pub const CODE_SYNTAX_MARKERS: &[&str] = &[
+    ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</",
+    "/>", "/*", "*/", "//", "#!/", "$ ",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptPiece {
+    Spoken(String),
+    Inserted(String),
+}
+
+/// Detects programming language of a code snippet from syntax and keywords.
+pub fn detect_code_language(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+
+    if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("</div>") || lower.contains("</span>") {
+        return Some("html");
+    }
+
+    if (lower.contains("px;") || lower.contains("rem;") || lower.contains("display:") || lower.contains("color:")) && lower.contains('{') {
+        return Some("css");
+    }
+
+    if text.contains("fn ") || text.contains("pub fn ") || text.contains("impl ") || text.contains("let mut ") || text.contains("println!") || text.contains("Vec<") || text.contains("Result<") || text.contains("use std::") {
+        return Some("rust");
+    }
+
+    if text.contains("def ") || text.contains("elif ") || text.contains("print(") || text.contains("__name__") || text.contains("self.") || text.contains("lambda ") {
+        return Some("python");
+    }
+
+    if text.contains(": string") || text.contains(": number") || text.contains(": boolean") || text.contains(": void") || text.contains("interface ") || text.contains("type ") || text.contains("as const") || text.contains("export interface") || text.contains("export type") {
+        return Some("typescript");
+    }
+
+    if text.contains("console.log") || text.contains("const ") || text.contains("let ") || text.contains("var ") || text.contains("function ") || text.contains("=>") {
+        return Some("javascript");
+    }
+
+    let upper = text.to_uppercase();
+    if upper.contains("SELECT ") || upper.contains("INSERT INTO ") || upper.contains("UPDATE ") || upper.contains("DELETE FROM ") || upper.contains("CREATE TABLE ") {
+        return Some("sql");
+    }
+
+    if text.contains("#!/bin/") || text.contains("echo ") || text.contains("grep ") || text.contains("sudo ") || text.contains("export ") || text.contains("chmod ") {
+        return Some("bash");
+    }
+
+    let trimmed = text.trim();
+    if (trimmed.starts_with('{') && trimmed.ends_with('}')) || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
+        if trimmed.contains("\":") || trimmed.contains("\": ") {
+            return Some("json");
+        }
+    }
+
+    if text.contains("#include <") || text.contains("std::") || text.contains("cout <<") || text.contains("nullptr") {
+        return Some("cpp");
+    }
+    if text.contains("printf(") || text.contains("int main(") {
+        return Some("c");
+    }
+
+    None
+}
+
+/// Determines if a single line possesses code patterns, keywords, or syntax.
+pub fn is_code_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with("```") {
+        return true;
+    }
+    for kw in CODE_KEYWORDS {
+        if trimmed.starts_with(kw) || trimmed.contains(&format!(" {kw}")) {
+            return true;
+        }
+    }
+    for marker in CODE_SYNTAX_MARKERS {
+        if trimmed.contains(marker) {
+            return true;
+        }
+    }
+    if (line.starts_with("  ") || line.starts_with('\t')) && !trimmed.is_empty() {
+        if trimmed.contains(';') || trimmed.contains('{') || trimmed.contains('}') || trimmed.contains('(') || trimmed.contains(')') || trimmed.contains('=') || trimmed.contains(':') || trimmed.contains('.') {
+            return true;
+        }
+    }
+    if trimmed == "{" || trimmed == "}" || trimmed == "};" || trimmed == "]" || trimmed == "];" || trimmed == ")" || trimmed == ");" || trimmed == "else:" || trimmed == "else {" {
+        return true;
+    }
+    false
+}
+
 /// Detects if the text represents a multi-line code snippet.
 /// If it does and is not already wrapped in triple backticks, wraps it in ```\n...\n```.
+/// If conversational prose surrounds code, isolates the code block so prose is not swallowed.
 pub fn format_smart_code(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -390,6 +494,17 @@ pub fn format_smart_code(text: &str) -> String {
     }
     if trimmed.starts_with("```") && trimmed.ends_with("```") {
         return text.to_string();
+    }
+    let lines: Vec<&str> = trimmed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() >= 2 {
+        let first_is_code = is_code_line(lines[0]);
+        let last_is_code = is_code_line(lines[lines.len() - 1]);
+        if !first_is_code || !last_is_code {
+            let isolated = isolate_embedded_code(trimmed);
+            if isolated != trimmed {
+                return isolated;
+            }
+        }
     }
     if is_code_snippet(trimmed) {
         format!("```\n{}\n```", trimmed)
@@ -408,57 +523,12 @@ pub fn is_code_snippet(text: &str) -> bool {
         return false;
     }
 
-    let code_keywords = [
-        "function ",
-        "def ",
-        "fn ",
-        "const ",
-        "let ",
-        "var ",
-        "class ",
-        "struct ",
-        "impl ",
-        "pub ",
-        "import ",
-        "export ",
-        "from ",
-        "return ",
-        "if ",
-        "for ",
-        "while ",
-        "switch ",
-        "case ",
-        "SELECT ",
-        "INSERT ",
-        "UPDATE ",
-        "DELETE ",
-        "CREATE ",
-        "WHERE ",
-        "async ",
-        "await ",
-        "typedef ",
-        "interface ",
-        "enum ",
-        "package ",
-        "namespace ",
-        "#include",
-        "val ",
-        "using ",
-        "echo ",
-        "console.",
-    ];
-
-    let code_syntax_markers = [
-        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</",
-        "/>", "/*", "*/", "//", "#!/", "$ ",
-    ];
-
     let mut code_line_score = 0;
     let mut strong_signal_count = 0;
 
     for line in &lines {
         let mut is_line_code = false;
-        for kw in &code_keywords {
+        for kw in CODE_KEYWORDS {
             if line.starts_with(kw) || line.contains(&format!(" {kw}")) {
                 is_line_code = true;
                 strong_signal_count += 1;
@@ -466,7 +536,7 @@ pub fn is_code_snippet(text: &str) -> bool {
             }
         }
         if !is_line_code {
-            for marker in &code_syntax_markers {
+            for marker in CODE_SYNTAX_MARKERS {
                 if line.contains(marker) {
                     is_line_code = true;
                     break;
@@ -482,6 +552,238 @@ pub fn is_code_snippet(text: &str) -> bool {
     let ratio = (code_line_score as f64) / (lines.len() as f64);
     (strong_signal_count >= 2 && ratio >= 0.5) || ratio >= 0.7
 }
+
+/// Detects and isolates embedded multi-line code inside spoken or mixed text.
+/// Conversational words before and after remain natural prose, while only the
+/// code region is fenced with language-tagged backticks.
+pub fn isolate_embedded_code(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+    if trimmed.contains("```") {
+        let mut in_code = false;
+        let mut out: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("```") {
+                in_code = !in_code;
+                out.push(t.to_string());
+            } else if in_code {
+                out.push(line.trim_end().to_string());
+            } else if t.is_empty() {
+                if !out.last().map_or(true, |prev| prev.is_empty()) {
+                    out.push(String::new());
+                }
+            } else {
+                out.push(t.to_string());
+            }
+        }
+        return out.join("\n").trim().to_string();
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 2 {
+        return text.to_string();
+    }
+
+    enum Block<'a> {
+        Prose(Vec<&'a str>),
+        Code(Vec<&'a str>),
+    }
+
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut current_is_code: Option<bool> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    for line in &lines {
+        let code_flag = is_code_line(line);
+        let effective_code = if line.trim().is_empty() {
+            current_is_code.unwrap_or(false)
+        } else {
+            code_flag
+        };
+
+        match current_is_code {
+            Some(is_code) if is_code == effective_code => {
+                current_lines.push(line);
+            }
+            Some(is_code) => {
+                if is_code {
+                    blocks.push(Block::Code(std::mem::take(&mut current_lines)));
+                } else {
+                    blocks.push(Block::Prose(std::mem::take(&mut current_lines)));
+                }
+                current_is_code = Some(effective_code);
+                current_lines.push(line);
+            }
+            None => {
+                current_is_code = Some(effective_code);
+                current_lines.push(line);
+            }
+        }
+    }
+
+    if let Some(is_code) = current_is_code {
+        if !current_lines.is_empty() {
+            if is_code {
+                blocks.push(Block::Code(current_lines));
+            } else {
+                blocks.push(Block::Prose(current_lines));
+            }
+        }
+    }
+
+    let mut validated_blocks: Vec<Block> = Vec::new();
+    for block in blocks {
+        match block {
+            Block::Code(lines) => {
+                let snippet = lines.join("\n");
+                if is_code_snippet(&snippet) {
+                    validated_blocks.push(Block::Code(lines));
+                } else {
+                    validated_blocks.push(Block::Prose(lines));
+                }
+            }
+            Block::Prose(lines) => {
+                validated_blocks.push(Block::Prose(lines));
+            }
+        }
+    }
+
+    let has_code = validated_blocks.iter().any(|b| matches!(b, Block::Code(_)));
+    if !has_code {
+        return text.to_string();
+    }
+
+    let mut merged: Vec<Block> = Vec::new();
+    for b in validated_blocks {
+        match b {
+            Block::Prose(lines) => {
+                if let Some(Block::Prose(prev_lines)) = merged.last_mut() {
+                    prev_lines.extend(lines);
+                } else {
+                    merged.push(Block::Prose(lines));
+                }
+            }
+            Block::Code(lines) => {
+                merged.push(Block::Code(lines));
+            }
+        }
+    }
+
+    let mut output_parts: Vec<String> = Vec::new();
+    for block in merged {
+        match block {
+            Block::Prose(lines) => {
+                let prose = lines.join("\n").trim().to_string();
+                if !prose.is_empty() {
+                    output_parts.push(prose);
+                }
+            }
+            Block::Code(lines) => {
+                let code_content = lines.join("\n").trim().to_string();
+                let tag = detect_code_language(&code_content).unwrap_or("");
+                let fenced = if tag.is_empty() {
+                    format!("```\n{}\n```", code_content)
+                } else {
+                    format!("```{tag}\n{}\n```", code_content)
+                };
+                output_parts.push(fenced);
+            }
+        }
+    }
+
+    output_parts.join("\n\n")
+}
+
+/// Assembles multiple pieces of dictation and spliced snippets according to piece kind.
+/// Speech pieces remain conversational prose outside code fences, while inserted
+/// code snippets are formatted in language-tagged markdown code blocks, separated
+/// by double-newlines.
+pub fn assemble_transcript_pieces(
+    pieces: &[TranscriptPiece],
+    smart_code: bool,
+) -> String {
+    if pieces.is_empty() {
+        return String::new();
+    }
+
+    struct FormattedPiece {
+        text: String,
+        is_code_block: bool,
+    }
+
+    let mut formatted: Vec<FormattedPiece> = Vec::new();
+
+    for piece in pieces {
+        match piece {
+            TranscriptPiece::Spoken(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let isolated = isolate_embedded_code(trimmed);
+                let is_code = isolated.starts_with("```")
+                    && isolated.ends_with("```")
+                    && !isolated[3..isolated.len().saturating_sub(3)].contains("```");
+                formatted.push(FormattedPiece {
+                    text: isolated,
+                    is_code_block: is_code,
+                });
+            }
+            TranscriptPiece::Inserted(snippet) => {
+                let trimmed = snippet.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if smart_code && (is_code_snippet(trimmed) || trimmed.starts_with("```")) {
+                    let code_text = if trimmed.starts_with("```") {
+                        trimmed.to_string()
+                    } else {
+                        let tag = detect_code_language(trimmed).unwrap_or("");
+                        if tag.is_empty() {
+                            format!("```\n{}\n```", trimmed)
+                        } else {
+                            format!("```{tag}\n{}\n```", trimmed)
+                        }
+                    };
+                    formatted.push(FormattedPiece {
+                        text: code_text,
+                        is_code_block: true,
+                    });
+                } else {
+                    formatted.push(FormattedPiece {
+                        text: trimmed.to_string(),
+                        is_code_block: false,
+                    });
+                }
+            }
+        }
+    }
+
+    if formatted.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    for (i, p) in formatted.iter().enumerate() {
+        if i == 0 {
+            result.push_str(&p.text);
+        } else {
+            let prev = &formatted[i - 1];
+            if prev.is_code_block || p.is_code_block {
+                result.push_str("\n\n");
+            } else {
+                result.push(' ');
+            }
+            result.push_str(&p.text);
+        }
+    }
+
+    result
+}
+
 
 /// Maps Jev detected language to a canonical markdown code block language tag.
 pub fn map_jev_language(lang: &str, text: &str) -> String {
@@ -737,6 +1039,13 @@ pub fn format_with_jev_decision(
     if decision.is_code || decision.layout == "code_block" {
         if trimmed.starts_with("```") && trimmed.ends_with("```") {
             return text.to_string();
+        }
+        let lines: Vec<&str> = trimmed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if lines.len() >= 2 && (!is_code_line(lines[0]) || !is_code_line(lines[lines.len() - 1])) {
+            let isolated = isolate_embedded_code(trimmed);
+            if isolated != trimmed {
+                return isolated;
+            }
         }
         let tag = map_jev_language(&decision.language, trimmed);
         if tag.is_empty() {
@@ -1088,4 +1397,71 @@ mod tests {
         // 4. Prose fallback
         assert_eq!(format_with_fallback(prose_text, None, true), prose_text);
     }
+
+    #[test]
+    fn test_detect_code_language() {
+        assert_eq!(
+            detect_code_language("const x: number = 42;\nconsole.log(x);"),
+            Some("typescript")
+        );
+        assert_eq!(
+            detect_code_language("def greet(name):\n    print(f'hello {name}')"),
+            Some("python")
+        );
+        assert_eq!(
+            detect_code_language("fn main() {\n    println!(\"hello\");\n}"),
+            Some("rust")
+        );
+        assert_eq!(
+            detect_code_language("SELECT * FROM users WHERE id = 1;"),
+            Some("sql")
+        );
+        assert_eq!(
+            detect_code_language("#!/bin/bash\necho 'hello world'"),
+            Some("bash")
+        );
+    }
+
+    #[test]
+    fn test_isolate_embedded_code_preserves_conversational_speech() {
+        let input = "Here is the implementation of the function:\ndef calculate_sum(a, b):\n    return a + b\nWhat do you think of this approach?";
+        let formatted = isolate_embedded_code(input);
+        let expected = "Here is the implementation of the function:\n\n```python\ndef calculate_sum(a, b):\n    return a + b\n```\n\nWhat do you think of this approach?";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_assemble_transcript_pieces_multi_piece() {
+        let pieces = vec![
+            TranscriptPiece::Spoken("Here is the function to handle the request:".to_string()),
+            TranscriptPiece::Inserted("const x: number = 42;\nconsole.log(x);".to_string()),
+            TranscriptPiece::Spoken("Please test and review it.".to_string()),
+        ];
+        let assembled = assemble_transcript_pieces(&pieces, true);
+        let expected = "Here is the function to handle the request:\n\n```typescript\nconst x: number = 42;\nconsole.log(x);\n```\n\nPlease test and review it.";
+        assert_eq!(assembled, expected);
+    }
+
+    #[test]
+    fn test_assemble_transcript_pieces_spoken_before_and_after() {
+        let pieces = vec![
+            TranscriptPiece::Spoken("Speech before".to_string()),
+            TranscriptPiece::Inserted("const a: number = 1;\nconsole.log(a);".to_string()),
+            TranscriptPiece::Spoken("Speech after".to_string()),
+        ];
+        let assembled = assemble_transcript_pieces(&pieces, true);
+        let expected = "Speech before\n\n```typescript\nconst a: number = 1;\nconsole.log(a);\n```\n\nSpeech after";
+        assert_eq!(assembled, expected);
+    }
+
+    #[test]
+    fn test_format_smart_code_with_embedded_prose() {
+        let mixed = "Here is the code:\ndef add(a, b):\n    return a + b\nLet me know.";
+        let result = format_smart_code(mixed);
+        assert_eq!(
+            result,
+            "Here is the code:\n\n```python\ndef add(a, b):\n    return a + b\n```\n\nLet me know."
+        );
+    }
 }
+

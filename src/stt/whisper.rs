@@ -135,6 +135,7 @@ impl SttProvider for WhisperStt {
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
             params.set_n_threads(threads);
             params.set_language(Some(&language));
+            params.set_suppress_blank(true);
             // Bias toward the user's vocabulary (names, jargon).
             let vocab = crate::userdata::vocabulary_prompt();
             if let Some(v) = vocab.as_deref() {
@@ -166,7 +167,50 @@ impl SttProvider for WhisperStt {
                 }));
                 text.push_str(&seg_text);
             }
-            let text = text.trim().to_string();
+            let mut text = text.trim().to_string();
+
+            // When initial token decoding fails on audio with pauses/silence
+            // (e.g. empty transcript or hallucinated single dash "-"),
+            // fallback parameters (suppress_blank = true, temperature_inc = 0.2) cleanly recover.
+            if is_decoding_failure(&text) {
+                eprintln!("[whisper] initial decoding yielded {:?}; attempting fallback recovery", text);
+                let mut fallback_params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                fallback_params.set_n_threads(threads);
+                fallback_params.set_language(Some(&language));
+                fallback_params.set_suppress_blank(true);
+                fallback_params.set_temperature_inc(0.2);
+                fallback_params.set_print_special(false);
+                fallback_params.set_print_progress(false);
+                fallback_params.set_print_realtime(false);
+                fallback_params.set_print_timestamps(false);
+
+                if let Ok(mut fb_state) = ctx.create_state() {
+                    if fb_state.full(fallback_params, &samples).is_ok() {
+                        let fb_n = fb_state.full_n_segments();
+                        let mut fb_text = String::new();
+                        let mut fb_segments = Vec::new();
+                        for i in 0..fb_n {
+                            if let Some(seg) = fb_state.get_segment(i) {
+                                if let Ok(seg_text) = seg.to_str() {
+                                    fb_segments.push(serde_json::json!({
+                                        "t0": seg.start_timestamp(),
+                                        "t1": seg.end_timestamp(),
+                                        "text": seg_text,
+                                    }));
+                                    fb_text.push_str(seg_text);
+                                }
+                            }
+                        }
+                        let fb_trimmed = fb_text.trim().to_string();
+                        if !is_decoding_failure(&fb_trimmed) {
+                            eprintln!("[whisper] fallback recovered text: {}", fb_trimmed);
+                            text = fb_trimmed;
+                            segments = fb_segments;
+                        }
+                    }
+                }
+            }
+
             let raw_json =
                 serde_json::json!({ "model": model, "segments": segments, "text": text })
                     .to_string();
@@ -185,5 +229,25 @@ impl SttProvider for WhisperStt {
         })
         .await
         .context("whisper task panicked")?
+    }
+}
+
+pub fn is_decoding_failure(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t == "-"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_decoding_failure() {
+        assert!(is_decoding_failure(""));
+        assert!(is_decoding_failure("   "));
+        assert!(is_decoding_failure("-"));
+        assert!(is_decoding_failure("  -  "));
+        assert!(!is_decoding_failure("hello"));
+        assert!(!is_decoding_failure("some text with - hyphen"));
     }
 }

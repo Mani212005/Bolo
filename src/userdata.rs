@@ -261,13 +261,40 @@ fn read_uncommented(name: &str) -> Option<String> {
     }
 }
 
+/// Sanitizes a vocabulary term so it does not contain dangling/trailing hyphens or
+/// punctuation (such as `Bloc-inv.` or `Bloc-`) that can trigger whisper greedy
+/// decoder early-exit or hallucinated single dash "-".
+pub fn sanitize_vocabulary_term(term: &str) -> String {
+    let trimmed = term.trim();
+    let mut cleaned = trimmed.trim_matches(|c: char| {
+        c == '-' || c == '.' || c == ',' || c == ':' || c == ';' || c.is_whitespace()
+    });
+    while cleaned.ends_with('-') || cleaned.ends_with('.') || cleaned.ends_with(',') {
+        cleaned = cleaned.trim_end_matches(|c: char| c == '-' || c == '.' || c == ',');
+    }
+    while cleaned.starts_with('-') || cleaned.starts_with('.') || cleaned.starts_with(',') {
+        cleaned = cleaned.trim_start_matches(|c: char| c == '-' || c == '.' || c == ',');
+    }
+    cleaned.to_string()
+}
+
 /// The glossary handed to every STT backend as a biasing prompt. Formatted
 /// as a bare term list (reads like prior transcript, not an instruction):
 /// whisper-style models can echo prompt text into the output on near-silent
 /// audio, and a plain list keeps that failure mode small.
 pub fn vocabulary_prompt() -> Option<String> {
-    read_uncommented("vocabulary.txt")
-        .map(|terms| format!("{}.", terms.lines().collect::<Vec<_>>().join(", ")))
+    read_uncommented("vocabulary.txt").and_then(|terms| {
+        let sanitized: Vec<String> = terms
+            .lines()
+            .map(sanitize_vocabulary_term)
+            .filter(|t| !t.is_empty())
+            .collect();
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(format!("{}.", sanitized.join(", ")))
+        }
+    })
 }
 
 /// Custom system prompt for Enhance, if the user wrote one.
@@ -285,4 +312,20 @@ pub fn read_user_vocabulary_terms() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_vocabulary_term_trailing_hyphens_and_tokens() {
+        assert_eq!(sanitize_vocabulary_term("Bloc-inv."), "Bloc-inv");
+        assert_eq!(sanitize_vocabulary_term("Bloc-"), "Bloc");
+        assert_eq!(sanitize_vocabulary_term("-Bloc"), "Bloc");
+        assert_eq!(sanitize_vocabulary_term("Bloc-."), "Bloc");
+        assert_eq!(sanitize_vocabulary_term("---"), "");
+        assert_eq!(sanitize_vocabulary_term("  PostgreSQL-  "), "PostgreSQL");
+        assert_eq!(sanitize_vocabulary_term("Rust"), "Rust");
+    }
 }

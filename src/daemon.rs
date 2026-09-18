@@ -250,21 +250,39 @@ fn copy_selection() {
 }
 
 fn apply_voice_clipboard_triggers(text: &str) -> String {
+    apply_voice_clipboard_triggers_with(text, read_clipboard().as_deref())
+}
+
+pub fn apply_voice_clipboard_triggers_with(text: &str, clip: Option<&str>) -> String {
     let Ok(re) =
-        regex::Regex::new(r"(?i)\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?")
+        regex::Regex::new(r"(?i)\s*\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?\s*")
     else {
         return text.to_string();
     };
     if re.is_match(text) {
-        if let Some(clip) = read_clipboard() {
-            let trimmed = clip.trim();
+        if let Some(clip_text) = clip {
+            let trimmed = clip_text.trim();
             if !trimmed.is_empty() {
-                return re.replace_all(text, trimmed).to_string();
+                let replacement = if crate::vocab::is_code_snippet(trimmed) || trimmed.contains('\n') {
+                    let tag = crate::vocab::detect_code_language(trimmed).unwrap_or("");
+                    if trimmed.starts_with("```") {
+                        format!("\n\n{}\n\n", trimmed)
+                    } else if tag.is_empty() {
+                        format!("\n\n```\n{}\n```\n\n", trimmed)
+                    } else {
+                        format!("\n\n```{tag}\n{}\n```\n\n", trimmed)
+                    }
+                } else {
+                    trimmed.to_string()
+                };
+                let replaced = re.replace_all(text, replacement.as_str()).to_string();
+                return crate::vocab::isolate_embedded_code(&replaced);
             }
         }
     }
-    text.to_string()
+    crate::vocab::isolate_embedded_code(text)
 }
+
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let path = socket_path();
@@ -658,7 +676,7 @@ fn finalize(
     // its own runtime), so the async block only returns what to say.
     let outcome: anyhow::Result<Option<(&'static str, String, Option<String>, f64)>> = runtime
         .block_on(async {
-            let mut texts: Vec<String> = Vec::new();
+            let mut resolved_pieces: Vec<crate::vocab::TranscriptPiece> = Vec::new();
             let mut last_audio_id: Option<String> = None;
             let mut total_duration_s = 0.0;
             for piece in pieces.drain(..) {
@@ -672,71 +690,187 @@ fn finalize(
                         let text = transcript.text.trim().to_string();
                         if !text.is_empty() {
                             let enriched = apply_voice_clipboard_triggers(&text);
-                            texts.push(enriched);
+                            resolved_pieces.push(crate::vocab::TranscriptPiece::Spoken(enriched));
                             last_audio_id = Some(audio_id);
                             total_duration_s += duration_s;
                         }
                     }
-                    Piece::Inserted(text) => texts.push(text.trim().to_string()),
+                    Piece::Inserted(text) => {
+                        let trimmed = text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            resolved_pieces.push(crate::vocab::TranscriptPiece::Inserted(trimmed));
+                        }
+                    }
                 }
             }
-            if texts.is_empty() {
+            if resolved_pieces.is_empty() {
                 return Ok(None);
             }
-            let mut text = texts.join(" ");
-            let active_app = crate::vocab::detect_frontmost_app();
-            if cfg.vocab.enabled {
-                let user_terms = crate::userdata::read_user_vocabulary_terms();
-                text = crate::vocab::clean_text(&text, active_app.as_ref(), &user_terms);
-            }
 
-            let jev_decision = if cfg.formatting.jev.enabled {
-                if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
-                    let app_name = active_app
-                        .as_ref()
-                        .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                    let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
-                        crate::jev::decide_formatting(
-                            &text,
-                            app_name,
-                            &api_key,
-                            cfg.formatting.jev.timeout_ms,
-                        )
-                        .await
+            let active_app = crate::vocab::detect_frontmost_app();
+            let user_terms = if cfg.vocab.enabled {
+                crate::userdata::read_user_vocabulary_terms()
+            } else {
+                Vec::new()
+            };
+
+            let has_inserted = resolved_pieces
+                .iter()
+                .any(|p| matches!(p, crate::vocab::TranscriptPiece::Inserted(_)));
+
+            let text = if has_inserted {
+                let mut processed_pieces = Vec::new();
+                for piece in resolved_pieces {
+                    match piece {
+                        crate::vocab::TranscriptPiece::Spoken(mut s) => {
+                            if cfg.vocab.enabled {
+                                s = crate::vocab::clean_text(&s, active_app.as_ref(), &user_terms);
+                            }
+                            processed_pieces.push(crate::vocab::TranscriptPiece::Spoken(s));
+                        }
+                        crate::vocab::TranscriptPiece::Inserted(snippet) => {
+                            let formatted_snippet = if cfg.formatting.jev.enabled {
+                                if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
+                                    let app_name = active_app
+                                        .as_ref()
+                                        .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
+                                    let dec_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
+                                        crate::jev::decide_formatting(
+                                            &snippet,
+                                            app_name,
+                                            &api_key,
+                                            cfg.formatting.jev.timeout_ms,
+                                        )
+                                        .await
+                                    } else {
+                                        crate::jev::decide_formatting_with_model(
+                                            &snippet,
+                                            app_name,
+                                            &api_key,
+                                            cfg.formatting.jev.timeout_ms,
+                                            &cfg.formatting.jev.model,
+                                        )
+                                        .await
+                                    };
+                                    if let Ok(dec) = dec_res {
+                                        if dec.is_code || dec.layout == "code_block" {
+                                            let tag = crate::vocab::map_jev_language(&dec.language, &snippet);
+                                            let tag = if tag.is_empty() {
+                                                crate::vocab::detect_code_language(&snippet).unwrap_or("")
+                                            } else {
+                                                &tag
+                                            };
+                                            if tag.is_empty() {
+                                                format!("```\n{}\n```", snippet)
+                                            } else {
+                                                format!("```{tag}\n{}\n```", snippet)
+                                            }
+                                        } else {
+                                            snippet.clone()
+                                        }
+                                    } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
+                                        let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                                        if snippet.starts_with("```") {
+                                            snippet.clone()
+                                        } else if tag.is_empty() {
+                                            format!("```\n{}\n```", snippet)
+                                        } else {
+                                            format!("```{tag}\n{}\n```", snippet)
+                                        }
+                                    } else {
+                                        snippet.clone()
+                                    }
+                                } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
+                                    let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                                    if snippet.starts_with("```") {
+                                        snippet.clone()
+                                    } else if tag.is_empty() {
+                                        format!("```\n{}\n```", snippet)
+                                    } else {
+                                        format!("```{tag}\n{}\n```", snippet)
+                                    }
+                                } else {
+                                    snippet.clone()
+                                }
+                            } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
+                                let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                                if snippet.starts_with("```") {
+                                    snippet.clone()
+                                } else if tag.is_empty() {
+                                    format!("```\n{}\n```", snippet)
+                                } else {
+                                    format!("```{tag}\n{}\n```", snippet)
+                                }
+                            } else {
+                                snippet.clone()
+                            };
+                            processed_pieces.push(crate::vocab::TranscriptPiece::Inserted(formatted_snippet));
+                        }
+                    }
+                }
+                crate::vocab::assemble_transcript_pieces(&processed_pieces, cfg.formatting.smart_code)
+            } else {
+                let spoken_texts: Vec<String> = resolved_pieces
+                    .into_iter()
+                    .filter_map(|p| match p {
+                        crate::vocab::TranscriptPiece::Spoken(s) => Some(s),
+                        _ => None,
+                    })
+                    .collect();
+                let mut full_text = spoken_texts.join(" ");
+                if cfg.vocab.enabled {
+                    full_text = crate::vocab::clean_text(&full_text, active_app.as_ref(), &user_terms);
+                }
+
+                let jev_decision = if cfg.formatting.jev.enabled {
+                    if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
+                        let app_name = active_app
+                            .as_ref()
+                            .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
+                        let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
+                            crate::jev::decide_formatting(
+                                &full_text,
+                                app_name,
+                                &api_key,
+                                cfg.formatting.jev.timeout_ms,
+                            )
+                            .await
+                        } else {
+                            crate::jev::decide_formatting_with_model(
+                                &full_text,
+                                app_name,
+                                &api_key,
+                                cfg.formatting.jev.timeout_ms,
+                                &cfg.formatting.jev.model,
+                            )
+                            .await
+                        };
+                        match decision_res {
+                            Ok(dec) => {
+                                eprintln!(
+                                    "[jev] decision: is_code={} ({:.2}) lang={} layout={}",
+                                    dec.is_code, dec.code_probability, dec.language, dec.layout
+                                );
+                                Some(dec)
+                            }
+                            Err(e) => {
+                                eprintln!("[jev] decision skipped (falling back): {e:#}");
+                                None
+                            }
+                        }
                     } else {
-                        crate::jev::decide_formatting_with_model(
-                            &text,
-                            app_name,
-                            &api_key,
-                            cfg.formatting.jev.timeout_ms,
-                            &cfg.formatting.jev.model,
-                        )
-                        .await
-                    };
-                    match decision_res {
-                        Ok(dec) => {
-                            eprintln!(
-                                "[jev] decision: is_code={} ({:.2}) lang={} layout={}",
-                                dec.is_code, dec.code_probability, dec.language, dec.layout
-                            );
-                            Some(dec)
-                        }
-                        Err(e) => {
-                            eprintln!("[jev] decision skipped (falling back): {e:#}");
-                            None
-                        }
+                        None
                     }
                 } else {
                     None
-                }
-            } else {
-                None
+                };
+                crate::vocab::format_with_fallback(
+                    &full_text,
+                    jev_decision.as_ref(),
+                    cfg.formatting.smart_code,
+                )
             };
-            text = crate::vocab::format_with_fallback(
-                &text,
-                jev_decision.as_ref(),
-                cfg.formatting.smart_code,
-            );
+
             eprintln!(
                 "[assemble] pieces={} chars={}",
                 n_pieces,
@@ -1124,3 +1258,40 @@ fn handle_client(
     writeln!(conn, "{reply}")?;
     Ok(())
 }
+
+pub(crate) fn assemble_pieces(
+    pieces: &[crate::vocab::TranscriptPiece],
+    smart_code: bool,
+) -> String {
+    crate::vocab::assemble_transcript_pieces(pieces, smart_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vocab::TranscriptPiece;
+
+    #[test]
+    fn test_daemon_multi_piece_assembly_spoken_inserted_spoken() {
+        let pieces = vec![
+            TranscriptPiece::Spoken("Speech before".to_string()),
+            TranscriptPiece::Inserted("const x: number = 42;\nconsole.log(x);".to_string()),
+            TranscriptPiece::Spoken("Speech after".to_string()),
+        ];
+        let result = assemble_pieces(&pieces, true);
+        let expected = "Speech before\n\n```typescript\nconst x: number = 42;\nconsole.log(x);\n```\n\nSpeech after";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_daemon_apply_voice_clipboard_triggers_isolates_code() {
+        let text = "Here is the function paste clipboard please review it.";
+        let clip = "def calculate_sum(a, b):\n    return a + b";
+        let result = apply_voice_clipboard_triggers_with(text, Some(clip));
+        assert_eq!(
+            result,
+            "Here is the function\n\n```python\ndef calculate_sum(a, b):\n    return a + b\n```\n\nplease review it."
+        );
+    }
+}
+
