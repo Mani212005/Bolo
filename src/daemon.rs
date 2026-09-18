@@ -684,14 +684,62 @@ fn finalize(
                 return Ok(None);
             }
             let mut text = texts.join(" ");
+            let active_app = crate::vocab::detect_frontmost_app();
             if cfg.vocab.enabled {
-                let active_app = crate::vocab::detect_frontmost_app();
                 let user_terms = crate::userdata::read_user_vocabulary_terms();
                 text = crate::vocab::clean_text(&text, active_app.as_ref(), &user_terms);
             }
-            if cfg.formatting.smart_code {
-                text = crate::vocab::format_smart_code(&text);
-            }
+
+            let jev_decision = if cfg.formatting.jev.enabled {
+                if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
+                    let app_name = active_app
+                        .as_ref()
+                        .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
+                    let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
+                        crate::jev::decide_formatting(
+                            &text,
+                            app_name,
+                            &api_key,
+                            cfg.formatting.jev.timeout_ms,
+                        )
+                        .await
+                    } else {
+                        crate::jev::decide_formatting_with_model(
+                            &text,
+                            app_name,
+                            &api_key,
+                            cfg.formatting.jev.timeout_ms,
+                            &cfg.formatting.jev.model,
+                        )
+                        .await
+                    };
+                    match decision_res {
+                        Ok(dec) => {
+                            eprintln!(
+                                "[jev] decision: is_code={} ({:.2}) lang={} layout={}",
+                                dec.is_code,
+                                dec.code_probability,
+                                dec.language,
+                                dec.layout
+                            );
+                            Some(dec)
+                        }
+                        Err(e) => {
+                            eprintln!("[jev] decision skipped (falling back): {e:#}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            text = crate::vocab::format_with_fallback(
+                &text,
+                jev_decision.as_ref(),
+                cfg.formatting.smart_code,
+            );
             eprintln!(
                 "[assemble] pieces={} chars={}",
                 n_pieces,

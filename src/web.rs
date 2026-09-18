@@ -413,6 +413,25 @@ pub(crate) fn route(
         if let Some(v) = changes["smart_code"].as_bool() {
             doc.set(&["formatting", "smart_code"], v.into());
         }
+        if let Some(v) = changes["jev_enabled"].as_bool() {
+            doc.set(&["formatting", "jev", "enabled"], v.into());
+        }
+        if let Some(v) = changes["jev_model"].as_str() {
+            doc.set(&["formatting", "jev", "model"], v.into());
+        }
+        if let Some(v) = changes["jev_timeout_ms"].as_i64() {
+            doc.set(&["formatting", "jev", "timeout_ms"], v.into());
+        }
+        if let Some(v) = changes["openrouter_api_key"]
+            .as_str()
+            .or_else(|| changes["jev_api_key"].as_str())
+        {
+            let key = v.trim();
+            if !key.is_empty() {
+                let _ = crate::userdata::save_openrouter_api_key(key);
+                doc.set(&["formatting", "jev", "api_key"], key.into());
+            }
+        }
         doc.save()?;
         eprintln!("[web] config saved");
         return Ok(WebResponse::Json(
@@ -554,6 +573,16 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
     let doc = ConfigDoc::load(config_path)?;
     let status = shared.lock().unwrap().phase.as_str().to_string();
     let enhance_prompt = crate::userdata::enhance_prompt().unwrap_or_default();
+    let has_openrouter_api_key = {
+        let key_in_doc = doc.str_at(&["formatting", "jev", "api_key"], "");
+        if !key_in_doc.trim().is_empty() {
+            true
+        } else {
+            Config::load(config_path)
+                .map(|c| c.formatting.jev.resolve_api_key().is_some())
+                .unwrap_or(false)
+        }
+    };
     Ok(json!({
         "status": status,
         "provider": doc.str_at(&["stt", "provider"], "groq"),
@@ -569,6 +598,10 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "enhance_model": doc.str_at(&["enhance", "model"], "llama-3.3-70b-versatile"),
         "has_groq_api_key": crate::enhance::get_groq_api_key().is_ok(),
         "smart_code": doc.bool_at(&["formatting", "smart_code"], true),
+        "jev_enabled": doc.bool_at(&["formatting", "jev", "enabled"], true),
+        "jev_model": doc.str_at(&["formatting", "jev", "model"], "typesafe/jev-1.13"),
+        "jev_timeout_ms": doc.int_at(&["formatting", "jev", "timeout_ms"], 400),
+        "has_openrouter_api_key": has_openrouter_api_key,
         "scratchpad": crate::userdata::read_scratchpad(),
         "history": crate::userdata::read_history(100),
         "models": MODELS.iter().map(|(m, s)| json!({ "name": m, "speed": s })).collect::<Vec<_>>(),
@@ -726,5 +759,9 @@ mod tests {
         assert!(s.get("enhance_model").is_some());
         assert!(s.get("has_groq_api_key").is_some());
         assert!(s.get("smart_code").is_some());
+        assert!(s.get("jev_enabled").is_some());
+        assert!(s.get("jev_model").is_some());
+        assert!(s.get("jev_timeout_ms").is_some());
+        assert!(s.get("has_openrouter_api_key").is_some());
     }
 }

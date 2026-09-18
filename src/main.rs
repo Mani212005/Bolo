@@ -5,6 +5,7 @@ mod daemon;
 mod enhance;
 mod hotkey;
 mod inject;
+mod jev;
 mod mictest;
 mod resample;
 mod sound;
@@ -23,7 +24,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 /// Config search order: ./config.toml (repo/dev use), then
-/// ~/.config/bolo/config.toml (installed use — created by install.sh),
+/// ~/.config/bolo/config.toml (installed use - created by install.sh),
 /// so `bolo` works from any directory once installed.
 fn default_config_path() -> PathBuf {
     let local = PathBuf::from("config.toml");
@@ -35,8 +36,8 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // GROQ_API_KEY comes from the environment; fall back to ~/.env.
-    if std::env::var_os("GROQ_API_KEY").is_none() {
+    // GROQ_API_KEY and OPENROUTER_API_KEY come from the environment; fall back to ~/.env.
+    if std::env::var_os("GROQ_API_KEY").is_none() || std::env::var_os("OPENROUTER_API_KEY").is_none() {
         if let Some(home) = std::env::var_os("HOME") {
             let _ = dotenvy::from_path(PathBuf::from(home).join(".env"));
         }

@@ -36,11 +36,76 @@ pub struct Config {
 pub struct FormattingConfig {
     /// Automatically format multi-line code blocks in markdown backticks
     pub smart_code: bool,
+    #[serde(default)]
+    pub jev: JevConfig,
 }
 
 impl Default for FormattingConfig {
     fn default() -> Self {
-        Self { smart_code: true }
+        Self {
+            smart_code: true,
+            jev: JevConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct JevConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub timeout_ms: u64,
+    pub api_key: Option<String>,
+}
+
+impl Default for JevConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: crate::jev::DEFAULT_MODEL.to_string(),
+            timeout_ms: crate::jev::DEFAULT_TIMEOUT_MS,
+            api_key: None,
+        }
+    }
+}
+
+impl JevConfig {
+    /// Resolves the API key by checking:
+    /// 1. Config value
+    /// 2. OPENROUTER_API_KEY environment variable
+    /// 3. Saved key in ~/.config/bolo/openrouter_api_key.txt
+    /// 4. OPENROUTER_API_KEY in ~/.env
+    pub fn resolve_api_key(&self) -> Option<String> {
+        if let Some(ref key) = self.api_key {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(key) = crate::userdata::read_saved_openrouter_api_key() {
+            return Some(key);
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let env_path = std::path::PathBuf::from(home).join(".env");
+            if let Ok(content) = std::fs::read_to_string(&env_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(val) = trimmed.strip_prefix("OPENROUTER_API_KEY=") {
+                        let clean = val.trim_matches('"').trim_matches('\'').trim();
+                        if !clean.is_empty() {
+                            return Some(clean.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
