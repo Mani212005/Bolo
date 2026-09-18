@@ -409,16 +409,48 @@ pub fn is_code_snippet(text: &str) -> bool {
     }
 
     let code_keywords = [
-        "function ", "def ", "fn ", "const ", "let ", "var ", "class ", "struct ",
-        "impl ", "pub ", "import ", "export ", "from ", "return ", "if ", "for ",
-        "while ", "switch ", "case ", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
-        "CREATE ", "WHERE ", "async ", "await ", "typedef ", "interface ", "enum ",
-        "package ", "namespace ", "#include", "val ", "using ", "echo ", "console.",
+        "function ",
+        "def ",
+        "fn ",
+        "const ",
+        "let ",
+        "var ",
+        "class ",
+        "struct ",
+        "impl ",
+        "pub ",
+        "import ",
+        "export ",
+        "from ",
+        "return ",
+        "if ",
+        "for ",
+        "while ",
+        "switch ",
+        "case ",
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "WHERE ",
+        "async ",
+        "await ",
+        "typedef ",
+        "interface ",
+        "enum ",
+        "package ",
+        "namespace ",
+        "#include",
+        "val ",
+        "using ",
+        "echo ",
+        "console.",
     ];
 
     let code_syntax_markers = [
-        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||",
-        ":=", "</", "/>", "/*", "*/", "//", "#!/", "$ ",
+        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</",
+        "/>", "/*", "*/", "//", "#!/", "$ ",
     ];
 
     let mut code_line_score = 0;
@@ -449,6 +481,292 @@ pub fn is_code_snippet(text: &str) -> bool {
     // Must have at least 2 strong signals or >= 60% of lines matching code patterns
     let ratio = (code_line_score as f64) / (lines.len() as f64);
     (strong_signal_count >= 2 && ratio >= 0.5) || ratio >= 0.7
+}
+
+/// Maps Jev detected language to a canonical markdown code block language tag.
+pub fn map_jev_language(lang: &str, text: &str) -> String {
+    match lang.trim().to_lowercase().as_str() {
+        "rust" => "rust".to_string(),
+        "python" => "python".to_string(),
+        "javascript" | "js" => "javascript".to_string(),
+        "typescript" | "ts" => "typescript".to_string(),
+        "sql" => "sql".to_string(),
+        "bash" | "shell" | "sh" | "zsh" => "bash".to_string(),
+        "html_css" => {
+            let lower = text.to_lowercase();
+            if lower.contains("<html")
+                || lower.contains("<!doctype")
+                || lower.contains("</div>")
+                || text.contains('<')
+            {
+                "html".to_string()
+            } else if text.contains('{')
+                && (text.contains(':') || text.contains("px") || text.contains("color"))
+            {
+                "css".to_string()
+            } else {
+                "html".to_string()
+            }
+        }
+        "html" => "html".to_string(),
+        "css" => "css".to_string(),
+        "json" => "json".to_string(),
+        "c_cpp" | "c++" | "cpp" => "cpp".to_string(),
+        "c" => "c".to_string(),
+        "other" | "text" | "none" => "".to_string(),
+        other => {
+            let sanitized: String = other
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            sanitized
+        }
+    }
+}
+
+fn strip_bullet_prefix(s: &str) -> &str {
+    let mut trimmed = s.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+    {
+        trimmed = rest.trim();
+    }
+    if let Some(pos) = trimmed.find(['.', ')']) {
+        if pos > 0 && pos < 4 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
+            trimmed = trimmed[pos + 1..].trim();
+        }
+    }
+    for prefix in &["bullet: ", "dash: ", "item: "] {
+        if trimmed.to_lowercase().starts_with(prefix) {
+            trimmed = trimmed[prefix.len()..].trim();
+            break;
+        }
+    }
+    trimmed
+}
+
+fn strip_task_prefix(s: &str) -> (&str, bool) {
+    let mut trimmed = s.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("- [x] ")
+        .or_else(|| trimmed.strip_prefix("- [X] "))
+    {
+        return (rest.trim(), true);
+    }
+    if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        return (rest.trim(), false);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("[x] ")
+        .or_else(|| trimmed.strip_prefix("[X] "))
+    {
+        return (rest.trim(), true);
+    }
+    if let Some(rest) = trimmed.strip_prefix("[ ] ") {
+        return (rest.trim(), false);
+    }
+    trimmed = strip_bullet_prefix(trimmed);
+    (trimmed, false)
+}
+
+fn split_list_items(text: &str) -> Vec<String> {
+    if text.contains('\n') {
+        return text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+    }
+
+    let re_bullet_words = regex::Regex::new(r"(?i)\s*\b(?:bullet|dash)\b\s*").unwrap();
+    let matches: Vec<&str> = re_bullet_words
+        .split(text)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if matches.len() > 1 {
+        return matches.into_iter().map(String::from).collect();
+    }
+
+    let re_numbers = regex::Regex::new(r"(?:\s+|^)\d+[\.\)]\s+").unwrap();
+    let num_parts: Vec<&str> = re_numbers
+        .split(text)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if num_parts.len() > 1 {
+        return num_parts.into_iter().map(String::from).collect();
+    }
+
+    let re_ordinals = regex::Regex::new(
+        r"(?i)(?:\s+|^)(?:firstly|secondly|thirdly|first|second|third|fourth|fifth|finally),?\s+",
+    )
+    .unwrap();
+    let ord_parts: Vec<&str> = re_ordinals
+        .split(text)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ord_parts.len() > 1 {
+        return ord_parts.into_iter().map(String::from).collect();
+    }
+
+    let re_sentences = regex::Regex::new(r"[.?!]\s+").unwrap();
+    let sent_parts: Vec<&str> = re_sentences
+        .split(text)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if sent_parts.len() > 1 {
+        return sent_parts
+            .into_iter()
+            .map(|s| s.trim_end_matches('.').trim().to_string())
+            .collect();
+    }
+
+    vec![text.trim().to_string()]
+}
+
+pub fn format_bullet_list(text: &str) -> String {
+    let items = split_list_items(text);
+    if items.is_empty() {
+        return text.to_string();
+    }
+    let mut out = Vec::new();
+    for item in items {
+        let cleaned = strip_bullet_prefix(&item);
+        if !cleaned.is_empty() {
+            out.push(format!("- {cleaned}"));
+        }
+    }
+    if out.is_empty() {
+        text.to_string()
+    } else {
+        out.join("\n")
+    }
+}
+
+pub fn format_task_list(text: &str) -> String {
+    let items = split_list_items(text);
+    if items.is_empty() {
+        return text.to_string();
+    }
+    let mut out = Vec::new();
+    for item in items {
+        let (cleaned, checked) = strip_task_prefix(&item);
+        if !cleaned.is_empty() {
+            if checked {
+                out.push(format!("- [x] {cleaned}"));
+            } else {
+                out.push(format!("- [ ] {cleaned}"));
+            }
+        }
+    }
+    if out.is_empty() {
+        text.to_string()
+    } else {
+        out.join("\n")
+    }
+}
+
+pub fn format_multi_paragraph(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+    if trimmed.contains("\n\n") {
+        let paragraphs: Vec<&str> = trimmed
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        return paragraphs.join("\n\n");
+    }
+    if trimmed.contains('\n') {
+        let paragraphs: Vec<&str> = trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        return paragraphs.join("\n\n");
+    }
+
+    let re_new_para = regex::Regex::new(r"(?i)\s*\b(?:new paragraph|next paragraph)\b\s*").unwrap();
+    if re_new_para.is_match(trimmed) {
+        let parts: Vec<&str> = re_new_para
+            .split(trimmed)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            return parts.join("\n\n");
+        }
+    }
+
+    let re_sentence = regex::Regex::new(r"([^.?!]+[.?!]+)\s*").unwrap();
+    let sentences: Vec<&str> = re_sentence
+        .find_iter(trimmed)
+        .map(|m| m.as_str().trim())
+        .collect();
+
+    if sentences.len() >= 4 {
+        let mut paras = Vec::new();
+        for chunk in sentences.chunks(2) {
+            paras.push(chunk.join(" "));
+        }
+        return paras.join("\n\n");
+    }
+
+    trimmed.to_string()
+}
+
+/// Applies Jev predictive formatting decision to the transcript text.
+pub fn format_with_jev_decision(
+    text: &str,
+    decision: &crate::jev::JevFormattingDecision,
+) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return text.to_string();
+    }
+
+    if decision.is_code || decision.layout == "code_block" {
+        if trimmed.starts_with("```") && trimmed.ends_with("```") {
+            return text.to_string();
+        }
+        let tag = map_jev_language(&decision.language, trimmed);
+        if tag.is_empty() {
+            format!("```\n{}\n```", trimmed)
+        } else {
+            format!("```{tag}\n{}\n```", trimmed)
+        }
+    } else {
+        match decision.layout.as_str() {
+            "bullet_list" => format_bullet_list(text),
+            "task_list" => format_task_list(text),
+            "multi_paragraph" => format_multi_paragraph(text),
+            _ => text.to_string(),
+        }
+    }
+}
+
+/// Formats text using Jev decision if present; otherwise cleanly falls back to format_smart_code.
+pub fn format_with_fallback(
+    text: &str,
+    decision: Option<&crate::jev::JevFormattingDecision>,
+    smart_code: bool,
+) -> String {
+    if let Some(dec) = decision {
+        format_with_jev_decision(text, dec)
+    } else if smart_code {
+        format_smart_code(text)
+    } else {
+        text.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -586,7 +904,8 @@ mod tests {
 
     #[test]
     fn test_smart_code_detection_and_formatting() {
-        let code_sample = "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
+        let code_sample =
+            "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
         assert!(is_code_snippet(code_sample));
         assert_eq!(
             format_smart_code(code_sample),
@@ -600,12 +919,173 @@ mod tests {
             "```\ndef calculate_sum(a, b):\n    return a + b\n```"
         );
 
-        let prose_sample = "Hey captain, the build succeeded.\nLet's deploy the update to production.";
+        let prose_sample =
+            "Hey captain, the build succeeded.\nLet's deploy the update to production.";
         assert!(!is_code_snippet(prose_sample));
         assert_eq!(format_smart_code(prose_sample), prose_sample);
 
         // Already formatted with backticks should remain unchanged
         let already_formatted = "```\nconst a = 1;\nconst b = 2;\n```";
         assert_eq!(format_smart_code(already_formatted), already_formatted);
+    }
+
+    #[test]
+    fn test_bullet_and_task_prefix_stripping() {
+        assert_eq!(strip_bullet_prefix(".env"), ".env");
+        assert_eq!(strip_bullet_prefix(".NET"), ".NET");
+        assert_eq!(strip_bullet_prefix("1. test"), "test");
+        assert_eq!(strip_bullet_prefix("2) test"), "test");
+        assert_eq!(strip_bullet_prefix("- test"), "test");
+        assert_eq!(strip_bullet_prefix("* test"), "test");
+        assert_eq!(strip_bullet_prefix("bullet: test"), "test");
+
+        let input = ".env config\n.NET 8\n1. first item\n- second item";
+        assert_eq!(
+            format_bullet_list(input),
+            "- .env config\n- .NET 8\n- first item\n- second item"
+        );
+    }
+
+    #[test]
+    fn test_format_with_jev_decision_language_tagging() {
+        let rust_code = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}";
+        let rust_dec = crate::jev::JevFormattingDecision {
+            is_code: true,
+            code_probability: 0.98,
+            language: "rust".to_string(),
+            layout: "code_block".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(rust_code, &rust_dec),
+            "```rust\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```"
+        );
+
+        let py_code = "def greet(name):\n    print(f'Hello {name}')";
+        let py_dec = crate::jev::JevFormattingDecision {
+            is_code: true,
+            code_probability: 0.95,
+            language: "python".to_string(),
+            layout: "code_block".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(py_code, &py_dec),
+            "```python\ndef greet(name):\n    print(f'Hello {name}')\n```"
+        );
+
+        let sql_code = "SELECT id, name FROM users WHERE active = 1;";
+        let sql_dec = crate::jev::JevFormattingDecision {
+            is_code: true,
+            code_probability: 0.9,
+            language: "sql".to_string(),
+            layout: "code_block".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(sql_code, &sql_dec),
+            "```sql\nSELECT id, name FROM users WHERE active = 1;\n```"
+        );
+
+        let other_code = "some unusual code snippet";
+        let other_dec = crate::jev::JevFormattingDecision {
+            is_code: true,
+            code_probability: 0.85,
+            language: "other".to_string(),
+            layout: "code_block".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(other_code, &other_dec),
+            "```\nsome unusual code snippet\n```"
+        );
+
+        // Already wrapped code block should not be double wrapped
+        let already_wrapped = "```rust\nlet x = 1;\n```";
+        assert_eq!(
+            format_with_jev_decision(already_wrapped, &rust_dec),
+            already_wrapped
+        );
+    }
+
+    #[test]
+    fn test_format_with_jev_decision_layout_structuring() {
+        // Bullet list
+        let bullet_input = "item one\nitem two\nitem three";
+        let bullet_dec = crate::jev::JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.02,
+            language: "other".to_string(),
+            layout: "bullet_list".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(bullet_input, &bullet_dec),
+            "- item one\n- item two\n- item three"
+        );
+
+        // Task list
+        let task_input = "first finish tests\nsecond review PR";
+        let task_dec = crate::jev::JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.01,
+            language: "other".to_string(),
+            layout: "task_list".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(task_input, &task_dec),
+            "- [ ] first finish tests\n- [ ] second review PR"
+        );
+
+        // Multi-paragraph text
+        let multi_para_input = "First paragraph content.\nSecond paragraph content.";
+        let multi_dec = crate::jev::JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.05,
+            language: "other".to_string(),
+            layout: "multi_paragraph".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(multi_para_input, &multi_dec),
+            "First paragraph content.\n\nSecond paragraph content."
+        );
+
+        // Single block text
+        let single_input = "Just a single sentence of plain text.";
+        let single_dec = crate::jev::JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.05,
+            language: "other".to_string(),
+            layout: "single_block".to_string(),
+        };
+        assert_eq!(
+            format_with_jev_decision(single_input, &single_dec),
+            "Just a single sentence of plain text."
+        );
+    }
+
+    #[test]
+    fn test_format_with_fallback() {
+        let code_text = "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
+        let prose_text = "Hello team, please review the documentation.";
+
+        // 1. With Jev decision: uses Jev decision formatting
+        let jev_dec = crate::jev::JevFormattingDecision {
+            is_code: true,
+            code_probability: 0.99,
+            language: "typescript".to_string(),
+            layout: "code_block".to_string(),
+        };
+        assert_eq!(
+            format_with_fallback(code_text, Some(&jev_dec), true),
+            format!("```typescript\n{code_text}\n```")
+        );
+
+        // 2. Without Jev decision (fallback): uses format_smart_code when smart_code is true
+        assert_eq!(
+            format_with_fallback(code_text, None, true),
+            format!("```\n{code_text}\n```")
+        );
+
+        // 3. Without Jev decision (fallback): leaves text untouched when smart_code is false
+        assert_eq!(format_with_fallback(code_text, None, false), code_text);
+
+        // 4. Prose fallback
+        assert_eq!(format_with_fallback(prose_text, None, true), prose_text);
     }
 }

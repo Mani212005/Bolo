@@ -5,6 +5,7 @@ mod daemon;
 mod enhance;
 mod hotkey;
 mod inject;
+mod jev;
 mod mictest;
 mod resample;
 mod sound;
@@ -23,7 +24,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 /// Config search order: ./config.toml (repo/dev use), then
-/// ~/.config/bolo/config.toml (installed use — created by install.sh),
+/// ~/.config/bolo/config.toml (installed use - created by install.sh),
 /// so `bolo` works from any directory once installed.
 fn default_config_path() -> PathBuf {
     let local = PathBuf::from("config.toml");
@@ -35,8 +36,10 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // GROQ_API_KEY comes from the environment; fall back to ~/.env.
-    if std::env::var_os("GROQ_API_KEY").is_none() {
+    // GROQ_API_KEY and OPENROUTER_API_KEY come from the environment; fall back to ~/.env.
+    if std::env::var_os("GROQ_API_KEY").is_none()
+        || std::env::var_os("OPENROUTER_API_KEY").is_none()
+    {
         if let Some(home) = std::env::var_os("HOME") {
             let _ = dotenvy::from_path(PathBuf::from(home).join(".env"));
         }
@@ -941,6 +944,218 @@ mod regression_audit_tests {
             });
             let _ = std::fs::write(
                 dir.join("circle_capture_tuning_validation.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_feature_jev_semantic_formatting_engine() {
+        use crate::jev::{
+            build_decision_request, parse_decision_response, JevFormattingDecision, DEFAULT_MODEL,
+        };
+        use crate::vocab::{format_with_fallback, format_with_jev_decision, map_jev_language};
+
+        // 1. Build decision requests
+        let req = build_decision_request(
+            "pub async fn process() -> Result<()> { Ok(()) }",
+            Some("Visual Studio Code"),
+            DEFAULT_MODEL,
+        );
+        assert_eq!(req["model"], DEFAULT_MODEL);
+        assert_eq!(req["state"]["frontmost_app"], "Visual Studio Code");
+        assert_eq!(req["questions"]["is_code"]["type"], "noul");
+        assert_eq!(req["questions"]["language"]["type"], "choice");
+        assert_eq!(req["questions"]["layout"]["type"], "choice");
+
+        // 2. Language classification and formatting test matrix
+        let test_cases = vec![
+            (
+                "fn main() {\n    println!(\"Hello World\");\n}",
+                "rust",
+                "code_block",
+                0.98,
+                "```rust\nfn main() {\n    println!(\"Hello World\");\n}\n```",
+            ),
+            (
+                "def fetch_users(db):\n    return db.query('SELECT * FROM users')",
+                "python",
+                "code_block",
+                0.95,
+                "```python\ndef fetch_users(db):\n    return db.query('SELECT * FROM users')\n```",
+            ),
+            (
+                "export const calculateTotal = (items: CartItem[]): number => items.reduce((sum, item) => sum + item.price, 0);",
+                "typescript",
+                "code_block",
+                0.97,
+                "```typescript\nexport const calculateTotal = (items: CartItem[]): number => items.reduce((sum, item) => sum + item.price, 0);\n```",
+            ),
+            (
+                "SELECT u.id, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id;",
+                "sql",
+                "code_block",
+                0.99,
+                "```sql\nSELECT u.id, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id;\n```",
+            ),
+            (
+                "cargo build --release && cargo test --bin bolo",
+                "bash",
+                "code_block",
+                0.92,
+                "```bash\ncargo build --release && cargo test --bin bolo\n```",
+            ),
+            (
+                "<div class=\"container\"><h1 id=\"title\">Welcome</h1></div>",
+                "html_css",
+                "code_block",
+                0.94,
+                "```html\n<div class=\"container\"><h1 id=\"title\">Welcome</h1></div>\n```",
+            ),
+            (
+                ".btn-primary { background-color: #3b82f6; border-radius: 6px; padding: 8px 16px; }",
+                "html_css",
+                "code_block",
+                0.91,
+                "```css\n.btn-primary { background-color: #3b82f6; border-radius: 6px; padding: 8px 16px; }\n```",
+            ),
+            (
+                "{\"status\": \"success\", \"code\": 200, \"data\": [1, 2, 3]}",
+                "json",
+                "code_block",
+                0.96,
+                "```json\n{\"status\": \"success\", \"code\": 200, \"data\": [1, 2, 3]}\n```",
+            ),
+            (
+                "std::vector<int> nums = {1, 2, 3};\nfor (auto n : nums) std::cout << n << std::endl;",
+                "c_cpp",
+                "code_block",
+                0.95,
+                "```cpp\nstd::vector<int> nums = {1, 2, 3};\nfor (auto n : nums) std::cout << n << std::endl;\n```",
+            ),
+        ];
+
+        let mut formatting_results = Vec::new();
+
+        for (input_text, lang, layout, prob, expected_output) in test_cases {
+            let mock_response = serde_json::json!({
+                "answers": {
+                    "is_code": { "type": "noul", "noul": prob },
+                    "language": { "type": "choice", "choice": lang },
+                    "layout": { "type": "choice", "choice": layout }
+                }
+            });
+            let decision = parse_decision_response(&mock_response).expect("Must parse response");
+            assert_eq!(decision.is_code, prob >= 0.5 || layout == "code_block");
+            assert_eq!(decision.language, lang);
+            assert_eq!(decision.layout, layout);
+
+            let formatted = format_with_jev_decision(input_text, &decision);
+            assert_eq!(formatted, expected_output);
+
+            formatting_results.push(serde_json::json!({
+                "input": input_text,
+                "detected_language": decision.language,
+                "markdown_tag": map_jev_language(&decision.language, input_text),
+                "is_code": decision.is_code,
+                "probability": decision.code_probability,
+                "layout": decision.layout,
+                "formatted_output": formatted
+            }));
+        }
+
+        // 3. Layout determinations: Bullet list with leading punctuation (.env / .NET) preservation
+        let bullet_input =
+            ".env file setup\n.NET 8 SDK install\n1. Run migrations\n- Launch local server";
+        let bullet_dec = JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.04,
+            language: "other".to_string(),
+            layout: "bullet_list".to_string(),
+        };
+        let bullet_formatted = format_with_jev_decision(bullet_input, &bullet_dec);
+        assert_eq!(
+            bullet_formatted,
+            "- .env file setup\n- .NET 8 SDK install\n- Run migrations\n- Launch local server"
+        );
+
+        // 4. Layout determinations: Task list
+        let task_input = "first verify unit tests\n[x] update documentation\n- [ ] cut new release";
+        let task_dec = JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.02,
+            language: "other".to_string(),
+            layout: "task_list".to_string(),
+        };
+        let task_formatted = format_with_jev_decision(task_input, &task_dec);
+        assert_eq!(
+            task_formatted,
+            "- [ ] first verify unit tests\n- [x] update documentation\n- [ ] cut new release"
+        );
+
+        // 5. Layout determinations: Multi-paragraph prose
+        // 5a. Cue-based paragraph separation (spoken "new paragraph" cue stripped and joined with \n\n)
+        let multi_para_cue_input = "First section discusses system design. new paragraph Second section covers benchmarks.";
+        let multi_dec = JevFormattingDecision {
+            is_code: false,
+            code_probability: 0.01,
+            language: "other".to_string(),
+            layout: "multi_paragraph".to_string(),
+        };
+        let multi_cue_formatted = format_with_jev_decision(multi_para_cue_input, &multi_dec);
+        assert_eq!(
+            multi_cue_formatted,
+            "First section discusses system design.\n\nSecond section covers benchmarks."
+        );
+
+        // 5b. Line-based paragraph separation
+        let multi_para_lines_input =
+            "Architecture overview and motivation.\nImplementation details and benchmarks.";
+        let multi_lines_formatted = format_with_jev_decision(multi_para_lines_input, &multi_dec);
+        assert_eq!(
+            multi_lines_formatted,
+            "Architecture overview and motivation.\n\nImplementation details and benchmarks."
+        );
+
+        // 6. Fallback mechanisms
+        let smart_code_sample = "const calculate = (a, b) => a + b;\nreturn calculate(1, 2);";
+        // When Jev decision is absent, falls back to smart_code
+        let fallback_formatted = format_with_fallback(smart_code_sample, None, true);
+        assert_eq!(fallback_formatted, format!("```\n{smart_code_sample}\n```"));
+        // When smart_code is disabled, remains untouched
+        let disabled_formatted = format_with_fallback(smart_code_sample, None, false);
+        assert_eq!(disabled_formatted, smart_code_sample);
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "feature": "Jev Real-Time Semantic Decision Engine",
+                "model": DEFAULT_MODEL,
+                "verified": true,
+                "code_classification_and_tagging": formatting_results,
+                "semantic_layout_structuring": {
+                    "bullet_list": {
+                        "input": bullet_input,
+                        "output": bullet_formatted,
+                        "preserves_punctuation_prefixes": true
+                    },
+                    "task_list": {
+                        "input": task_input,
+                        "output": task_formatted
+                    },
+                    "multi_paragraph": {
+                        "cue_input": multi_para_cue_input,
+                        "cue_output": multi_cue_formatted,
+                        "lines_input": multi_para_lines_input,
+                        "lines_output": multi_lines_formatted
+                    }
+                },
+                "fallback_behavior": {
+                    "with_smart_code_fallback": fallback_formatted,
+                    "raw_when_smart_code_disabled": disabled_formatted
+                }
+            });
+            let _ = std::fs::write(
+                dir.join("jev_semantic_engine_validation.json"),
                 serde_json::to_string_pretty(&evidence).unwrap(),
             );
         }

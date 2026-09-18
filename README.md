@@ -47,7 +47,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **Native Popup & History Dashboard**: Search past voice dictations and listen back with the built-in audio playback engine.
 - **Screen Context Lightbox & 1-Click Clipboard Copy**: Expand captured screen context images in a full-screen modal and copy PNGs directly to your clipboard.
 - **One-Click AI Prompt Enhancement**: Refine raw speech and rambles into structured prompts using LLaMA-3.3-70B with settings-configurable models and API keys.
-- **Smart Code Block Detection**: Automatically recognizes multi-line programming code and formats it with triple backticks (```` ``` ````) for instant editor pasting.
+- **Real-Time Jev Semantic Formatting & Smart Code**: Automatically classifies code vs prose and tags programming languages (```` ```rust ````, ```` ```python ````) and layers lists/paragraphs using the sub-400ms Jev decision engine with heuristic fallback.
 - **Custom Vocabulary Biasing**: Add technical terms, proper nouns, and acronyms for accurate phonetic transcription.
 - **Audio File Drag and Drop**: Drop any audio file directly into the dashboard for immediate speech-to-text transcription.
 - **Circle-to-Capture Screen Context**: Hover pointer in a circle (hover only, do not click or press) during dictation to capture and attach screenshots of relevant UI or code.
@@ -139,11 +139,20 @@ Bolo configuration files live in `~/.config/bolo/`:
   [vision]
   enabled = true              # hover pointer in a circle to capture screen context
   min_angle_degrees = 315.0   # minimum circle arc angle threshold
+
+  [formatting]
+  smart_code = true           # fallback heuristic wrapping code in markdown backticks
+
+  [formatting.jev]
+  enabled = true              # real-time semantic predictive formatting via Jev
+  model = "typesafe/jev-1.13" # ultra-fast decision model on OpenRouter
+  timeout_ms = 400            # async decision timeout (cleanly falls back if exceeded)
+  # api_key = "sk-or-..."     # optional: config, OPENROUTER_API_KEY env var, or ~/.env
   ```
 
 - **`~/.config/bolo/vocabulary.txt`**: Custom word prompts (names, brand terms, acronyms).
 - **`~/.config/bolo/enhance_prompt.txt`**: Prompt template for AI enhancement.
-- **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` for cloud transcription and LLaMA enhancement.
+- **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` and `OPENROUTER_API_KEY=sk-or-...` for cloud transcription, LLaMA enhancement, and Jev formatting decisions.
 
 ---
 

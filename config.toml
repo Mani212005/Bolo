@@ -52,3 +52,11 @@ port = 4525
 enabled = true                      # hover pointer in a circle to capture screen context
 min_angle_degrees = 315.0           # minimum circle arc angle threshold
 
+[formatting]
+smart_code = true                   # fallback heuristic wrapping code in markdown backticks
+
+[formatting.jev]
+enabled = true                      # real-time semantic predictive formatting via Jev
+model = "typesafe/jev-1.13"         # ultra-fast decision model on OpenRouter
+timeout_ms = 400                    # async decision timeout (cleanly falls back if exceeded)
+# api_key = "sk-or-..."             # optional: reads from config, OPENROUTER_API_KEY env var, or ~/.env

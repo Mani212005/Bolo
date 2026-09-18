@@ -28,7 +28,9 @@ pub trait TextInjector: Send + Sync {
         text: &str,
         image_path: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
-        let images = image_path.map(|p| vec![p.to_path_buf()]).unwrap_or_default();
+        let images = image_path
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_default();
         self.inject_with_images(text, &images).await
     }
     /// Human-readable name for logs/notifications.

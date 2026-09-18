@@ -198,7 +198,9 @@ impl MacOsTextInjector {
         text: &str,
         image_path: Option<&Path>,
     ) -> anyhow::Result<()> {
-        let images = image_path.map(|p| vec![p.to_path_buf()]).unwrap_or_default();
+        let images = image_path
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_default();
         self.inject_with_images(text, &images).await
     }
 }
@@ -209,11 +211,7 @@ impl TextInjector for MacOsTextInjector {
         self.inject_with_images(text, &[]).await
     }
 
-    async fn inject_with_images(
-        &mut self,
-        text: &str,
-        images: &[PathBuf],
-    ) -> anyhow::Result<()> {
+    async fn inject_with_images(&mut self, text: &str, images: &[PathBuf]) -> anyhow::Result<()> {
         self.inject_with_images(text, images).await
     }
 
@@ -475,7 +473,10 @@ mod tests {
         assert!(is_terminal_app(None, Some("Terminal")));
 
         // Non-terminal apps
-        assert!(!is_terminal_app(Some("com.google.Chrome"), Some("Google Chrome")));
+        assert!(!is_terminal_app(
+            Some("com.google.Chrome"),
+            Some("Google Chrome")
+        ));
         assert!(!is_terminal_app(Some("com.apple.Safari"), Some("Safari")));
         assert!(!is_terminal_app(Some("com.openai.chat"), Some("ChatGPT")));
         assert!(!is_terminal_app(None, None));
@@ -543,12 +544,8 @@ mod tests {
         // 2. GUI session with multiple images
         let img1 = PathBuf::from("/tmp/session/context-1.png");
         let img2 = PathBuf::from("/tmp/session/context-2.png");
-        let steps_multi_img = plan_paste_sequence(
-            "Hello world",
-            &[img1.clone(), img2.clone()],
-            true,
-            false,
-        );
+        let steps_multi_img =
+            plan_paste_sequence("Hello world", &[img1.clone(), img2.clone()], true, false);
         assert_eq!(
             steps_multi_img,
             vec![
@@ -563,12 +560,8 @@ mod tests {
         );
 
         // 3. Terminal session with multiple images -> formatted directly into text stream
-        let steps_terminal = plan_paste_sequence(
-            "Explain these screenshots",
-            &[img1, img2],
-            true,
-            true,
-        );
+        let steps_terminal =
+            plan_paste_sequence("Explain these screenshots", &[img1, img2], true, true);
         assert_eq!(
             steps_terminal,
             vec![
@@ -655,8 +648,7 @@ mod tests {
         let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap();
         // When image path does not exist, text paste still succeeds and function returns Ok(())
         let nonexistent = PathBuf::from("/tmp/nonexistent_screenshot_path_12345.png");
-        let result =
-            inject_macos_blocking("Test text for soft failure", &[nonexistent], false, 10);
+        let result = inject_macos_blocking("Test text for soft failure", &[nonexistent], false, 10);
         assert!(
             result.is_ok(),
             "Expected soft failure to return Ok(()), got: {:?}",
@@ -756,7 +748,11 @@ mod tests {
             true,
             50,
         );
-        assert!(res.is_ok(), "Injection with multiple images failed: {:?}", res);
+        assert!(
+            res.is_ok(),
+            "Injection with multiple images failed: {:?}",
+            res
+        );
 
         std::thread::sleep(Duration::from_millis(150));
 

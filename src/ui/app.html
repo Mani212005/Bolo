@@ -1095,6 +1095,57 @@
         </div>
       </div>
 
+      <!-- Jev Semantic Engine Configuration -->
+      <div class="settings-group">
+        <div class="settings-title" style="display:flex; align-items:center; gap:8px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+          Jev Real-Time Semantic Engine
+          <span id="jevStatusBadge" class="badge" style="margin-left:auto; background:rgba(255,255,255,0.06); color:var(--muted);">Checking…</span>
+        </div>
+        <p class="setting-desc">Ultra-fast sub-400ms predictive decision engine using TypeSafe's Jev model on OpenRouter. Distinguishes code vs prose, tags language syntax for code blocks (```rust, ```python, etc.), and layers semantic lists and paragraphs in real time.</p>
+        
+        <div class="setting-row" style="margin-top: 10px;">
+          <div>
+            <div class="setting-label">Real-Time Jev Semantic Decisions</div>
+            <div class="setting-hint">Fast predictive language tagging, code/prose boundary classification, and semantic list/paragraph layering</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingJevEnabled" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row" style="margin-top: 10px;">
+          <div>
+            <div class="setting-label">Jev Decision Model</div>
+            <div class="setting-hint">Model identifier on OpenRouter decisions endpoint (default: typesafe/jev-1.13)</div>
+          </div>
+          <input type="text" id="settingJevModel" value="typesafe/jev-1.13" class="setting-input" style="width:200px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+        </div>
+
+        <div class="setting-row" style="margin-top: 10px;">
+          <div>
+            <div class="setting-label">Decision Timeout (ms)</div>
+            <div class="setting-hint">Maximum latency wait before cleanly falling back to local heuristic format_smart_code (default: 400ms)</div>
+          </div>
+          <input type="number" id="settingJevTimeout" value="400" min="50" max="5000" class="setting-input" style="width:90px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+        </div>
+
+        <div style="margin-top: 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label class="setting-label" style="font-size:12.5px;">OpenRouter API Key</label>
+            <span id="openrouterKeyStatusBadge" class="badge" style="background:rgba(255,255,255,0.06); color:var(--muted);">Checking…</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="openrouterApiKeyInput" placeholder="sk-or-…" style="flex:1;">
+            <button class="action-btn" id="toggleOpenRouterKeyVisibility" title="Show/Hide Key">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            </button>
+            <button class="action-btn" id="saveOpenRouterApiKeyBtn">Save Key</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Enhance & Groq API Key Configuration -->
       <div class="settings-group">
         <div class="settings-title">
@@ -1332,6 +1383,39 @@
     $("settingSounds").checked = !!state.sounds;
     $("settingNotifications").checked = !!state.notifications;
     if ($("settingSmartCode")) $("settingSmartCode").checked = state.smart_code !== false;
+    if ($("settingJevEnabled")) $("settingJevEnabled").checked = state.jev_enabled !== false;
+    if ($("settingJevModel")) $("settingJevModel").value = state.jev_model || "typesafe/jev-1.13";
+    if ($("settingJevTimeout")) $("settingJevTimeout").value = state.jev_timeout_ms || 400;
+
+    const jevBadge = $("jevStatusBadge");
+    if (jevBadge) {
+      if (state.jev_enabled === false) {
+        jevBadge.textContent = "Disabled";
+        jevBadge.style.background = "rgba(255, 255, 255, 0.08)";
+        jevBadge.style.color = "var(--text-secondary)";
+      } else if (state.has_openrouter_api_key) {
+        jevBadge.textContent = "Active (Sub-400ms)";
+        jevBadge.style.background = "rgba(16, 185, 129, 0.18)";
+        jevBadge.style.color = "#34d399";
+      } else {
+        jevBadge.textContent = "No API Key (Fallback)";
+        jevBadge.style.background = "rgba(251, 191, 36, 0.18)";
+        jevBadge.style.color = "#fbbf24";
+      }
+    }
+
+    const orBadge = $("openrouterKeyStatusBadge");
+    if (orBadge) {
+      if (state.has_openrouter_api_key) {
+        orBadge.textContent = "Configured";
+        orBadge.style.background = "rgba(16, 185, 129, 0.18)";
+        orBadge.style.color = "#34d399";
+      } else {
+        orBadge.textContent = "Not Set";
+        orBadge.style.background = "rgba(244, 63, 94, 0.18)";
+        orBadge.style.color = "#f87171";
+      }
+    }
     if ($("enhanceModelSelect")) $("enhanceModelSelect").value = state.enhance_model || "llama-3.3-70b-versatile";
 
     const keyBadge = $("groqKeyStatusBadge");
@@ -1829,6 +1913,9 @@
       sounds: $("settingSounds").checked,
       notifications: $("settingNotifications").checked,
       smart_code: $("settingSmartCode") ? $("settingSmartCode").checked : true,
+      jev_enabled: $("settingJevEnabled") ? $("settingJevEnabled").checked : true,
+      jev_model: $("settingJevModel") ? $("settingJevModel").value : "typesafe/jev-1.13",
+      jev_timeout_ms: $("settingJevTimeout") ? parseInt($("settingJevTimeout").value, 10) : 400,
       enhance_model: $("enhanceModelSelect") ? $("enhanceModelSelect").value : "llama-3.3-70b-versatile",
     };
     await api("config", { method: "POST", body: JSON.stringify(payload) });
@@ -1840,6 +1927,9 @@
   $("settingSounds").onchange = saveConfig;
   $("settingNotifications").onchange = saveConfig;
   if ($("settingSmartCode")) $("settingSmartCode").onchange = saveConfig;
+  if ($("settingJevEnabled")) $("settingJevEnabled").onchange = saveConfig;
+  if ($("settingJevModel")) $("settingJevModel").onchange = saveConfig;
+  if ($("settingJevTimeout")) $("settingJevTimeout").onchange = saveConfig;
   if ($("enhanceModelSelect")) $("enhanceModelSelect").onchange = saveConfig;
 
   // Save Enhance Prompt
@@ -1863,6 +1953,25 @@
       await api("config", { method: "POST", body: JSON.stringify({ groq_api_key: key }) });
       $("groqApiKeyInput").value = "";
       toast("Groq API key saved successfully!");
+      loadState();
+    };
+  }
+
+  // OpenRouter API Key for Jev
+  if ($("toggleOpenRouterKeyVisibility")) {
+    $("toggleOpenRouterKeyVisibility").onclick = () => {
+      const inp = $("openrouterApiKeyInput");
+      inp.type = inp.type === "password" ? "text" : "password";
+    };
+  }
+
+  if ($("saveOpenRouterApiKeyBtn")) {
+    $("saveOpenRouterApiKeyBtn").onclick = async () => {
+      const key = $("openrouterApiKeyInput").value.trim();
+      if (!key) return toast("Enter a valid OpenRouter API key (sk-or-...)");
+      await api("config", { method: "POST", body: JSON.stringify({ openrouter_api_key: key }) });
+      $("openrouterApiKeyInput").value = "";
+      toast("OpenRouter API key saved successfully!");
       loadState();
     };
   }

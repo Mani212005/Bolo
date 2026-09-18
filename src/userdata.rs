@@ -67,6 +67,23 @@ pub fn read_saved_groq_api_key() -> Option<String> {
     None
 }
 
+pub fn save_openrouter_api_key(key: &str) -> std::io::Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("openrouter_api_key.txt"), key.trim())
+}
+
+pub fn read_saved_openrouter_api_key() -> Option<String> {
+    let path = config_dir().join("openrouter_api_key.txt");
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
 pub fn append_history(
     kind: &str,
     text: &str,
