@@ -497,7 +497,7 @@ fn strip_bullet_prefix(s: &str) -> &str {
         trimmed = rest.trim();
     }
     if let Some(pos) = trimmed.find(['.', ')']) {
-        if pos < 4 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
+        if pos > 0 && pos < 4 && trimmed[..pos].chars().all(|c| c.is_ascii_digit()) {
             trimmed = trimmed[pos + 1..].trim();
         }
     }
@@ -879,6 +879,23 @@ mod tests {
         // Already formatted with backticks should remain unchanged
         let already_formatted = "```\nconst a = 1;\nconst b = 2;\n```";
         assert_eq!(format_smart_code(already_formatted), already_formatted);
+    }
+
+    #[test]
+    fn test_bullet_and_task_prefix_stripping() {
+        assert_eq!(strip_bullet_prefix(".env"), ".env");
+        assert_eq!(strip_bullet_prefix(".NET"), ".NET");
+        assert_eq!(strip_bullet_prefix("1. test"), "test");
+        assert_eq!(strip_bullet_prefix("2) test"), "test");
+        assert_eq!(strip_bullet_prefix("- test"), "test");
+        assert_eq!(strip_bullet_prefix("* test"), "test");
+        assert_eq!(strip_bullet_prefix("bullet: test"), "test");
+
+        let input = ".env config\n.NET 8\n1. first item\n- second item";
+        assert_eq!(
+            format_bullet_list(input),
+            "- .env config\n- .NET 8\n- first item\n- second item"
+        );
     }
 
     #[test]
