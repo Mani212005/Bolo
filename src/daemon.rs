@@ -717,10 +717,7 @@ fn finalize(
                         Ok(dec) => {
                             eprintln!(
                                 "[jev] decision: is_code={} ({:.2}) lang={} layout={}",
-                                dec.is_code,
-                                dec.code_probability,
-                                dec.language,
-                                dec.layout
+                                dec.is_code, dec.code_probability, dec.language, dec.layout
                             );
                             Some(dec)
                         }
@@ -747,11 +744,7 @@ fn finalize(
             );
             println!("[result]  {text}");
 
-            let images = shared
-                .lock()
-                .unwrap()
-                .captured_context_images
-                .clone();
+            let images = shared.lock().unwrap().captured_context_images.clone();
 
             let t_inject = Instant::now();
             let used = inject_text(&text, injectors, cfg, &images).await?;

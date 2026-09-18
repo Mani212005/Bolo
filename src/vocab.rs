@@ -409,16 +409,48 @@ pub fn is_code_snippet(text: &str) -> bool {
     }
 
     let code_keywords = [
-        "function ", "def ", "fn ", "const ", "let ", "var ", "class ", "struct ",
-        "impl ", "pub ", "import ", "export ", "from ", "return ", "if ", "for ",
-        "while ", "switch ", "case ", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
-        "CREATE ", "WHERE ", "async ", "await ", "typedef ", "interface ", "enum ",
-        "package ", "namespace ", "#include", "val ", "using ", "echo ", "console.",
+        "function ",
+        "def ",
+        "fn ",
+        "const ",
+        "let ",
+        "var ",
+        "class ",
+        "struct ",
+        "impl ",
+        "pub ",
+        "import ",
+        "export ",
+        "from ",
+        "return ",
+        "if ",
+        "for ",
+        "while ",
+        "switch ",
+        "case ",
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "WHERE ",
+        "async ",
+        "await ",
+        "typedef ",
+        "interface ",
+        "enum ",
+        "package ",
+        "namespace ",
+        "#include",
+        "val ",
+        "using ",
+        "echo ",
+        "console.",
     ];
 
     let code_syntax_markers = [
-        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||",
-        ":=", "</", "/>", "/*", "*/", "//", "#!/", "$ ",
+        ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</",
+        "/>", "/*", "*/", "//", "#!/", "$ ",
     ];
 
     let mut code_line_score = 0;
@@ -462,9 +494,15 @@ pub fn map_jev_language(lang: &str, text: &str) -> String {
         "bash" | "shell" | "sh" | "zsh" => "bash".to_string(),
         "html_css" => {
             let lower = text.to_lowercase();
-            if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("</div>") || text.contains('<') {
+            if lower.contains("<html")
+                || lower.contains("<!doctype")
+                || lower.contains("</div>")
+                || text.contains('<')
+            {
                 "html".to_string()
-            } else if text.contains('{') && (text.contains(':') || text.contains("px") || text.contains("color")) {
+            } else if text.contains('{')
+                && (text.contains(':') || text.contains("px") || text.contains("color"))
+            {
                 "css".to_string()
             } else {
                 "html".to_string()
@@ -512,13 +550,19 @@ fn strip_bullet_prefix(s: &str) -> &str {
 
 fn strip_task_prefix(s: &str) -> (&str, bool) {
     let mut trimmed = s.trim();
-    if let Some(rest) = trimmed.strip_prefix("- [x] ").or_else(|| trimmed.strip_prefix("- [X] ")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("- [x] ")
+        .or_else(|| trimmed.strip_prefix("- [X] "))
+    {
         return (rest.trim(), true);
     }
     if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
         return (rest.trim(), false);
     }
-    if let Some(rest) = trimmed.strip_prefix("[x] ").or_else(|| trimmed.strip_prefix("[X] ")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("[x] ")
+        .or_else(|| trimmed.strip_prefix("[X] "))
+    {
         return (rest.trim(), true);
     }
     if let Some(rest) = trimmed.strip_prefix("[ ] ") {
@@ -651,8 +695,7 @@ pub fn format_multi_paragraph(text: &str) -> String {
         return paragraphs.join("\n\n");
     }
 
-    let re_new_para =
-        regex::Regex::new(r"(?i)\s*\b(?:new paragraph|next paragraph)\b\s*").unwrap();
+    let re_new_para = regex::Regex::new(r"(?i)\s*\b(?:new paragraph|next paragraph)\b\s*").unwrap();
     if re_new_para.is_match(trimmed) {
         let parts: Vec<&str> = re_new_para
             .split(trimmed)
@@ -682,7 +725,10 @@ pub fn format_multi_paragraph(text: &str) -> String {
 }
 
 /// Applies Jev predictive formatting decision to the transcript text.
-pub fn format_with_jev_decision(text: &str, decision: &crate::jev::JevFormattingDecision) -> String {
+pub fn format_with_jev_decision(
+    text: &str,
+    decision: &crate::jev::JevFormattingDecision,
+) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return text.to_string();
@@ -858,7 +904,8 @@ mod tests {
 
     #[test]
     fn test_smart_code_detection_and_formatting() {
-        let code_sample = "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
+        let code_sample =
+            "const total = items.reduce((acc, x) => acc + x.price, 0);\nreturn total;";
         assert!(is_code_snippet(code_sample));
         assert_eq!(
             format_smart_code(code_sample),
@@ -872,7 +919,8 @@ mod tests {
             "```\ndef calculate_sum(a, b):\n    return a + b\n```"
         );
 
-        let prose_sample = "Hey captain, the build succeeded.\nLet's deploy the update to production.";
+        let prose_sample =
+            "Hey captain, the build succeeded.\nLet's deploy the update to production.";
         assert!(!is_code_snippet(prose_sample));
         assert_eq!(format_smart_code(prose_sample), prose_sample);
 
@@ -1041,4 +1089,3 @@ mod tests {
         assert_eq!(format_with_fallback(prose_text, None, true), prose_text);
     }
 }
-

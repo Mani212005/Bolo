@@ -32,9 +32,15 @@ pub fn build_decision_request(
     model: &str,
 ) -> serde_json::Value {
     let mut state = serde_json::Map::new();
-    state.insert("text".to_string(), serde_json::Value::String(text.to_string()));
+    state.insert(
+        "text".to_string(),
+        serde_json::Value::String(text.to_string()),
+    );
     if let Some(app) = frontmost_app {
-        state.insert("frontmost_app".to_string(), serde_json::Value::String(app.to_string()));
+        state.insert(
+            "frontmost_app".to_string(),
+            serde_json::Value::String(app.to_string()),
+        );
     }
 
     serde_json::json!({
@@ -318,7 +324,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_decide_formatting_wrapper() {
-        let result = decide_formatting("let x = 10;", None, "invalid_key", DEFAULT_TIMEOUT_MS).await;
+        let result =
+            decide_formatting("let x = 10;", None, "invalid_key", DEFAULT_TIMEOUT_MS).await;
         assert!(result.is_err());
     }
 }
