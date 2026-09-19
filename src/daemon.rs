@@ -275,7 +275,7 @@ pub fn apply_voice_clipboard_triggers_with(text: &str, clip: Option<&str>) -> St
                 } else {
                     trimmed.to_string()
                 };
-                let replaced = re.replace_all(text, replacement.as_str()).to_string();
+                let replaced = re.replace_all(text, regex::NoExpand(&replacement)).to_string();
                 return crate::vocab::isolate_embedded_code(&replaced);
             }
         }
@@ -754,16 +754,20 @@ fn finalize(
                                     };
                                     if let Ok(dec) = dec_res {
                                         if dec.is_code || dec.layout == "code_block" {
-                                            let tag = crate::vocab::map_jev_language(&dec.language, &snippet);
-                                            let tag = if tag.is_empty() {
-                                                crate::vocab::detect_code_language(&snippet).unwrap_or("")
+                                            if snippet.starts_with("```") {
+                                                snippet.clone()
                                             } else {
-                                                &tag
-                                            };
-                                            if tag.is_empty() {
-                                                format!("```\n{}\n```", snippet)
-                                            } else {
-                                                format!("```{tag}\n{}\n```", snippet)
+                                                let tag = crate::vocab::map_jev_language(&dec.language, &snippet);
+                                                let tag = if tag.is_empty() {
+                                                    crate::vocab::detect_code_language(&snippet).unwrap_or("")
+                                                } else {
+                                                    &tag
+                                                };
+                                                if tag.is_empty() {
+                                                    format!("```\n{}\n```", snippet)
+                                                } else {
+                                                    format!("```{tag}\n{}\n```", snippet)
+                                                }
                                             }
                                         } else {
                                             snippet.clone()
@@ -1259,6 +1263,7 @@ fn handle_client(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn assemble_pieces(
     pieces: &[crate::vocab::TranscriptPiece],
     smart_code: bool,
@@ -1292,6 +1297,15 @@ mod tests {
             result,
             "Here is the function\n\n```python\ndef calculate_sum(a, b):\n    return a + b\n```\n\nplease review it."
         );
+    }
+
+    #[test]
+    fn test_daemon_apply_voice_clipboard_triggers_preserves_dollar_signs() {
+        let text = "Check this script: paste clipboard and run it.";
+        let clip = "#!/bin/bash\nexport PATH=\"$HOME/bin:$PATH\"\necho $1";
+        let result = apply_voice_clipboard_triggers_with(text, Some(clip));
+        assert!(result.contains("$HOME/bin:$PATH"));
+        assert!(result.contains("echo $1"));
     }
 }
 

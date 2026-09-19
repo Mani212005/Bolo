@@ -737,16 +737,17 @@ pub fn assemble_transcript_pieces(
                 if trimmed.is_empty() {
                     continue;
                 }
-                if smart_code && (is_code_snippet(trimmed) || trimmed.starts_with("```")) {
-                    let code_text = if trimmed.starts_with("```") {
-                        trimmed.to_string()
+                if trimmed.starts_with("```") {
+                    formatted.push(FormattedPiece {
+                        text: trimmed.to_string(),
+                        is_code_block: true,
+                    });
+                } else if smart_code && is_code_snippet(trimmed) {
+                    let tag = detect_code_language(trimmed).unwrap_or("");
+                    let code_text = if tag.is_empty() {
+                        format!("```\n{}\n```", trimmed)
                     } else {
-                        let tag = detect_code_language(trimmed).unwrap_or("");
-                        if tag.is_empty() {
-                            format!("```\n{}\n```", trimmed)
-                        } else {
-                            format!("```{tag}\n{}\n```", trimmed)
-                        }
+                        format!("```{tag}\n{}\n```", trimmed)
                     };
                     formatted.push(FormattedPiece {
                         text: code_text,
@@ -1451,6 +1452,18 @@ mod tests {
         ];
         let assembled = assemble_transcript_pieces(&pieces, true);
         let expected = "Speech before\n\n```typescript\nconst a: number = 1;\nconsole.log(a);\n```\n\nSpeech after";
+        assert_eq!(assembled, expected);
+    }
+
+    #[test]
+    fn test_assemble_transcript_pieces_with_pre_fenced_and_smart_code_disabled() {
+        let pieces = vec![
+            TranscriptPiece::Spoken("Speech before".to_string()),
+            TranscriptPiece::Inserted("```json\n{\"status\": \"ok\"}\n```".to_string()),
+            TranscriptPiece::Spoken("Speech after".to_string()),
+        ];
+        let assembled = assemble_transcript_pieces(&pieces, false);
+        let expected = "Speech before\n\n```json\n{\"status\": \"ok\"}\n```\n\nSpeech after";
         assert_eq!(assembled, expected);
     }
 
