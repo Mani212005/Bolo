@@ -253,6 +253,9 @@ fn apply_voice_clipboard_triggers(text: &str) -> String {
     apply_voice_clipboard_triggers_with(text, read_clipboard().as_deref())
 }
 
+/// Replaces voice clipboard trigger phrases (such as "paste clipboard" or "insert the link")
+/// with the clipboard contents, formatting code snippets into markdown code blocks with
+/// detected language tags while isolating conversational prose.
 pub fn apply_voice_clipboard_triggers_with(text: &str, clip: Option<&str>) -> String {
     let Ok(re) =
         regex::Regex::new(r"(?i)\s*\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?\s*")
@@ -263,26 +266,28 @@ pub fn apply_voice_clipboard_triggers_with(text: &str, clip: Option<&str>) -> St
         if let Some(clip_text) = clip {
             let trimmed = clip_text.trim();
             if !trimmed.is_empty() {
-                let replacement = if crate::vocab::is_code_snippet(trimmed) || trimmed.contains('\n') {
-                    let tag = crate::vocab::detect_code_language(trimmed).unwrap_or("");
-                    if trimmed.starts_with("```") {
-                        format!("\n\n{}\n\n", trimmed)
-                    } else if tag.is_empty() {
-                        format!("\n\n```\n{}\n```\n\n", trimmed)
+                let replacement =
+                    if crate::vocab::is_code_snippet(trimmed) || trimmed.contains('\n') {
+                        let tag = crate::vocab::detect_code_language(trimmed).unwrap_or("");
+                        if trimmed.starts_with("```") {
+                            format!("\n\n{}\n\n", trimmed)
+                        } else if tag.is_empty() {
+                            format!("\n\n```\n{}\n```\n\n", trimmed)
+                        } else {
+                            format!("\n\n```{tag}\n{}\n```\n\n", trimmed)
+                        }
                     } else {
-                        format!("\n\n```{tag}\n{}\n```\n\n", trimmed)
-                    }
-                } else {
-                    trimmed.to_string()
-                };
-                let replaced = re.replace_all(text, regex::NoExpand(&replacement)).to_string();
+                        trimmed.to_string()
+                    };
+                let replaced = re
+                    .replace_all(text, regex::NoExpand(&replacement))
+                    .to_string();
                 return crate::vocab::isolate_embedded_code(&replaced);
             }
         }
     }
     crate::vocab::isolate_embedded_code(text)
 }
-
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let path = socket_path();
@@ -734,32 +739,37 @@ fn finalize(
                                     let app_name = active_app
                                         .as_ref()
                                         .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                                    let dec_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
-                                        crate::jev::decide_formatting(
-                                            &snippet,
-                                            app_name,
-                                            &api_key,
-                                            cfg.formatting.jev.timeout_ms,
-                                        )
-                                        .await
-                                    } else {
-                                        crate::jev::decide_formatting_with_model(
-                                            &snippet,
-                                            app_name,
-                                            &api_key,
-                                            cfg.formatting.jev.timeout_ms,
-                                            &cfg.formatting.jev.model,
-                                        )
-                                        .await
-                                    };
+                                    let dec_res =
+                                        if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
+                                            crate::jev::decide_formatting(
+                                                &snippet,
+                                                app_name,
+                                                &api_key,
+                                                cfg.formatting.jev.timeout_ms,
+                                            )
+                                            .await
+                                        } else {
+                                            crate::jev::decide_formatting_with_model(
+                                                &snippet,
+                                                app_name,
+                                                &api_key,
+                                                cfg.formatting.jev.timeout_ms,
+                                                &cfg.formatting.jev.model,
+                                            )
+                                            .await
+                                        };
                                     if let Ok(dec) = dec_res {
                                         if dec.is_code || dec.layout == "code_block" {
                                             if snippet.starts_with("```") {
                                                 snippet.clone()
                                             } else {
-                                                let tag = crate::vocab::map_jev_language(&dec.language, &snippet);
+                                                let tag = crate::vocab::map_jev_language(
+                                                    &dec.language,
+                                                    &snippet,
+                                                );
                                                 let tag = if tag.is_empty() {
-                                                    crate::vocab::detect_code_language(&snippet).unwrap_or("")
+                                                    crate::vocab::detect_code_language(&snippet)
+                                                        .unwrap_or("")
                                                 } else {
                                                     &tag
                                                 };
@@ -772,8 +782,12 @@ fn finalize(
                                         } else {
                                             snippet.clone()
                                         }
-                                    } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
-                                        let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                                    } else if cfg.formatting.smart_code
+                                        && (crate::vocab::is_code_snippet(&snippet)
+                                            || snippet.starts_with("```"))
+                                    {
+                                        let tag = crate::vocab::detect_code_language(&snippet)
+                                            .unwrap_or("");
                                         if snippet.starts_with("```") {
                                             snippet.clone()
                                         } else if tag.is_empty() {
@@ -784,8 +798,12 @@ fn finalize(
                                     } else {
                                         snippet.clone()
                                     }
-                                } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
-                                    let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                                } else if cfg.formatting.smart_code
+                                    && (crate::vocab::is_code_snippet(&snippet)
+                                        || snippet.starts_with("```"))
+                                {
+                                    let tag =
+                                        crate::vocab::detect_code_language(&snippet).unwrap_or("");
                                     if snippet.starts_with("```") {
                                         snippet.clone()
                                     } else if tag.is_empty() {
@@ -796,8 +814,12 @@ fn finalize(
                                 } else {
                                     snippet.clone()
                                 }
-                            } else if cfg.formatting.smart_code && (crate::vocab::is_code_snippet(&snippet) || snippet.starts_with("```")) {
-                                let tag = crate::vocab::detect_code_language(&snippet).unwrap_or("");
+                            } else if cfg.formatting.smart_code
+                                && (crate::vocab::is_code_snippet(&snippet)
+                                    || snippet.starts_with("```"))
+                            {
+                                let tag =
+                                    crate::vocab::detect_code_language(&snippet).unwrap_or("");
                                 if snippet.starts_with("```") {
                                     snippet.clone()
                                 } else if tag.is_empty() {
@@ -808,11 +830,15 @@ fn finalize(
                             } else {
                                 snippet.clone()
                             };
-                            processed_pieces.push(crate::vocab::TranscriptPiece::Inserted(formatted_snippet));
+                            processed_pieces
+                                .push(crate::vocab::TranscriptPiece::Inserted(formatted_snippet));
                         }
                     }
                 }
-                crate::vocab::assemble_transcript_pieces(&processed_pieces, cfg.formatting.smart_code)
+                crate::vocab::assemble_transcript_pieces(
+                    &processed_pieces,
+                    cfg.formatting.smart_code,
+                )
             } else {
                 let spoken_texts: Vec<String> = resolved_pieces
                     .into_iter()
@@ -823,7 +849,8 @@ fn finalize(
                     .collect();
                 let mut full_text = spoken_texts.join(" ");
                 if cfg.vocab.enabled {
-                    full_text = crate::vocab::clean_text(&full_text, active_app.as_ref(), &user_terms);
+                    full_text =
+                        crate::vocab::clean_text(&full_text, active_app.as_ref(), &user_terms);
                 }
 
                 let jev_decision = if cfg.formatting.jev.enabled {
@@ -831,7 +858,8 @@ fn finalize(
                         let app_name = active_app
                             .as_ref()
                             .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                        let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
+                        let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL
+                        {
                             crate::jev::decide_formatting(
                                 &full_text,
                                 app_name,
@@ -1308,4 +1336,3 @@ mod tests {
         assert!(result.contains("echo $1"));
     }
 }
-

@@ -1160,4 +1160,200 @@ mod regression_audit_tests {
             );
         }
     }
+
+    #[test]
+    fn test_feature_quick_splice_and_mixed_speech_formatting() {
+        use crate::daemon::apply_voice_clipboard_triggers_with;
+        use crate::stt::whisper::is_decoding_failure;
+        use crate::userdata::sanitize_vocabulary_term;
+        use crate::vocab::{
+            assemble_transcript_pieces, detect_code_language, format_smart_code,
+            isolate_embedded_code, TranscriptPiece,
+        };
+
+        // 1. End-to-end multi-piece assembly: Speech before -> Spliced code -> Speech after
+        let speech_before = "Here is the refactored database handler function:";
+        let inserted_code = "pub async fn query_user_records(pool: &Pool, user_id: i64) -> Result<Vec<UserRecord>, Error> {\n    sqlx::query_as!(UserRecord, \"SELECT id, name, email FROM users WHERE id = $1\", user_id)\n        .fetch_all(pool)\n        .await\n}";
+        let speech_after = "Please run the integration test suite and verify connection pooling.";
+
+        let pieces = vec![
+            TranscriptPiece::Spoken(speech_before.to_string()),
+            TranscriptPiece::Inserted(inserted_code.to_string()),
+            TranscriptPiece::Spoken(speech_after.to_string()),
+        ];
+
+        let assembled = assemble_transcript_pieces(&pieces, true);
+        let expected_assembled =
+            format!("{speech_before}\n\n```rust\n{inserted_code}\n```\n\n{speech_after}");
+        assert_eq!(
+            assembled, expected_assembled,
+            "Speech before and after spliced code must be preserved as natural prose outside code fences"
+        );
+
+        // 2. In-line voice clipboard triggers with dollar-sign preservation
+        let voice_trigger_text =
+            "To configure the environment: paste the clipboard and restart the service.";
+        let bash_snippet = "#!/bin/bash\nexport DATABASE_URL=\"postgres://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME\"\necho \"Connecting as $1 on port $PORT\"";
+        let replaced = apply_voice_clipboard_triggers_with(voice_trigger_text, Some(bash_snippet));
+
+        assert!(
+            replaced.contains("$DB_USER:$DB_PASS"),
+            "Regex replacement must not expand or corrupt dollar-sign variable references"
+        );
+        assert!(
+            replaced.contains("$1 on port $PORT"),
+            "Regex replacement must preserve numeric and alphanumeric capture patterns"
+        );
+        assert!(
+            replaced.starts_with("To configure the environment:"),
+            "Speech before trigger must be preserved"
+        );
+        assert!(
+            replaced.ends_with("and restart the service."),
+            "Speech after trigger must be preserved"
+        );
+        assert!(
+            replaced.contains("```bash"),
+            "Spliced bash script must be tagged with bash language fence"
+        );
+
+        // 3. Embedded multi-line code isolation in a single spoken piece
+        let embedded_speech = "Check this Python helper:\ndef calculate_discount(price: float, rate: float) -> float:\n    return price * (1.0 - rate)\nMake sure rate is between 0 and 1.";
+        let isolated = isolate_embedded_code(embedded_speech);
+        let expected_isolated = "Check this Python helper:\n\n```python\ndef calculate_discount(price: float, rate: float) -> float:\n    return price * (1.0 - rate)\n```\n\nMake sure rate is between 0 and 1.";
+        assert_eq!(
+            isolated, expected_isolated,
+            "Embedded code lines must be isolated into language-tagged fences without swallowing prose"
+        );
+
+        let smart_code_formatted = format_smart_code(embedded_speech);
+        assert_eq!(
+            smart_code_formatted, expected_isolated,
+            "format_smart_code must also isolate embedded code when conversational prose surrounds it"
+        );
+
+        // 4. Pre-fenced markdown code pieces and disabled smart_code separation
+        let prefenced_json = "```json\n{\n  \"status\": \"success\",\n  \"count\": 42\n}\n```";
+        let pieces_prefenced = vec![
+            TranscriptPiece::Spoken("API returned the following payload:".to_string()),
+            TranscriptPiece::Inserted(prefenced_json.to_string()),
+            TranscriptPiece::Spoken("All assertions succeeded.".to_string()),
+        ];
+        let assembled_no_smart_code = assemble_transcript_pieces(&pieces_prefenced, false);
+        assert_eq!(
+            assembled_no_smart_code,
+            format!("API returned the following payload:\n\n{prefenced_json}\n\nAll assertions succeeded."),
+            "Pre-fenced code blocks must be separated by double newlines even when smart_code is disabled"
+        );
+        assert!(
+            !assembled_no_smart_code.contains("````"),
+            "Pre-fenced code must never be double-fenced"
+        );
+
+        // 5. Language detection matrix across supported languages
+        let lang_samples = vec![
+            ("const x: number = 42;\nconsole.log(x);", "typescript"),
+            ("function add(a, b) {\n    return a + b;\n}", "javascript"),
+            ("def run():\n    print('hello')", "python"),
+            ("fn main() {\n    println!(\"hi\");\n}", "rust"),
+            ("SELECT id, name FROM users WHERE active = true;", "sql"),
+            ("#!/bin/bash\necho \"hello world\"", "bash"),
+            ("<div><span>Hello World</span></div>", "html"),
+            (
+                ".container {\n    display: flex;\n    color: red;\n}",
+                "css",
+            ),
+            ("{\"name\": \"bolo\", \"version\": \"0.1.0\"}", "json"),
+            (
+                "#include <iostream>\nint main() { std::cout << 42; return 0; }",
+                "cpp",
+            ),
+        ];
+
+        let mut lang_detection_results = Vec::new();
+        for (snippet, expected_lang) in lang_samples {
+            let detected = detect_code_language(snippet);
+            assert_eq!(
+                detected,
+                Some(expected_lang),
+                "Failed to detect language {expected_lang} for snippet: {snippet}"
+            );
+            lang_detection_results.push(serde_json::json!({
+                "snippet": snippet,
+                "detected_language": detected
+            }));
+        }
+
+        // 6. User vocabulary term sanitization and whisper decoding failure detection
+        let raw_vocab_terms = vec![
+            "Bloc-inv.",
+            "Bloc-",
+            "-Bloc",
+            "Bloc-.",
+            "PostgreSQL-",
+            "Rust",
+            "---",
+        ];
+        let sanitized_terms: Vec<String> = raw_vocab_terms
+            .iter()
+            .map(|t| sanitize_vocabulary_term(t))
+            .collect();
+        assert_eq!(
+            sanitized_terms,
+            vec!["Bloc-inv", "Bloc", "Bloc", "Bloc", "PostgreSQL", "Rust", ""]
+        );
+
+        assert!(is_decoding_failure(""));
+        assert!(is_decoding_failure("   "));
+        assert!(is_decoding_failure("-"));
+        assert!(is_decoding_failure("  -  "));
+        assert!(!is_decoding_failure("fn main()"));
+
+        if let Some(dir) = get_evidence_dir() {
+            let evidence = serde_json::json!({
+                "feature": "Clipboard Quick-Splice & Mixed Speech Formatting Fix",
+                "verified": true,
+                "scenarios": {
+                    "multi_piece_splice": {
+                        "speech_before": speech_before,
+                        "spliced_code": inserted_code,
+                        "speech_after": speech_after,
+                        "assembled_result": assembled,
+                        "speech_before_preserved": assembled.starts_with(speech_before),
+                        "speech_after_preserved": assembled.ends_with(speech_after),
+                        "proper_fence_separation": assembled.contains("\n\n```rust\n")
+                    },
+                    "voice_trigger_splice": {
+                        "input_text": voice_trigger_text,
+                        "clipboard_bash": bash_snippet,
+                        "result": replaced,
+                        "preserves_dollar_vars": !replaced.contains("postgres://:@") && replaced.contains("$DB_USER:$DB_PASS")
+                    },
+                    "embedded_prose_and_code": {
+                        "input": embedded_speech,
+                        "output": isolated
+                    },
+                    "prefenced_and_smart_code_disabled": {
+                        "input_pieces": ["API returned the following payload:", prefenced_json, "All assertions succeeded."],
+                        "output": assembled_no_smart_code,
+                        "no_double_fencing": !assembled_no_smart_code.contains("````")
+                    },
+                    "language_detection_matrix": lang_detection_results,
+                    "vocabulary_sanitization": {
+                        "raw": raw_vocab_terms,
+                        "sanitized": sanitized_terms
+                    },
+                    "whisper_decoding_failure_filter": {
+                        "empty_string_flagged": is_decoding_failure(""),
+                        "single_dash_flagged": is_decoding_failure("-"),
+                        "valid_speech_accepted": !is_decoding_failure("fn main()")
+                    }
+                }
+            });
+            let _ = std::fs::write(
+                dir.join("quick_splice_and_mixed_speech_formatting_validation.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            );
+        }
+    }
 }

@@ -270,10 +270,10 @@ pub fn sanitize_vocabulary_term(term: &str) -> String {
         c == '-' || c == '.' || c == ',' || c == ':' || c == ';' || c.is_whitespace()
     });
     while cleaned.ends_with('-') || cleaned.ends_with('.') || cleaned.ends_with(',') {
-        cleaned = cleaned.trim_end_matches(|c: char| c == '-' || c == '.' || c == ',');
+        cleaned = cleaned.trim_end_matches(['-', '.', ',']);
     }
     while cleaned.starts_with('-') || cleaned.starts_with('.') || cleaned.starts_with(',') {
-        cleaned = cleaned.trim_start_matches(|c: char| c == '-' || c == '.' || c == ',');
+        cleaned = cleaned.trim_start_matches(['-', '.', ',']);
     }
     cleaned.to_string()
 }

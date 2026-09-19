@@ -173,7 +173,10 @@ impl SttProvider for WhisperStt {
             // (e.g. empty transcript or hallucinated single dash "-"),
             // fallback parameters (suppress_blank = true, temperature_inc = 0.2) cleanly recover.
             if is_decoding_failure(&text) {
-                eprintln!("[whisper] initial decoding yielded {:?}; attempting fallback recovery", text);
+                eprintln!(
+                    "[whisper] initial decoding yielded {:?}; attempting fallback recovery",
+                    text
+                );
                 let mut fallback_params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
                 fallback_params.set_n_threads(threads);
                 fallback_params.set_language(Some(&language));
@@ -232,6 +235,8 @@ impl SttProvider for WhisperStt {
     }
 }
 
+/// Determines if a transcription output indicates a whisper greedy decoder early-exit failure
+/// (e.g. empty text or hallucinated lone hyphen) warranting fallback recovery.
 pub fn is_decoding_failure(text: &str) -> bool {
     let t = text.trim();
     t.is_empty() || t == "-"

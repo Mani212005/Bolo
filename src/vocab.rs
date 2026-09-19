@@ -382,16 +382,48 @@ pub fn clean_text(text: &str, app: Option<&ActiveApp>, user_terms: &[String]) ->
 }
 
 pub const CODE_KEYWORDS: &[&str] = &[
-    "function ", "def ", "fn ", "const ", "let ", "var ", "class ", "struct ",
-    "impl ", "pub ", "import ", "export ", "from ", "return ", "if ", "for ",
-    "while ", "switch ", "case ", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
-    "CREATE ", "WHERE ", "async ", "await ", "typedef ", "interface ", "enum ",
-    "package ", "namespace ", "#include", "val ", "using ", "echo ", "console.",
+    "function ",
+    "def ",
+    "fn ",
+    "const ",
+    "let ",
+    "var ",
+    "class ",
+    "struct ",
+    "impl ",
+    "pub ",
+    "import ",
+    "export ",
+    "from ",
+    "return ",
+    "if ",
+    "for ",
+    "while ",
+    "switch ",
+    "case ",
+    "SELECT ",
+    "INSERT ",
+    "UPDATE ",
+    "DELETE ",
+    "CREATE ",
+    "WHERE ",
+    "async ",
+    "await ",
+    "typedef ",
+    "interface ",
+    "enum ",
+    "package ",
+    "namespace ",
+    "#include",
+    "val ",
+    "using ",
+    "echo ",
+    "console.",
 ];
 
 pub const CODE_SYNTAX_MARKERS: &[&str] = &[
-    ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</",
-    "/>", "/*", "*/", "//", "#!/", "$ ",
+    ";", "{", "}", "=>", "->", "()", "[]", "==", "!=", "===", "!==", "&&", "||", ":=", "</", "/>",
+    "/*", "*/", "//", "#!/", "$ ",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,47 +436,101 @@ pub enum TranscriptPiece {
 pub fn detect_code_language(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
 
-    if lower.contains("<html") || lower.contains("<!doctype") || lower.contains("</div>") || lower.contains("</span>") {
+    if lower.contains("<html")
+        || lower.contains("<!doctype")
+        || lower.contains("</div>")
+        || lower.contains("</span>")
+    {
         return Some("html");
     }
 
-    if (lower.contains("px;") || lower.contains("rem;") || lower.contains("display:") || lower.contains("color:")) && lower.contains('{') {
+    if (lower.contains("px;")
+        || lower.contains("rem;")
+        || lower.contains("display:")
+        || lower.contains("color:"))
+        && lower.contains('{')
+    {
         return Some("css");
     }
 
-    if text.contains("fn ") || text.contains("pub fn ") || text.contains("impl ") || text.contains("let mut ") || text.contains("println!") || text.contains("Vec<") || text.contains("Result<") || text.contains("use std::") {
+    if text.contains("fn ")
+        || text.contains("pub fn ")
+        || text.contains("impl ")
+        || text.contains("let mut ")
+        || text.contains("println!")
+        || text.contains("Vec<")
+        || text.contains("Result<")
+        || text.contains("use std::")
+    {
         return Some("rust");
     }
 
-    if text.contains("def ") || text.contains("elif ") || text.contains("print(") || text.contains("__name__") || text.contains("self.") || text.contains("lambda ") {
+    if text.contains("def ")
+        || text.contains("elif ")
+        || text.contains("print(")
+        || text.contains("__name__")
+        || text.contains("self.")
+        || text.contains("lambda ")
+    {
         return Some("python");
     }
 
-    if text.contains(": string") || text.contains(": number") || text.contains(": boolean") || text.contains(": void") || text.contains("interface ") || text.contains("type ") || text.contains("as const") || text.contains("export interface") || text.contains("export type") {
+    if text.contains(": string")
+        || text.contains(": number")
+        || text.contains(": boolean")
+        || text.contains(": void")
+        || text.contains("interface ")
+        || text.contains("type ")
+        || text.contains("as const")
+        || text.contains("export interface")
+        || text.contains("export type")
+    {
         return Some("typescript");
     }
 
-    if text.contains("console.log") || text.contains("const ") || text.contains("let ") || text.contains("var ") || text.contains("function ") || text.contains("=>") {
+    if text.contains("console.log")
+        || text.contains("const ")
+        || text.contains("let ")
+        || text.contains("var ")
+        || text.contains("function ")
+        || text.contains("=>")
+    {
         return Some("javascript");
     }
 
     let upper = text.to_uppercase();
-    if upper.contains("SELECT ") || upper.contains("INSERT INTO ") || upper.contains("UPDATE ") || upper.contains("DELETE FROM ") || upper.contains("CREATE TABLE ") {
+    if upper.contains("SELECT ")
+        || upper.contains("INSERT INTO ")
+        || upper.contains("UPDATE ")
+        || upper.contains("DELETE FROM ")
+        || upper.contains("CREATE TABLE ")
+    {
         return Some("sql");
     }
 
-    if text.contains("#!/bin/") || text.contains("echo ") || text.contains("grep ") || text.contains("sudo ") || text.contains("export ") || text.contains("chmod ") {
+    if text.contains("#!/bin/")
+        || text.contains("echo ")
+        || text.contains("grep ")
+        || text.contains("sudo ")
+        || text.contains("export ")
+        || text.contains("chmod ")
+    {
         return Some("bash");
     }
 
     let trimmed = text.trim();
-    if (trimmed.starts_with('{') && trimmed.ends_with('}')) || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
-        if trimmed.contains("\":") || trimmed.contains("\": ") {
-            return Some("json");
-        }
+    if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+        && (trimmed.contains("\":") || trimmed.contains("\": "))
+    {
+        return Some("json");
     }
 
-    if text.contains("#include <") || text.contains("std::") || text.contains("cout <<") || text.contains("nullptr") {
+    if text.contains("#include <")
+        || text.contains("std::")
+        || text.contains("cout <<")
+        || text.contains("nullptr")
+    {
         return Some("cpp");
     }
     if text.contains("printf(") || text.contains("int main(") {
@@ -473,12 +559,29 @@ pub fn is_code_line(line: &str) -> bool {
             return true;
         }
     }
-    if (line.starts_with("  ") || line.starts_with('\t')) && !trimmed.is_empty() {
-        if trimmed.contains(';') || trimmed.contains('{') || trimmed.contains('}') || trimmed.contains('(') || trimmed.contains(')') || trimmed.contains('=') || trimmed.contains(':') || trimmed.contains('.') {
-            return true;
-        }
+    if (line.starts_with("  ") || line.starts_with('\t'))
+        && !trimmed.is_empty()
+        && (trimmed.contains(';')
+            || trimmed.contains('{')
+            || trimmed.contains('}')
+            || trimmed.contains('(')
+            || trimmed.contains(')')
+            || trimmed.contains('=')
+            || trimmed.contains(':')
+            || trimmed.contains('.'))
+    {
+        return true;
     }
-    if trimmed == "{" || trimmed == "}" || trimmed == "};" || trimmed == "]" || trimmed == "];" || trimmed == ")" || trimmed == ");" || trimmed == "else:" || trimmed == "else {" {
+    if trimmed == "{"
+        || trimmed == "}"
+        || trimmed == "};"
+        || trimmed == "]"
+        || trimmed == "];"
+        || trimmed == ")"
+        || trimmed == ");"
+        || trimmed == "else:"
+        || trimmed == "else {"
+    {
         return true;
     }
     false
@@ -495,7 +598,11 @@ pub fn format_smart_code(text: &str) -> String {
     if trimmed.starts_with("```") && trimmed.ends_with("```") {
         return text.to_string();
     }
-    let lines: Vec<&str> = trimmed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.len() >= 2 {
         let first_is_code = is_code_line(lines[0]);
         let last_is_code = is_code_line(lines[lines.len() - 1]);
@@ -572,7 +679,7 @@ pub fn isolate_embedded_code(text: &str) -> String {
             } else if in_code {
                 out.push(line.trim_end().to_string());
             } else if t.is_empty() {
-                if !out.last().map_or(true, |prev| prev.is_empty()) {
+                if !out.last().is_none_or(|prev| prev.is_empty()) {
                     out.push(String::new());
                 }
             } else {
@@ -701,10 +808,7 @@ pub fn isolate_embedded_code(text: &str) -> String {
 /// Speech pieces remain conversational prose outside code fences, while inserted
 /// code snippets are formatted in language-tagged markdown code blocks, separated
 /// by double-newlines.
-pub fn assemble_transcript_pieces(
-    pieces: &[TranscriptPiece],
-    smart_code: bool,
-) -> String {
+pub fn assemble_transcript_pieces(pieces: &[TranscriptPiece], smart_code: bool) -> String {
     if pieces.is_empty() {
         return String::new();
     }
@@ -784,7 +888,6 @@ pub fn assemble_transcript_pieces(
 
     result
 }
-
 
 /// Maps Jev detected language to a canonical markdown code block language tag.
 pub fn map_jev_language(lang: &str, text: &str) -> String {
@@ -1041,7 +1144,11 @@ pub fn format_with_jev_decision(
         if trimmed.starts_with("```") && trimmed.ends_with("```") {
             return text.to_string();
         }
-        let lines: Vec<&str> = trimmed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         if lines.len() >= 2 && (!is_code_line(lines[0]) || !is_code_line(lines[lines.len() - 1])) {
             let isolated = isolate_embedded_code(trimmed);
             if isolated != trimmed {
@@ -1477,4 +1584,3 @@ mod tests {
         );
     }
 }
-
