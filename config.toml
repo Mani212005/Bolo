@@ -57,6 +57,7 @@ smart_code = true                   # fallback heuristic wrapping code in markdo
 
 [formatting.jev]
 enabled = true                      # real-time semantic predictive formatting via Jev
-model = "typesafe/jev-1.13"         # ultra-fast decision model on OpenRouter
+# provider = "typesafe"             # "typesafe" (default) or "openrouter"; inferred from the key when unset
+# model = "jev-latest"              # empty = provider default (typesafe: jev-latest, openrouter: typesafe/jev-1.13)
 timeout_ms = 400                    # async decision timeout (cleanly falls back if exceeded)
-# api_key = "sk-or-..."             # optional: reads from config, OPENROUTER_API_KEY env var, or ~/.env
+# api_key = "..."                   # optional: config, else TYPESAFE_API_KEY / OPENROUTER_API_KEY from env or ~/.env

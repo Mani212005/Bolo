@@ -53,6 +53,9 @@ impl Default for FormattingConfig {
 #[serde(default)]
 pub struct JevConfig {
     pub enabled: bool,
+    /// `typesafe` or `openrouter`; when unset, inferred from whichever key is found.
+    pub provider: Option<crate::jev::JevProvider>,
+    /// Model id; empty means the provider's default.
     pub model: String,
     pub timeout_ms: u64,
     pub api_key: Option<String>,
@@ -62,51 +65,92 @@ impl Default for JevConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: crate::jev::DEFAULT_MODEL.to_string(),
+            provider: None,
+            model: String::new(),
             timeout_ms: crate::jev::DEFAULT_TIMEOUT_MS,
             api_key: None,
         }
     }
 }
 
+/// A fully resolved Jev target: where to send, with which key and model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JevTarget {
+    pub provider: crate::jev::JevProvider,
+    pub api_key: String,
+    pub model: String,
+}
+
 impl JevConfig {
-    /// Resolves the API key by checking:
-    /// 1. Config value
-    /// 2. OPENROUTER_API_KEY environment variable
-    /// 3. Saved key in ~/.config/bolo/openrouter_api_key.txt
-    /// 4. OPENROUTER_API_KEY in ~/.env
-    pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(ref key) = self.api_key {
-            let trimmed = key.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+    /// Resolves provider, API key, and model. The key comes from, in order:
+    /// 1. Config `api_key` (provider inferred from its shape when unset)
+    /// 2. The provider's env var (`TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`)
+    /// 3. For OpenRouter, the saved key in ~/.config/bolo/openrouter_api_key.txt
+    /// 4. The provider's variable in ~/.env
+    ///
+    /// With no provider configured, TypeSafe sources are tried before OpenRouter.
+    pub fn resolve(&self) -> Option<JevTarget> {
+        use crate::jev::JevProvider;
+        let config_key = self
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty());
+        let (provider, api_key) = match (self.provider, config_key) {
+            (Some(p), Some(k)) => (p, k.to_string()),
+            (None, Some(k)) => (JevProvider::for_key(k), k.to_string()),
+            (Some(p), None) => (p, provider_key(p)?),
+            (None, None) => [JevProvider::TypeSafe, JevProvider::OpenRouter]
+                .into_iter()
+                .find_map(|p| provider_key(p).map(|k| (p, k)))?,
+        };
+        Some(JevTarget {
+            provider,
+            api_key,
+            model: self.model_for(provider),
+        })
+    }
+
+    /// The configured model, unless it is empty or an OpenRouter-style
+    /// `typesafe/...` id that the TypeSafe API rejects as unknown.
+    fn model_for(&self, provider: crate::jev::JevProvider) -> String {
+        let model = self.model.trim();
+        let incompatible =
+            provider == crate::jev::JevProvider::TypeSafe && model.starts_with("typesafe/");
+        if model.is_empty() || incompatible {
+            provider.default_model().to_string()
+        } else {
+            model.to_string()
         }
-        if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-            let trimmed = key.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+    }
+}
+
+/// Looks up a provider's key outside the config file.
+fn provider_key(provider: crate::jev::JevProvider) -> Option<String> {
+    let var = provider.api_key_env();
+    if let Ok(key) = std::env::var(var) {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
+    }
+    if provider == crate::jev::JevProvider::OpenRouter {
         if let Some(key) = crate::userdata::read_saved_openrouter_api_key() {
             return Some(key);
         }
-        if let Some(home) = std::env::var_os("HOME") {
-            let env_path = std::path::PathBuf::from(home).join(".env");
-            if let Ok(content) = std::fs::read_to_string(&env_path) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if let Some(val) = trimmed.strip_prefix("OPENROUTER_API_KEY=") {
-                        let clean = val.trim_matches('"').trim_matches('\'').trim();
-                        if !clean.is_empty() {
-                            return Some(clean.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
+    let home = std::env::var_os("HOME")?;
+    let content = std::fs::read_to_string(std::path::PathBuf::from(home).join(".env")).ok()?;
+    let prefix = format!("{var}=");
+    content.lines().find_map(|line| {
+        let clean = line
+            .trim()
+            .strip_prefix(&prefix)?
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
+        (!clean.is_empty()).then(|| clean.to_string())
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]

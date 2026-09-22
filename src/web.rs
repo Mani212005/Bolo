@@ -428,7 +428,15 @@ pub(crate) fn route(
         {
             let key = v.trim();
             if !key.is_empty() {
-                let _ = crate::userdata::save_openrouter_api_key(key);
+                let provider = crate::jev::JevProvider::for_key(key);
+                if provider == crate::jev::JevProvider::OpenRouter {
+                    let _ = crate::userdata::save_openrouter_api_key(key);
+                }
+                let provider_name = match provider {
+                    crate::jev::JevProvider::TypeSafe => "typesafe",
+                    crate::jev::JevProvider::OpenRouter => "openrouter",
+                };
+                doc.set(&["formatting", "jev", "provider"], provider_name.into());
                 doc.set(&["formatting", "jev", "api_key"], key.into());
             }
         }
@@ -573,16 +581,9 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
     let doc = ConfigDoc::load(config_path)?;
     let status = shared.lock().unwrap().phase.as_str().to_string();
     let enhance_prompt = crate::userdata::enhance_prompt().unwrap_or_default();
-    let has_openrouter_api_key = {
-        let key_in_doc = doc.str_at(&["formatting", "jev", "api_key"], "");
-        if !key_in_doc.trim().is_empty() {
-            true
-        } else {
-            Config::load(config_path)
-                .map(|c| c.formatting.jev.resolve_api_key().is_some())
-                .unwrap_or(false)
-        }
-    };
+    let jev_target = Config::load(config_path)
+        .ok()
+        .and_then(|c| c.formatting.jev.resolve());
     Ok(json!({
         "status": status,
         "provider": doc.str_at(&["stt", "provider"], "groq"),
@@ -599,9 +600,12 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "has_groq_api_key": crate::enhance::get_groq_api_key().is_ok(),
         "smart_code": doc.bool_at(&["formatting", "smart_code"], true),
         "jev_enabled": doc.bool_at(&["formatting", "jev", "enabled"], true),
-        "jev_model": doc.str_at(&["formatting", "jev", "model"], "typesafe/jev-1.13"),
+        "jev_model": jev_target.as_ref().map_or("jev-latest", |t| t.model.as_str()),
+        "jev_provider": jev_target.as_ref().map(|t| t.provider),
         "jev_timeout_ms": doc.int_at(&["formatting", "jev", "timeout_ms"], 400),
-        "has_openrouter_api_key": has_openrouter_api_key,
+        "has_jev_api_key": jev_target.is_some(),
+        // Kept for older dashboard builds that still read this name.
+        "has_openrouter_api_key": jev_target.is_some(),
         "scratchpad": crate::userdata::read_scratchpad(),
         "history": crate::userdata::read_history(100),
         "models": MODELS.iter().map(|(m, s)| json!({ "name": m, "speed": s })).collect::<Vec<_>>(),

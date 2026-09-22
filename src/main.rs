@@ -36,8 +36,9 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // GROQ_API_KEY and OPENROUTER_API_KEY come from the environment; fall back to ~/.env.
+    // GROQ_API_KEY and the Jev keys come from the environment; fall back to ~/.env.
     if std::env::var_os("GROQ_API_KEY").is_none()
+        || std::env::var_os("TYPESAFE_API_KEY").is_none()
         || std::env::var_os("OPENROUTER_API_KEY").is_none()
     {
         if let Some(home) = std::env::var_os("HOME") {
@@ -952,17 +953,18 @@ mod regression_audit_tests {
     #[test]
     fn test_feature_jev_semantic_formatting_engine() {
         use crate::jev::{
-            build_decision_request, parse_decision_response, JevFormattingDecision, DEFAULT_MODEL,
+            build_decision_request, parse_decision_response, JevFormattingDecision, JevProvider,
         };
+        let model = JevProvider::default().default_model();
         use crate::vocab::{format_with_fallback, format_with_jev_decision, map_jev_language};
 
         // 1. Build decision requests
         let req = build_decision_request(
             "pub async fn process() -> Result<()> { Ok(()) }",
             Some("Visual Studio Code"),
-            DEFAULT_MODEL,
+            model,
         );
-        assert_eq!(req["model"], DEFAULT_MODEL);
+        assert_eq!(req["model"], model);
         assert_eq!(req["state"]["frontmost_app"], "Visual Studio Code");
         assert_eq!(req["questions"]["is_code"]["type"], "noul");
         assert_eq!(req["questions"]["language"]["type"], "choice");
@@ -1129,7 +1131,7 @@ mod regression_audit_tests {
         if let Some(dir) = get_evidence_dir() {
             let evidence = serde_json::json!({
                 "feature": "Jev Real-Time Semantic Decision Engine",
-                "model": DEFAULT_MODEL,
+                "model": model,
                 "verified": true,
                 "code_classification_and_tagging": formatting_results,
                 "semantic_layout_structuring": {

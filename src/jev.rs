@@ -1,4 +1,5 @@
-//! Jev model decision client via OpenRouter alpha decisions API.
+//! Jev model decision client. Calls TypeSafe's System One API directly by
+//! default, or OpenRouter's alpha decisions API when configured.
 //!
 //! Provides ultra-fast (sub-400ms) predictive decision-making for:
 //! - Determining if text is source code vs prose (`is_code` noul)
@@ -9,9 +10,54 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub const DECISIONS_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
-pub const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
+pub const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+pub const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 pub const DEFAULT_TIMEOUT_MS: u64 = 400;
+
+/// Which API serves Jev. The two use different model ids and API keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JevProvider {
+    /// TypeSafe System One API (`TYPESAFE_API_KEY`); requests show on the TypeSafe dashboard.
+    #[default]
+    TypeSafe,
+    /// OpenRouter decisions API (`OPENROUTER_API_KEY`, `sk-or-...`).
+    OpenRouter,
+}
+
+impl JevProvider {
+    pub fn endpoint(self) -> &'static str {
+        match self {
+            JevProvider::TypeSafe => TYPESAFE_ENDPOINT,
+            JevProvider::OpenRouter => OPENROUTER_ENDPOINT,
+        }
+    }
+
+    /// Model id this provider accepts; TypeSafe rejects OpenRouter's `typesafe/` ids.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            JevProvider::TypeSafe => "jev-latest",
+            JevProvider::OpenRouter => "typesafe/jev-1.13",
+        }
+    }
+
+    /// Environment variable (also read from `~/.env`) holding this provider's key.
+    pub fn api_key_env(self) -> &'static str {
+        match self {
+            JevProvider::TypeSafe => "TYPESAFE_API_KEY",
+            JevProvider::OpenRouter => "OPENROUTER_API_KEY",
+        }
+    }
+
+    /// Infers the provider from a key's shape: OpenRouter keys start with `sk-or-`.
+    pub fn for_key(key: &str) -> Self {
+        if key.trim().starts_with("sk-or-") {
+            JevProvider::OpenRouter
+        } else {
+            JevProvider::TypeSafe
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JevFormattingDecision {
@@ -25,7 +71,7 @@ pub struct JevFormattingDecision {
     pub layout: String,
 }
 
-/// Builds the JSON request payload for OpenRouter's decisions endpoint.
+/// Builds the JSON request payload; both providers accept the same shape.
 pub fn build_decision_request(
     text: &str,
     frontmost_app: Option<&str>,
@@ -82,14 +128,22 @@ pub fn build_decision_request(
     })
 }
 
-/// Parses the JSON response from OpenRouter decisions API into a JevFormattingDecision.
+/// Parses a decisions response from either provider into a JevFormattingDecision.
 pub fn parse_decision_response(val: &serde_json::Value) -> Result<JevFormattingDecision> {
     if let Some(err) = val.get("error") {
         let msg = err
             .get("message")
             .and_then(|m| m.as_str())
-            .unwrap_or("unknown OpenRouter error");
-        anyhow::bail!("OpenRouter error: {msg}");
+            .unwrap_or("unknown Jev error");
+        anyhow::bail!("Jev error: {msg}");
+    }
+    if let Some(detail) = val.get("detail") {
+        let msg = detail
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| detail.as_str())
+            .unwrap_or("unknown TypeSafe error");
+        anyhow::bail!("TypeSafe error: {msg}");
     }
 
     let answers = val
@@ -150,35 +204,39 @@ pub fn parse_decision_response(val: &serde_json::Value) -> Result<JevFormattingD
     })
 }
 
-/// Core implementation of decide_formatting calling the OpenRouter endpoint.
-pub async fn decide_formatting_with_model(
+/// Makes a predictive formatting decision via Jev with an async timeout.
+pub async fn decide_formatting(
     text: &str,
     frontmost_app: Option<&str>,
     api_key: &str,
     timeout_ms: u64,
+    provider: JevProvider,
     model: &str,
 ) -> Result<JevFormattingDecision> {
     let fut = async {
         let client = reqwest::Client::new();
         let payload = build_decision_request(text, frontmost_app, model);
         let resp = client
-            .post(DECISIONS_ENDPOINT)
+            .post(provider.endpoint())
             .bearer_auth(api_key)
             .json(&payload)
             .send()
             .await
-            .context("failed to send request to OpenRouter decisions endpoint")?;
+            .with_context(|| format!("failed to send Jev request to {}", provider.endpoint()))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let err_body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter decisions endpoint returned {status}: {err_body}");
+            anyhow::bail!(
+                "Jev endpoint {} returned {status}: {err_body}",
+                provider.endpoint()
+            );
         }
 
         let body: serde_json::Value = resp
             .json()
             .await
-            .context("failed to parse OpenRouter decisions response as JSON")?;
+            .context("failed to parse Jev decisions response as JSON")?;
 
         parse_decision_response(&body)
     };
@@ -186,16 +244,6 @@ pub async fn decide_formatting_with_model(
     tokio::time::timeout(Duration::from_millis(timeout_ms), fut)
         .await
         .map_err(|_| anyhow::anyhow!("Jev decision timed out after {timeout_ms}ms"))?
-}
-
-/// Makes a predictive formatting decision via Jev on OpenRouter with async timeout.
-pub async fn decide_formatting(
-    text: &str,
-    frontmost_app: Option<&str>,
-    api_key: &str,
-    timeout_ms: u64,
-) -> Result<JevFormattingDecision> {
-    decide_formatting_with_model(text, frontmost_app, api_key, timeout_ms, DEFAULT_MODEL).await
 }
 
 #[cfg(test)]
@@ -207,10 +255,10 @@ mod tests {
         let req = build_decision_request(
             "fn main() { println!(\"hello\"); }",
             Some("Visual Studio Code"),
-            DEFAULT_MODEL,
+            "jev-latest",
         );
 
-        assert_eq!(req["model"], DEFAULT_MODEL);
+        assert_eq!(req["model"], "jev-latest");
         assert_eq!(req["state"]["text"], "fn main() { println!(\"hello\"); }");
         assert_eq!(req["state"]["frontmost_app"], "Visual Studio Code");
         assert_eq!(req["questions"]["is_code"]["type"], "noul");
@@ -307,25 +355,46 @@ mod tests {
         assert!(err.to_string().contains("overloaded"));
     }
 
-    #[tokio::test]
-    async fn test_decide_formatting_timeout() {
-        // Calling decide_formatting with an unreachable port and very short timeout should time out
-        let result = decide_formatting_with_model(
-            "test text",
-            None,
-            "dummy_key",
-            1, // 1 ms timeout
-            DEFAULT_MODEL,
-        )
-        .await;
+    #[test]
+    fn test_parse_decision_response_typesafe_error() {
+        let val = serde_json::json!({
+            "detail": {"error_type": "api_usage_error", "message": "Unknown model: typesafe/jev-1.13"}
+        });
+        let err = parse_decision_response(&val).unwrap_err();
+        assert!(err.to_string().contains("Unknown model"));
+    }
 
-        assert!(result.is_err());
+    #[test]
+    fn test_provider_endpoints_and_models() {
+        assert_eq!(JevProvider::default(), JevProvider::TypeSafe);
+        assert_eq!(JevProvider::TypeSafe.endpoint(), TYPESAFE_ENDPOINT);
+        assert_eq!(JevProvider::TypeSafe.default_model(), "jev-latest");
+        assert_eq!(JevProvider::OpenRouter.endpoint(), OPENROUTER_ENDPOINT);
+        assert_eq!(JevProvider::OpenRouter.default_model(), "typesafe/jev-1.13");
+    }
+
+    #[test]
+    fn test_provider_for_key() {
+        assert_eq!(
+            JevProvider::for_key("sk-or-v1-abc"),
+            JevProvider::OpenRouter
+        );
+        assert_eq!(JevProvider::for_key("apikey-abc"), JevProvider::TypeSafe);
     }
 
     #[tokio::test]
-    async fn test_decide_formatting_wrapper() {
-        let result =
-            decide_formatting("let x = 10;", None, "invalid_key", DEFAULT_TIMEOUT_MS).await;
+    async fn test_decide_formatting_timeout() {
+        // A 1 ms timeout cannot complete a network round trip.
+        let result = decide_formatting(
+            "test text",
+            None,
+            "dummy_key",
+            1,
+            JevProvider::TypeSafe,
+            "jev-latest",
+        )
+        .await;
+
         assert!(result.is_err());
     }
 }

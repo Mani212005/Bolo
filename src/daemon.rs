@@ -735,29 +735,24 @@ fn finalize(
                         }
                         crate::vocab::TranscriptPiece::Inserted(snippet) => {
                             let formatted_snippet = if cfg.formatting.jev.enabled {
-                                if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
+                                if let Some(target) = cfg.formatting.jev.resolve() {
                                     let app_name = active_app
                                         .as_ref()
                                         .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                                    let dec_res =
-                                        if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
-                                            crate::jev::decide_formatting(
-                                                &snippet,
-                                                app_name,
-                                                &api_key,
-                                                cfg.formatting.jev.timeout_ms,
-                                            )
-                                            .await
-                                        } else {
-                                            crate::jev::decide_formatting_with_model(
-                                                &snippet,
-                                                app_name,
-                                                &api_key,
-                                                cfg.formatting.jev.timeout_ms,
-                                                &cfg.formatting.jev.model,
-                                            )
-                                            .await
-                                        };
+                                    let dec_res = crate::jev::decide_formatting(
+                                        &snippet,
+                                        app_name,
+                                        &target.api_key,
+                                        cfg.formatting.jev.timeout_ms,
+                                        target.provider,
+                                        &target.model,
+                                    )
+                                    .await;
+                                    if let Err(e) = &dec_res {
+                                        eprintln!(
+                                            "[jev] snippet decision skipped (falling back): {e:#}"
+                                        );
+                                    }
                                     if let Ok(dec) = dec_res {
                                         if dec.is_code || dec.layout == "code_block" {
                                             if snippet.starts_with("```") {
@@ -854,29 +849,19 @@ fn finalize(
                 }
 
                 let jev_decision = if cfg.formatting.jev.enabled {
-                    if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
+                    if let Some(target) = cfg.formatting.jev.resolve() {
                         let app_name = active_app
                             .as_ref()
                             .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                        let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL
-                        {
-                            crate::jev::decide_formatting(
-                                &full_text,
-                                app_name,
-                                &api_key,
-                                cfg.formatting.jev.timeout_ms,
-                            )
-                            .await
-                        } else {
-                            crate::jev::decide_formatting_with_model(
-                                &full_text,
-                                app_name,
-                                &api_key,
-                                cfg.formatting.jev.timeout_ms,
-                                &cfg.formatting.jev.model,
-                            )
-                            .await
-                        };
+                        let decision_res = crate::jev::decide_formatting(
+                            &full_text,
+                            app_name,
+                            &target.api_key,
+                            cfg.formatting.jev.timeout_ms,
+                            target.provider,
+                            &target.model,
+                        )
+                        .await;
                         match decision_res {
                             Ok(dec) => {
                                 eprintln!(
