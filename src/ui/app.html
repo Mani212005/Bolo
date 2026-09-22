@@ -176,6 +176,44 @@
     color: #fff;
   }
 
+  /* History toolbar: search + images-only filter */
+  .history-toolbar {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .history-toolbar .search-box {
+    flex: 1;
+    margin-bottom: 0;
+    min-width: 0;
+  }
+  .filter-toggle {
+    flex-shrink: 0;
+    background: var(--surface);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-md);
+    padding: 0 12px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .filter-toggle:hover {
+    border-color: rgba(56, 189, 248, 0.4);
+    color: #fff;
+  }
+  .filter-toggle.active {
+    background: rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.5);
+    color: var(--accent);
+  }
+
   /* Feed / Cards */
   .feed {
     display: flex;
@@ -314,6 +352,42 @@
   }
   .card-image-thumb:hover .thumb-hover-overlay {
     opacity: 1;
+  }
+
+  /* Per-card images section (always visible) */
+  .card-images-section {
+    margin-top: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .card-images-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .card-images-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+  }
+  .copy-all-images-btn {
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+  .card-images-zero {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .card-images-zero strong {
+    color: var(--text-secondary);
+    font-weight: 600;
   }
 
   /* Fullscreen Image Lightbox Modal */
@@ -871,13 +945,19 @@
   <!-- VIEW 1: History & Transcriptions -->
   <section class="view-section active" id="view-history">
     
-    <!-- Search Bar -->
-    <div class="search-box">
-      <span class="search-icon">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-      </span>
-      <input type="text" class="search-input" id="searchInput" placeholder="Search in transcriptions…">
-      <button class="search-clear" id="searchClear">✕</button>
+    <!-- Search Bar + Images-only filter -->
+    <div class="history-toolbar">
+      <div class="search-box">
+        <span class="search-icon">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        </span>
+        <input type="text" class="search-input" id="searchInput" placeholder="Search in transcriptions…">
+        <button class="search-clear" id="searchClear">✕</button>
+      </div>
+      <button class="filter-toggle" id="imagesOnlyToggle" title="Show only transcriptions with screenshots" aria-pressed="false">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+        Images only
+      </button>
     </div>
 
     <!-- Results Counter / Filter Bar -->
@@ -1619,27 +1699,105 @@
 
   const voicePlayer = new VoicePlayer();
 
+  let imagesOnlyFilter = false;
+
+  function imageUrlFor(imgPath) {
+    return `/api/image?path=${encodeURIComponent(imgPath)}`;
+  }
+
+  function downloadImageUrl(url, filename) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "bolo-screenshot.png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function downloadAllImages(urls) {
+    urls.forEach((url, idx) => {
+      setTimeout(() => downloadImageUrl(url, `bolo-screenshot-${idx + 1}.png`), idx * 250);
+    });
+  }
+
+  async function copyAllImages(imgPaths, btn) {
+    const urls = (imgPaths || []).map(imageUrlFor);
+    if (!urls.length) {
+      toast("No images on this transcription");
+      return;
+    }
+    const originalHtml = btn ? btn.innerHTML : "";
+    if (btn) btn.innerHTML = `Copying…`;
+    try {
+      const blobs = [];
+      for (const url of urls) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const blob = await res.blob();
+        blobs.push(blob.type === "image/png" ? blob : new Blob([await blob.arrayBuffer()], { type: "image/png" }));
+      }
+      if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) {
+        throw new Error("Clipboard image copy not supported in this browser");
+      }
+      await navigator.clipboard.write(blobs.map((b) => new ClipboardItem({ "image/png": b })));
+      toast(urls.length === 1 ? "Copied 1 image to clipboard" : `Copied ${urls.length} images to clipboard`);
+    } catch (err) {
+      console.warn("Bulk image copy failed, trying single-copy then download fallback:", err);
+      try {
+        const res = await fetch(urls[0]);
+        if (res.ok && window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+          const first = await res.blob();
+          const png = first.type === "image/png" ? first : new Blob([await first.arrayBuffer()], { type: "image/png" });
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+          if (urls.length > 1) {
+            downloadAllImages(urls.slice(1));
+            toast(`Copied first image; downloaded remaining ${urls.length - 1}`);
+            return;
+          }
+          toast("Copied 1 image to clipboard");
+          return;
+        }
+      } catch (e) {
+        console.warn("Single-copy fallback failed:", e);
+      }
+      downloadAllImages(urls);
+      toast(`Clipboard unavailable — downloaded ${urls.length} image${urls.length === 1 ? "" : "s"} instead`);
+    } finally {
+      if (btn) btn.innerHTML = originalHtml;
+    }
+  }
+
   function renderFeed() {
     const feed = $("feed");
     const query = $("searchInput").value.trim().toLowerCase();
     
     let items = [...(state.history || [])].reverse();
+    if (imagesOnlyFilter) {
+      items = items.filter(it => Array.isArray(it.images) && it.images.length > 0);
+    }
     if (query) {
       items = items.filter(it => (it.text || "").toLowerCase().includes(query));
+    }
+    if (query || imagesOnlyFilter) {
       $("resultsBar").style.display = "block";
-      $("resultsBar").textContent = `Showing ${items.length} of ${state.history.length} transcriptions`;
-      $("searchClear").style.display = "block";
+      const scope = imagesOnlyFilter ? " with images" : "";
+      $("resultsBar").textContent = `Showing ${items.length} of ${state.history.length} transcriptions${scope}`;
+      $("searchClear").style.display = query ? "block" : "none";
     } else {
       $("resultsBar").style.display = "none";
       $("searchClear").style.display = "none";
     }
 
     if (!items.length) {
+      const emptyTitle = query ? "No matching transcriptions" : (imagesOnlyFilter ? "No transcriptions with images" : "No transcriptions yet");
+      const emptyDesc = query
+        ? "Try searching for a different keyword or clear search."
+        : (imagesOnlyFilter ? "No screenshots captured yet. Hold Control and draw a circle to capture screen context." : "Press Ctrl+Space or click the glowing orb below to start speaking.");
       feed.innerHTML = `
         <div class="empty-state">
           <div class="empty-icon">🎙️</div>
-          <div class="empty-title">${query ? "No matching transcriptions" : "No transcriptions yet"}</div>
-          <div class="empty-desc">${query ? "Try searching for a different keyword or clear search." : "Press Ctrl+Space or click the glowing orb below to start speaking."}</div>
+          <div class="empty-title">${emptyTitle}</div>
+          <div class="empty-desc">${emptyDesc}</div>
         </div>
       `;
       return;
@@ -1656,18 +1814,35 @@
       const hasAudio = !!(item.audio_id || item.id);
       const audioId = item.audio_id || item.id;
       const hasImages = Array.isArray(item.images) && item.images.length > 0;
-      const imagesHtml = hasImages ? `
+      const imageCount = Array.isArray(item.images) ? item.images.length : 0;
+      const thumbsHtml = hasImages ? `
         <div class="card-images">
           ${item.images.map((img, idx) => `
             <div class="card-image-thumb" data-img-path="${escapeAttr(img)}" title="Click to view and copy screenshot">
-              <img src="/api/image?path=${encodeURIComponent(img)}" alt="Screen Context ${idx + 1}" loading="lazy" />
+              <img src="${imageUrlFor(img)}" alt="Screen Context ${idx + 1}" loading="lazy" />
               <div class="thumb-hover-overlay">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
               </div>
             </div>
           `).join('')}
         </div>
-      ` : '';
+      ` : `
+        <div class="card-images-zero"><strong>No screenshots.</strong> Hold Control and draw a circle to capture screen context with this voice note.</div>
+      `;
+      const imagesHtml = `
+        <div class="card-images-section" data-images-section>
+          <div class="card-images-header">
+            <span class="card-images-title">Images (${imageCount})</span>
+            ${hasImages ? `
+              <button class="action-btn copy-all-images-btn" data-action="copy-all-images" title="Copy all images of this transcription">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Copy all images
+              </button>
+            ` : ''}
+          </div>
+          ${thumbsHtml}
+        </div>
+      `;
       
       card.innerHTML = `
         <div class="card-text ${isLong ? 'truncated' : ''}" id="text-${itemId}">${escapeHtml(item.text)}</div>
@@ -1709,7 +1884,7 @@
         thumb.onclick = (e) => {
           e.stopPropagation();
           const imgPath = thumb.dataset.imgPath;
-          openLightbox(`/api/image?path=${encodeURIComponent(imgPath)}`, imgPath);
+          openLightbox(imageUrlFor(imgPath), imgPath);
         };
       });
 
@@ -1742,6 +1917,15 @@
         navigator.clipboard.writeText(item.text);
         toast("Copied to clipboard");
       };
+
+      // Copy-all-images Action
+      const copyAllBtn = card.querySelector('[data-action="copy-all-images"]');
+      if (copyAllBtn) {
+        copyAllBtn.onclick = (e) => {
+          e.stopPropagation();
+          copyAllImages(item.images || [], copyAllBtn);
+        };
+      }
 
       // Enhance Action
       card.querySelector('[data-action="enhance"]').onclick = async (e) => {
@@ -1840,6 +2024,14 @@
   $("searchInput").oninput = renderFeed;
   $("searchClear").onclick = () => {
     $("searchInput").value = "";
+    renderFeed();
+  };
+
+  // Images-only filter toggle
+  $("imagesOnlyToggle").onclick = () => {
+    imagesOnlyFilter = !imagesOnlyFilter;
+    $("imagesOnlyToggle").classList.toggle("active", imagesOnlyFilter);
+    $("imagesOnlyToggle").setAttribute("aria-pressed", String(imagesOnlyFilter));
     renderFeed();
   };
 

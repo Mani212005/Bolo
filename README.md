@@ -44,8 +44,8 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **Mid-Dictation Clipboard Splicing**: Press `Option + V` mid-speech to insert links, code, or copied text without pausing audio.
 - **On-Device Privacy & Local Models**: Run speech recognition completely offline with whisper.cpp and faster-whisper.
 - **Ultra-Fast Cloud Transcription**: Transcribe long voice notes in ~250ms using Groq Whisper-Large-v3.
-- **Native Popup & History Dashboard**: Search past voice dictations and listen back with the built-in audio playback engine.
-- **Screen Context Lightbox & 1-Click Clipboard Copy**: Expand captured screen context images in a full-screen modal and copy PNGs directly to your clipboard.
+- **Native Popup & History Dashboard**: Search past voice dictations, filter image-bearing transcriptions, and listen back with the built-in audio playback engine.
+- **Screen Context Lightbox & Bulk Image Copy**: Browse captured screenshots with an always-visible per-card images section, expand images in a full-screen modal, and copy single screenshots or all transcription images directly to your clipboard.
 - **One-Click AI Prompt Enhancement**: Refine raw speech and rambles into structured prompts using LLaMA-3.3-70B with settings-configurable models and API keys.
 - **Real-Time Jev Semantic Formatting & Smart Code**: Automatically classifies code vs prose and tags programming languages (```` ```rust ````, ```` ```python ````) and layers lists/paragraphs using the sub-400ms Jev decision engine with heuristic fallback.
 - **Custom Vocabulary Biasing**: Add technical terms, proper nouns, and acronyms for accurate phonetic transcription.
