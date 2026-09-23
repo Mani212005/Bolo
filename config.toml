@@ -53,10 +53,15 @@ enabled = true                      # hover pointer in a circle to capture scree
 min_angle_degrees = 315.0           # minimum circle arc angle threshold
 
 [formatting]
-smart_code = true                   # fallback heuristic wrapping code in markdown backticks
+smart_code = true                   # detect pasted code; fence it in chat apps, paste raw in editors
+paragraphs = true                   # split long dictations into paragraphs
+list_cues = true                    # "bullet points" / "to-do list" / "first, second, third" make lists
+# raw_code_apps = ["Warp"]          # never fence code in these apps
+# fenced_code_apps = ["Xcode"]      # always fence code in these apps
 
 [formatting.jev]
-enabled = true                      # real-time semantic predictive formatting via Jev
-model = "typesafe/jev-1.13"         # ultra-fast decision model on OpenRouter
-timeout_ms = 400                    # async decision timeout (cleanly falls back if exceeded)
-# api_key = "sk-or-..."             # optional: reads from config, OPENROUTER_API_KEY env var, or ~/.env
+enabled = true                      # ask Jev (one request, only when unsure) about ambiguous pastes and spoken lists
+# provider = "typesafe"             # "typesafe" (default) or "openrouter"; inferred from the key when unset
+# model = "jev-latest"              # empty = provider default (typesafe: jev-latest, openrouter: typesafe/jev-1.13)
+timeout_ms = 2500                   # wait this long for Jev, then paste the local result
+# api_key = "..."                   # optional: config, else TYPESAFE_API_KEY / OPENROUTER_API_KEY from env or ~/.env

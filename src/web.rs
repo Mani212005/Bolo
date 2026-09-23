@@ -213,6 +213,7 @@ pub fn serve(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn route(
     method: &str,
     url: &str,
@@ -413,6 +414,12 @@ pub(crate) fn route(
         if let Some(v) = changes["smart_code"].as_bool() {
             doc.set(&["formatting", "smart_code"], v.into());
         }
+        if let Some(v) = changes["paragraphs"].as_bool() {
+            doc.set(&["formatting", "paragraphs"], v.into());
+        }
+        if let Some(v) = changes["list_cues"].as_bool() {
+            doc.set(&["formatting", "list_cues"], v.into());
+        }
         if let Some(v) = changes["jev_enabled"].as_bool() {
             doc.set(&["formatting", "jev", "enabled"], v.into());
         }
@@ -428,7 +435,15 @@ pub(crate) fn route(
         {
             let key = v.trim();
             if !key.is_empty() {
-                let _ = crate::userdata::save_openrouter_api_key(key);
+                let provider = crate::jev::JevProvider::for_key(key);
+                if provider == crate::jev::JevProvider::OpenRouter {
+                    let _ = crate::userdata::save_openrouter_api_key(key);
+                }
+                let provider_name = match provider {
+                    crate::jev::JevProvider::TypeSafe => "typesafe",
+                    crate::jev::JevProvider::OpenRouter => "openrouter",
+                };
+                doc.set(&["formatting", "jev", "provider"], provider_name.into());
                 doc.set(&["formatting", "jev", "api_key"], key.into());
             }
         }
@@ -573,16 +588,17 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
     let doc = ConfigDoc::load(config_path)?;
     let status = shared.lock().unwrap().phase.as_str().to_string();
     let enhance_prompt = crate::userdata::enhance_prompt().unwrap_or_default();
-    let has_openrouter_api_key = {
-        let key_in_doc = doc.str_at(&["formatting", "jev", "api_key"], "");
-        if !key_in_doc.trim().is_empty() {
-            true
-        } else {
-            Config::load(config_path)
-                .map(|c| c.formatting.jev.resolve_api_key().is_some())
-                .unwrap_or(false)
-        }
-    };
+    let st = crate::format::stats();
+    let jev_stats = json!({
+        "dictations": st.dictations,
+        "local_only": st.local_only,
+        "calls": st.calls,
+        "fallbacks": st.fallbacks,
+        "avg_latency_ms": st.total_latency_ms.checked_div(st.calls),
+    });
+    let jev_target = Config::load(config_path)
+        .ok()
+        .and_then(|c| c.formatting.jev.resolve());
     Ok(json!({
         "status": status,
         "provider": doc.str_at(&["stt", "provider"], "groq"),
@@ -599,9 +615,18 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "has_groq_api_key": crate::enhance::get_groq_api_key().is_ok(),
         "smart_code": doc.bool_at(&["formatting", "smart_code"], true),
         "jev_enabled": doc.bool_at(&["formatting", "jev", "enabled"], true),
-        "jev_model": doc.str_at(&["formatting", "jev", "model"], "typesafe/jev-1.13"),
-        "jev_timeout_ms": doc.int_at(&["formatting", "jev", "timeout_ms"], 400),
-        "has_openrouter_api_key": has_openrouter_api_key,
+        "jev_model": jev_target.as_ref().map_or("jev-latest", |t| t.model.as_str()),
+        "jev_provider": jev_target.as_ref().map(|t| t.provider),
+        "paragraphs": doc.bool_at(&["formatting", "paragraphs"], true),
+        "list_cues": doc.bool_at(&["formatting", "list_cues"], true),
+        "jev_timeout_ms": doc.int_at(
+            &["formatting", "jev", "timeout_ms"],
+            crate::jev::DEFAULT_TIMEOUT_MS as i64,
+        ),
+        "jev_stats": jev_stats,
+        "has_jev_api_key": jev_target.is_some(),
+        // Kept for older dashboard builds that still read this name.
+        "has_openrouter_api_key": jev_target.is_some(),
         "scratchpad": crate::userdata::read_scratchpad(),
         "history": crate::userdata::read_history(100),
         "models": MODELS.iter().map(|(m, s)| json!({ "name": m, "speed": s })).collect::<Vec<_>>(),

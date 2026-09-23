@@ -145,14 +145,15 @@ Bolo configuration files live in `~/.config/bolo/`:
 
   [formatting.jev]
   enabled = true              # real-time semantic predictive formatting via Jev
-  model = "typesafe/jev-1.13" # ultra-fast decision model on OpenRouter
+  # provider = "typesafe"    # "typesafe" (default) or "openrouter"; inferred from the key when unset
+  # model = "jev-latest"     # empty = provider default
   timeout_ms = 400            # async decision timeout (cleanly falls back if exceeded)
-  # api_key = "sk-or-..."     # optional: config, OPENROUTER_API_KEY env var, or ~/.env
+  # api_key = "..."          # optional: config, else TYPESAFE_API_KEY / OPENROUTER_API_KEY from env or ~/.env
   ```
 
 - **`~/.config/bolo/vocabulary.txt`**: Custom word prompts (names, brand terms, acronyms).
 - **`~/.config/bolo/enhance_prompt.txt`**: Prompt template for AI enhancement.
-- **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` and `OPENROUTER_API_KEY=sk-or-...` for cloud transcription, LLaMA enhancement, and Jev formatting decisions.
+- **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` and `TYPESAFE_API_KEY=...` (or `OPENROUTER_API_KEY=sk-or-...`) for cloud transcription, LLaMA enhancement, and Jev formatting decisions.
 
 ---
 

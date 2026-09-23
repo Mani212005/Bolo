@@ -3,6 +3,8 @@ mod config;
 mod config_edit;
 mod daemon;
 mod enhance;
+mod format;
+mod format_eval;
 mod hotkey;
 mod inject;
 mod jev;
@@ -36,8 +38,9 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // GROQ_API_KEY and OPENROUTER_API_KEY come from the environment; fall back to ~/.env.
+    // GROQ_API_KEY and the Jev keys come from the environment; fall back to ~/.env.
     if std::env::var_os("GROQ_API_KEY").is_none()
+        || std::env::var_os("TYPESAFE_API_KEY").is_none()
         || std::env::var_os("OPENROUTER_API_KEY").is_none()
     {
         if let Some(home) = std::env::var_os("HOME") {
@@ -112,11 +115,16 @@ fn main() -> anyhow::Result<()> {
             println!("[model] ready: {}", path.display());
             return Ok(());
         }
+        Some("eval-format") => {
+            let cfg = Config::load(&config_path)?;
+            let use_jev = args.iter().any(|a| a == "--jev");
+            return tokio::runtime::Runtime::new()?.block_on(format_eval::run(&cfg, use_jev));
+        }
         Some("record") => {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n");
             return Ok(());
         }
         None => {
@@ -950,408 +958,74 @@ mod regression_audit_tests {
     }
 
     #[test]
-    fn test_feature_jev_semantic_formatting_engine() {
-        use crate::jev::{
-            build_decision_request, parse_decision_response, JevFormattingDecision, DEFAULT_MODEL,
+    fn test_feature_dictation_formatting_pipeline() {
+        use crate::format::{code_style, CodeStyle, Options, Plan};
+        use crate::vocab::{ActiveApp, TranscriptPiece};
+
+        let options = Options {
+            smart_code: true,
+            paragraphs: true,
+            list_cues: true,
         };
-        use crate::vocab::{format_with_fallback, format_with_jev_decision, map_jev_language};
-
-        // 1. Build decision requests
-        let req = build_decision_request(
-            "pub async fn process() -> Result<()> { Ok(()) }",
-            Some("Visual Studio Code"),
-            DEFAULT_MODEL,
-        );
-        assert_eq!(req["model"], DEFAULT_MODEL);
-        assert_eq!(req["state"]["frontmost_app"], "Visual Studio Code");
-        assert_eq!(req["questions"]["is_code"]["type"], "noul");
-        assert_eq!(req["questions"]["language"]["type"], "choice");
-        assert_eq!(req["questions"]["layout"]["type"], "choice");
-
-        // 2. Language classification and formatting test matrix
-        let test_cases = vec![
-            (
-                "fn main() {\n    println!(\"Hello World\");\n}",
-                "rust",
-                "code_block",
-                0.98,
-                "```rust\nfn main() {\n    println!(\"Hello World\");\n}\n```",
-            ),
-            (
-                "def fetch_users(db):\n    return db.query('SELECT * FROM users')",
-                "python",
-                "code_block",
-                0.95,
-                "```python\ndef fetch_users(db):\n    return db.query('SELECT * FROM users')\n```",
-            ),
-            (
-                "export const calculateTotal = (items: CartItem[]): number => items.reduce((sum, item) => sum + item.price, 0);",
-                "typescript",
-                "code_block",
-                0.97,
-                "```typescript\nexport const calculateTotal = (items: CartItem[]): number => items.reduce((sum, item) => sum + item.price, 0);\n```",
-            ),
-            (
-                "SELECT u.id, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id;",
-                "sql",
-                "code_block",
-                0.99,
-                "```sql\nSELECT u.id, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id;\n```",
-            ),
-            (
-                "cargo build --release && cargo test --bin bolo",
-                "bash",
-                "code_block",
-                0.92,
-                "```bash\ncargo build --release && cargo test --bin bolo\n```",
-            ),
-            (
-                "<div class=\"container\"><h1 id=\"title\">Welcome</h1></div>",
-                "html_css",
-                "code_block",
-                0.94,
-                "```html\n<div class=\"container\"><h1 id=\"title\">Welcome</h1></div>\n```",
-            ),
-            (
-                ".btn-primary { background-color: #3b82f6; border-radius: 6px; padding: 8px 16px; }",
-                "html_css",
-                "code_block",
-                0.91,
-                "```css\n.btn-primary { background-color: #3b82f6; border-radius: 6px; padding: 8px 16px; }\n```",
-            ),
-            (
-                "{\"status\": \"success\", \"code\": 200, \"data\": [1, 2, 3]}",
-                "json",
-                "code_block",
-                0.96,
-                "```json\n{\"status\": \"success\", \"code\": 200, \"data\": [1, 2, 3]}\n```",
-            ),
-            (
-                "std::vector<int> nums = {1, 2, 3};\nfor (auto n : nums) std::cout << n << std::endl;",
-                "c_cpp",
-                "code_block",
-                0.95,
-                "```cpp\nstd::vector<int> nums = {1, 2, 3};\nfor (auto n : nums) std::cout << n << std::endl;\n```",
-            ),
-        ];
-
-        let mut formatting_results = Vec::new();
-
-        for (input_text, lang, layout, prob, expected_output) in test_cases {
-            let mock_response = serde_json::json!({
-                "answers": {
-                    "is_code": { "type": "noul", "noul": prob },
-                    "language": { "type": "choice", "choice": lang },
-                    "layout": { "type": "choice", "choice": layout }
-                }
-            });
-            let decision = parse_decision_response(&mock_response).expect("Must parse response");
-            assert_eq!(decision.is_code, prob >= 0.5 || layout == "code_block");
-            assert_eq!(decision.language, lang);
-            assert_eq!(decision.layout, layout);
-
-            let formatted = format_with_jev_decision(input_text, &decision);
-            assert_eq!(formatted, expected_output);
-
-            formatting_results.push(serde_json::json!({
-                "input": input_text,
-                "detected_language": decision.language,
-                "markdown_tag": map_jev_language(&decision.language, input_text),
-                "is_code": decision.is_code,
-                "probability": decision.code_probability,
-                "layout": decision.layout,
-                "formatted_output": formatted
-            }));
-        }
-
-        // 3. Layout determinations: Bullet list with leading punctuation (.env / .NET) preservation
-        let bullet_input =
-            ".env file setup\n.NET 8 SDK install\n1. Run migrations\n- Launch local server";
-        let bullet_dec = JevFormattingDecision {
-            is_code: false,
-            code_probability: 0.04,
-            language: "other".to_string(),
-            layout: "bullet_list".to_string(),
-        };
-        let bullet_formatted = format_with_jev_decision(bullet_input, &bullet_dec);
-        assert_eq!(
-            bullet_formatted,
-            "- .env file setup\n- .NET 8 SDK install\n- Run migrations\n- Launch local server"
-        );
-
-        // 4. Layout determinations: Task list
-        let task_input = "first verify unit tests\n[x] update documentation\n- [ ] cut new release";
-        let task_dec = JevFormattingDecision {
-            is_code: false,
-            code_probability: 0.02,
-            language: "other".to_string(),
-            layout: "task_list".to_string(),
-        };
-        let task_formatted = format_with_jev_decision(task_input, &task_dec);
-        assert_eq!(
-            task_formatted,
-            "- [ ] first verify unit tests\n- [x] update documentation\n- [ ] cut new release"
-        );
-
-        // 5. Layout determinations: Multi-paragraph prose
-        // 5a. Cue-based paragraph separation (spoken "new paragraph" cue stripped and joined with \n\n)
-        let multi_para_cue_input = "First section discusses system design. new paragraph Second section covers benchmarks.";
-        let multi_dec = JevFormattingDecision {
-            is_code: false,
-            code_probability: 0.01,
-            language: "other".to_string(),
-            layout: "multi_paragraph".to_string(),
-        };
-        let multi_cue_formatted = format_with_jev_decision(multi_para_cue_input, &multi_dec);
-        assert_eq!(
-            multi_cue_formatted,
-            "First section discusses system design.\n\nSecond section covers benchmarks."
-        );
-
-        // 5b. Line-based paragraph separation
-        let multi_para_lines_input =
-            "Architecture overview and motivation.\nImplementation details and benchmarks.";
-        let multi_lines_formatted = format_with_jev_decision(multi_para_lines_input, &multi_dec);
-        assert_eq!(
-            multi_lines_formatted,
-            "Architecture overview and motivation.\n\nImplementation details and benchmarks."
-        );
-
-        // 6. Fallback mechanisms
-        let smart_code_sample = "const calculate = (a, b) => a + b;\nreturn calculate(1, 2);";
-        // When Jev decision is absent, falls back to smart_code
-        let fallback_formatted = format_with_fallback(smart_code_sample, None, true);
-        assert_eq!(fallback_formatted, format!("```\n{smart_code_sample}\n```"));
-        // When smart_code is disabled, remains untouched
-        let disabled_formatted = format_with_fallback(smart_code_sample, None, false);
-        assert_eq!(disabled_formatted, smart_code_sample);
-
-        if let Some(dir) = get_evidence_dir() {
-            let evidence = serde_json::json!({
-                "feature": "Jev Real-Time Semantic Decision Engine",
-                "model": DEFAULT_MODEL,
-                "verified": true,
-                "code_classification_and_tagging": formatting_results,
-                "semantic_layout_structuring": {
-                    "bullet_list": {
-                        "input": bullet_input,
-                        "output": bullet_formatted,
-                        "preserves_punctuation_prefixes": true
-                    },
-                    "task_list": {
-                        "input": task_input,
-                        "output": task_formatted
-                    },
-                    "multi_paragraph": {
-                        "cue_input": multi_para_cue_input,
-                        "cue_output": multi_cue_formatted,
-                        "lines_input": multi_para_lines_input,
-                        "lines_output": multi_lines_formatted
-                    }
-                },
-                "fallback_behavior": {
-                    "with_smart_code_fallback": fallback_formatted,
-                    "raw_when_smart_code_disabled": disabled_formatted
-                }
-            });
-            let _ = std::fs::write(
-                dir.join("jev_semantic_engine_validation.json"),
-                serde_json::to_string_pretty(&evidence).unwrap(),
-            );
-        }
-    }
-
-    #[test]
-    fn test_feature_quick_splice_and_mixed_speech_formatting() {
-        use crate::daemon::apply_voice_clipboard_triggers_with;
-        use crate::stt::whisper::is_decoding_failure;
-        use crate::userdata::sanitize_vocabulary_term;
-        use crate::vocab::{
-            assemble_transcript_pieces, detect_code_language, format_smart_code,
-            isolate_embedded_code, TranscriptPiece,
-        };
-
-        // 1. End-to-end multi-piece assembly: Speech before -> Spliced code -> Speech after
-        let speech_before = "Here is the refactored database handler function:";
-        let inserted_code = "pub async fn query_user_records(pool: &Pool, user_id: i64) -> Result<Vec<UserRecord>, Error> {\n    sqlx::query_as!(UserRecord, \"SELECT id, name, email FROM users WHERE id = $1\", user_id)\n        .fetch_all(pool)\n        .await\n}";
-        let speech_after = "Please run the integration test suite and verify connection pooling.";
-
+        let leap_year = "year = 2000\n\n# divided by 400 is leap year\n\
+                         if (year % 400 == 0) and (year % 100 == 0):\n    print(\"leap\")\n\
+                         else:\n    print(\"not leap\")";
         let pieces = vec![
-            TranscriptPiece::Spoken(speech_before.to_string()),
-            TranscriptPiece::Inserted(inserted_code.to_string()),
-            TranscriptPiece::Spoken(speech_after.to_string()),
+            TranscriptPiece::Spoken("I want to see if this works or not.".to_string()),
+            TranscriptPiece::Inserted(leap_year.to_string()),
+            TranscriptPiece::Spoken("I've spliced in something.".to_string()),
         ];
+        let plan = Plan::new(&pieces, options);
 
-        let assembled = assemble_transcript_pieces(&pieces, true);
-        let expected_assembled =
-            format!("{speech_before}\n\n```rust\n{inserted_code}\n```\n\n{speech_after}");
-        assert_eq!(
-            assembled, expected_assembled,
-            "Speech before and after spliced code must be preserved as natural prose outside code fences"
-        );
+        // 1. An obvious paste is settled locally: no Jev request at all.
+        assert!(!plan.needs_jev());
+        assert!(plan.jev_request(Some("Claude"), "jev-latest").is_none());
 
-        // 2. In-line voice clipboard triggers with dollar-sign preservation
-        let voice_trigger_text =
-            "To configure the environment: paste the clipboard and restart the service.";
-        let bash_snippet = "#!/bin/bash\nexport DATABASE_URL=\"postgres://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME\"\necho \"Connecting as $1 on port $PORT\"";
-        let replaced = apply_voice_clipboard_triggers_with(voice_trigger_text, Some(bash_snippet));
+        // 2. Chat apps and terminals get fences; the code is never glued to speech.
+        let fenced = plan.render(None, CodeStyle::Fenced);
+        assert!(fenced.starts_with("I want to see if this works or not.\n\n```python\nyear = 2000"));
+        assert!(fenced.ends_with("```\n\nI've spliced in something."));
 
-        assert!(
-            replaced.contains("$DB_USER:$DB_PASS"),
-            "Regex replacement must not expand or corrupt dollar-sign variable references"
-        );
-        assert!(
-            replaced.contains("$1 on port $PORT"),
-            "Regex replacement must preserve numeric and alphanumeric capture patterns"
-        );
-        assert!(
-            replaced.starts_with("To configure the environment:"),
-            "Speech before trigger must be preserved"
-        );
-        assert!(
-            replaced.ends_with("and restart the service."),
-            "Speech after trigger must be preserved"
-        );
-        assert!(
-            replaced.contains("```bash"),
-            "Spliced bash script must be tagged with bash language fence"
-        );
+        // 3. Editors get the same code without fences.
+        let raw = plan.render(None, CodeStyle::Raw);
+        assert!(!raw.contains("```"));
 
-        // 3. Embedded multi-line code isolation in a single spoken piece
-        let embedded_speech = "Check this Python helper:\ndef calculate_discount(price: float, rate: float) -> float:\n    return price * (1.0 - rate)\nMake sure rate is between 0 and 1.";
-        let isolated = isolate_embedded_code(embedded_speech);
-        let expected_isolated = "Check this Python helper:\n\n```python\ndef calculate_discount(price: float, rate: float) -> float:\n    return price * (1.0 - rate)\n```\n\nMake sure rate is between 0 and 1.";
-        assert_eq!(
-            isolated, expected_isolated,
-            "Embedded code lines must be isolated into language-tagged fences without swallowing prose"
+        // 4. The destination decides the style.
+        let cfg = crate::config::FormattingConfig::default();
+        let vscode = ActiveApp {
+            name: Some("Code".to_string()),
+            bundle_id: Some("com.microsoft.VSCode".to_string()),
+        };
+        let claude = ActiveApp {
+            name: Some("Claude".to_string()),
+            bundle_id: Some("com.anthropic.claudefordesktop".to_string()),
+        };
+        assert_eq!(code_style(Some(&vscode), &cfg), CodeStyle::Raw);
+        assert_eq!(code_style(Some(&claude), &cfg), CodeStyle::Fenced);
+
+        // 5. Ambiguous pastes share ONE request, however many there are.
+        let ambiguous = Plan::new(
+            &[
+                TranscriptPiece::Inserted("const x = compute(a, b);".to_string()),
+                TranscriptPiece::Spoken("and".to_string()),
+                TranscriptPiece::Inserted("SELECT id FROM users;".to_string()),
+            ],
+            options,
         );
-
-        let smart_code_formatted = format_smart_code(embedded_speech);
-        assert_eq!(
-            smart_code_formatted, expected_isolated,
-            "format_smart_code must also isolate embedded code when conversational prose surrounds it"
-        );
-
-        // 4. Pre-fenced markdown code pieces and disabled smart_code separation
-        let prefenced_json = "```json\n{\n  \"status\": \"success\",\n  \"count\": 42\n}\n```";
-        let pieces_prefenced = vec![
-            TranscriptPiece::Spoken("API returned the following payload:".to_string()),
-            TranscriptPiece::Inserted(prefenced_json.to_string()),
-            TranscriptPiece::Spoken("All assertions succeeded.".to_string()),
-        ];
-        let assembled_no_smart_code = assemble_transcript_pieces(&pieces_prefenced, false);
-        assert_eq!(
-            assembled_no_smart_code,
-            format!("API returned the following payload:\n\n{prefenced_json}\n\nAll assertions succeeded."),
-            "Pre-fenced code blocks must be separated by double newlines even when smart_code is disabled"
-        );
-        assert!(
-            !assembled_no_smart_code.contains("````"),
-            "Pre-fenced code must never be double-fenced"
-        );
-
-        // 5. Language detection matrix across supported languages
-        let lang_samples = vec![
-            ("const x: number = 42;\nconsole.log(x);", "typescript"),
-            ("function add(a, b) {\n    return a + b;\n}", "javascript"),
-            ("def run():\n    print('hello')", "python"),
-            ("fn main() {\n    println!(\"hi\");\n}", "rust"),
-            ("SELECT id, name FROM users WHERE active = true;", "sql"),
-            ("#!/bin/bash\necho \"hello world\"", "bash"),
-            ("<div><span>Hello World</span></div>", "html"),
-            (
-                ".container {\n    display: flex;\n    color: red;\n}",
-                "css",
-            ),
-            ("{\"name\": \"bolo\", \"version\": \"0.1.0\"}", "json"),
-            (
-                "#include <iostream>\nint main() { std::cout << 42; return 0; }",
-                "cpp",
-            ),
-        ];
-
-        let mut lang_detection_results = Vec::new();
-        for (snippet, expected_lang) in lang_samples {
-            let detected = detect_code_language(snippet);
-            assert_eq!(
-                detected,
-                Some(expected_lang),
-                "Failed to detect language {expected_lang} for snippet: {snippet}"
-            );
-            lang_detection_results.push(serde_json::json!({
-                "snippet": snippet,
-                "detected_language": detected
-            }));
-        }
-
-        // 6. User vocabulary term sanitization and whisper decoding failure detection
-        let raw_vocab_terms = vec![
-            "Bloc-inv.",
-            "Bloc-",
-            "-Bloc",
-            "Bloc-.",
-            "PostgreSQL-",
-            "Rust",
-            "---",
-        ];
-        let sanitized_terms: Vec<String> = raw_vocab_terms
-            .iter()
-            .map(|t| sanitize_vocabulary_term(t))
-            .collect();
-        assert_eq!(
-            sanitized_terms,
-            vec!["Bloc-inv", "Bloc", "Bloc", "Bloc", "PostgreSQL", "Rust", ""]
-        );
-
-        assert!(is_decoding_failure(""));
-        assert!(is_decoding_failure("   "));
-        assert!(is_decoding_failure("-"));
-        assert!(is_decoding_failure("  -  "));
-        assert!(!is_decoding_failure("fn main()"));
+        let request = ambiguous.jev_request(Some("Claude"), "jev-latest").unwrap();
+        assert_eq!(request["questions"].as_object().unwrap().len(), 4);
 
         if let Some(dir) = get_evidence_dir() {
             let evidence = serde_json::json!({
-                "feature": "Clipboard Quick-Splice & Mixed Speech Formatting Fix",
+                "feature": "Dictation formatting pipeline (local first, at most one Jev request)",
                 "verified": true,
-                "scenarios": {
-                    "multi_piece_splice": {
-                        "speech_before": speech_before,
-                        "spliced_code": inserted_code,
-                        "speech_after": speech_after,
-                        "assembled_result": assembled,
-                        "speech_before_preserved": assembled.starts_with(speech_before),
-                        "speech_after_preserved": assembled.ends_with(speech_after),
-                        "proper_fence_separation": assembled.contains("\n\n```rust\n")
-                    },
-                    "voice_trigger_splice": {
-                        "input_text": voice_trigger_text,
-                        "clipboard_bash": bash_snippet,
-                        "result": replaced,
-                        "preserves_dollar_vars": !replaced.contains("postgres://:@") && replaced.contains("$DB_USER:$DB_PASS")
-                    },
-                    "embedded_prose_and_code": {
-                        "input": embedded_speech,
-                        "output": isolated
-                    },
-                    "prefenced_and_smart_code_disabled": {
-                        "input_pieces": ["API returned the following payload:", prefenced_json, "All assertions succeeded."],
-                        "output": assembled_no_smart_code,
-                        "no_double_fencing": !assembled_no_smart_code.contains("````")
-                    },
-                    "language_detection_matrix": lang_detection_results,
-                    "vocabulary_sanitization": {
-                        "raw": raw_vocab_terms,
-                        "sanitized": sanitized_terms
-                    },
-                    "whisper_decoding_failure_filter": {
-                        "empty_string_flagged": is_decoding_failure(""),
-                        "single_dash_flagged": is_decoding_failure("-"),
-                        "valid_speech_accepted": !is_decoding_failure("fn main()")
-                    }
-                }
+                "leap_year_fenced": fenced,
+                "leap_year_raw": raw,
+                "jev_requests_for_obvious_paste": 0,
+                "batched_request_for_two_ambiguous_pastes": request,
             });
             let _ = std::fs::write(
-                dir.join("quick_splice_and_mixed_speech_formatting_validation.json"),
+                dir.join("dictation_formatting_pipeline.json"),
                 serde_json::to_string_pretty(&evidence).unwrap(),
             );
         }

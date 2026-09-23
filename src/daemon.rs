@@ -249,44 +249,41 @@ fn copy_selection() {
     }
 }
 
-fn apply_voice_clipboard_triggers(text: &str) -> String {
-    apply_voice_clipboard_triggers_with(text, read_clipboard().as_deref())
+fn split_voice_clipboard_triggers(text: &str) -> Vec<crate::vocab::TranscriptPiece> {
+    split_voice_clipboard_triggers_with(text, read_clipboard().as_deref())
 }
 
-/// Replaces voice clipboard trigger phrases (such as "paste clipboard" or "insert the link")
-/// with the clipboard contents, formatting code snippets into markdown code blocks with
-/// detected language tags while isolating conversational prose.
-pub fn apply_voice_clipboard_triggers_with(text: &str, clip: Option<&str>) -> String {
-    let Ok(re) =
+/// Splits speech at voice clipboard trigger phrases ("paste clipboard",
+/// "insert the link"), inserting the clipboard contents as a pasted piece so
+/// it is formatted exactly like a hotkey splice.
+pub fn split_voice_clipboard_triggers_with(
+    text: &str,
+    clip: Option<&str>,
+) -> Vec<crate::vocab::TranscriptPiece> {
+    use crate::vocab::TranscriptPiece;
+    static TRIGGER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?i)\s*\b(paste|insert)\s+(?:the\s+)?(?:clipboard|link|url)\b[.,]?\s*")
-    else {
-        return text.to_string();
+            .unwrap()
+    });
+    let clip = clip.map(str::trim).filter(|c| !c.is_empty());
+    let Some(clip) = clip.filter(|_| TRIGGER.is_match(text)) else {
+        return vec![TranscriptPiece::Spoken(text.to_string())];
     };
-    if re.is_match(text) {
-        if let Some(clip_text) = clip {
-            let trimmed = clip_text.trim();
-            if !trimmed.is_empty() {
-                let replacement =
-                    if crate::vocab::is_code_snippet(trimmed) || trimmed.contains('\n') {
-                        let tag = crate::vocab::detect_code_language(trimmed).unwrap_or("");
-                        if trimmed.starts_with("```") {
-                            format!("\n\n{}\n\n", trimmed)
-                        } else if tag.is_empty() {
-                            format!("\n\n```\n{}\n```\n\n", trimmed)
-                        } else {
-                            format!("\n\n```{tag}\n{}\n```\n\n", trimmed)
-                        }
-                    } else {
-                        trimmed.to_string()
-                    };
-                let replaced = re
-                    .replace_all(text, regex::NoExpand(&replacement))
-                    .to_string();
-                return crate::vocab::isolate_embedded_code(&replaced);
-            }
+    let mut pieces = Vec::new();
+    let mut last = 0;
+    for m in TRIGGER.find_iter(text) {
+        let before = text[last..m.start()].trim();
+        if !before.is_empty() {
+            pieces.push(TranscriptPiece::Spoken(before.to_string()));
         }
+        pieces.push(TranscriptPiece::Inserted(clip.to_string()));
+        last = m.end();
     }
-    crate::vocab::isolate_embedded_code(text)
+    let after = text[last..].trim();
+    if !after.is_empty() {
+        pieces.push(TranscriptPiece::Spoken(after.to_string()));
+    }
+    pieces
 }
 
 pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
@@ -665,6 +662,63 @@ async fn inject_text(
     }
 }
 
+/// Formats a finished dictation: local checks first, then at most one Jev
+/// request for whatever they could not settle, rendered for the frontmost app.
+async fn format_dictation(
+    pieces: &[crate::vocab::TranscriptPiece],
+    active_app: Option<&crate::vocab::ActiveApp>,
+    cfg: &Config,
+) -> String {
+    let plan =
+        crate::format::Plan::new(pieces, crate::format::Options::from_config(&cfg.formatting));
+    let style = crate::format::code_style(active_app, &cfg.formatting);
+    let target = if cfg.formatting.jev.enabled && plan.needs_jev() {
+        cfg.formatting.jev.resolve()
+    } else {
+        None
+    };
+    let Some(target) = target else {
+        eprintln!("[jev] {} calls=0 style={style:?}", plan.summary());
+        crate::format::record(None);
+        return plan.render(None, style);
+    };
+    let app_name = active_app.and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
+    let request = plan
+        .jev_request(app_name, &target.model)
+        .expect("plan.needs_jev() guarantees a request");
+    let started = Instant::now();
+    let result = crate::jev::evaluate(
+        &request,
+        &target.api_key,
+        cfg.formatting.jev.timeout_ms,
+        target.provider,
+    )
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let answers = match result {
+        Ok(raw) => {
+            let answers = plan.parse_answers(&raw);
+            eprintln!(
+                "[jev] {} calls=1 latency={latency_ms}ms style={style:?} answers={raw}",
+                plan.summary()
+            );
+            Some(answers)
+        }
+        Err(e) => {
+            eprintln!(
+                "[jev] {} calls=1 latency={latency_ms}ms style={style:?} fallback: {e:#}",
+                plan.summary()
+            );
+            None
+        }
+    };
+    crate::format::record(Some((latency_ms, answers.is_some())));
+    plan.render(answers.as_ref(), style)
+}
+
+/// STT provider used, final text, last audio id and total audio seconds.
+type Transcribed = (&'static str, String, Option<String>, f64);
+
 fn finalize(
     runtime: &tokio::runtime::Runtime,
     pieces: &mut Vec<Piece>,
@@ -679,259 +733,88 @@ fn finalize(
     }
     // notify-rust's blocking show() cannot run inside block_on (it spins up
     // its own runtime), so the async block only returns what to say.
-    let outcome: anyhow::Result<Option<(&'static str, String, Option<String>, f64)>> = runtime
-        .block_on(async {
-            let mut resolved_pieces: Vec<crate::vocab::TranscriptPiece> = Vec::new();
-            let mut last_audio_id: Option<String> = None;
-            let mut total_duration_s = 0.0;
-            for piece in pieces.drain(..) {
-                match piece {
-                    Piece::Spoken {
-                        handle,
-                        audio_id,
-                        duration_s,
-                    } => {
-                        let transcript = handle.await.context("transcription task panicked")??;
-                        let text = transcript.text.trim().to_string();
-                        if !text.is_empty() {
-                            let enriched = apply_voice_clipboard_triggers(&text);
-                            resolved_pieces.push(crate::vocab::TranscriptPiece::Spoken(enriched));
-                            last_audio_id = Some(audio_id);
-                            total_duration_s += duration_s;
-                        }
+    let outcome: anyhow::Result<Option<Transcribed>> = runtime.block_on(async {
+        let mut resolved_pieces: Vec<crate::vocab::TranscriptPiece> = Vec::new();
+        let mut last_audio_id: Option<String> = None;
+        let mut total_duration_s = 0.0;
+        for piece in pieces.drain(..) {
+            match piece {
+                Piece::Spoken {
+                    handle,
+                    audio_id,
+                    duration_s,
+                } => {
+                    let transcript = handle.await.context("transcription task panicked")??;
+                    let text = transcript.text.trim().to_string();
+                    if !text.is_empty() {
+                        resolved_pieces.extend(split_voice_clipboard_triggers(&text));
+                        last_audio_id = Some(audio_id);
+                        total_duration_s += duration_s;
                     }
-                    Piece::Inserted(text) => {
-                        let trimmed = text.trim().to_string();
-                        if !trimmed.is_empty() {
-                            resolved_pieces.push(crate::vocab::TranscriptPiece::Inserted(trimmed));
-                        }
+                }
+                Piece::Inserted(text) => {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        resolved_pieces.push(crate::vocab::TranscriptPiece::Inserted(trimmed));
                     }
                 }
             }
-            if resolved_pieces.is_empty() {
-                return Ok(None);
+        }
+        if resolved_pieces.is_empty() {
+            return Ok(None);
+        }
+
+        let active_app = crate::vocab::detect_frontmost_app();
+        let user_terms = if cfg.vocab.enabled {
+            crate::userdata::read_user_vocabulary_terms()
+        } else {
+            Vec::new()
+        };
+
+        let pieces: Vec<crate::vocab::TranscriptPiece> = resolved_pieces
+            .into_iter()
+            .map(|piece| match piece {
+                crate::vocab::TranscriptPiece::Spoken(s) if cfg.vocab.enabled => {
+                    crate::vocab::TranscriptPiece::Spoken(crate::vocab::clean_text(
+                        &s,
+                        active_app.as_ref(),
+                        &user_terms,
+                    ))
+                }
+                other => other,
+            })
+            .collect();
+        let text = format_dictation(&pieces, active_app.as_ref(), cfg).await;
+
+        eprintln!(
+            "[assemble] pieces={} chars={}",
+            n_pieces,
+            text.chars().count()
+        );
+        println!("[result]  {text}");
+
+        let images = shared.lock().unwrap().captured_context_images.clone();
+
+        let t_inject = Instant::now();
+        let used = inject_text(&text, injectors, cfg, &images).await?;
+        // Safety net: the transcript is always on the clipboard too, so a
+        // missed portal paste never means digging through daemon logs. The
+        // text was already typed, so a copy failure is non-fatal.
+        if used == "portal" {
+            match injectors.clipboard_inject(&text).await {
+                Ok(()) => eprintln!("[clipboard] copied chars={}", text.chars().count()),
+                Err(e) => eprintln!("[clipboard] copy failed (text was typed): {e:#}"),
             }
-
-            let active_app = crate::vocab::detect_frontmost_app();
-            let user_terms = if cfg.vocab.enabled {
-                crate::userdata::read_user_vocabulary_terms()
-            } else {
-                Vec::new()
-            };
-
-            let has_inserted = resolved_pieces
-                .iter()
-                .any(|p| matches!(p, crate::vocab::TranscriptPiece::Inserted(_)));
-
-            let text = if has_inserted {
-                let mut processed_pieces = Vec::new();
-                for piece in resolved_pieces {
-                    match piece {
-                        crate::vocab::TranscriptPiece::Spoken(mut s) => {
-                            if cfg.vocab.enabled {
-                                s = crate::vocab::clean_text(&s, active_app.as_ref(), &user_terms);
-                            }
-                            processed_pieces.push(crate::vocab::TranscriptPiece::Spoken(s));
-                        }
-                        crate::vocab::TranscriptPiece::Inserted(snippet) => {
-                            let formatted_snippet = if cfg.formatting.jev.enabled {
-                                if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
-                                    let app_name = active_app
-                                        .as_ref()
-                                        .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                                    let dec_res =
-                                        if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL {
-                                            crate::jev::decide_formatting(
-                                                &snippet,
-                                                app_name,
-                                                &api_key,
-                                                cfg.formatting.jev.timeout_ms,
-                                            )
-                                            .await
-                                        } else {
-                                            crate::jev::decide_formatting_with_model(
-                                                &snippet,
-                                                app_name,
-                                                &api_key,
-                                                cfg.formatting.jev.timeout_ms,
-                                                &cfg.formatting.jev.model,
-                                            )
-                                            .await
-                                        };
-                                    if let Ok(dec) = dec_res {
-                                        if dec.is_code || dec.layout == "code_block" {
-                                            if snippet.starts_with("```") {
-                                                snippet.clone()
-                                            } else {
-                                                let tag = crate::vocab::map_jev_language(
-                                                    &dec.language,
-                                                    &snippet,
-                                                );
-                                                let tag = if tag.is_empty() {
-                                                    crate::vocab::detect_code_language(&snippet)
-                                                        .unwrap_or("")
-                                                } else {
-                                                    &tag
-                                                };
-                                                if tag.is_empty() {
-                                                    format!("```\n{}\n```", snippet)
-                                                } else {
-                                                    format!("```{tag}\n{}\n```", snippet)
-                                                }
-                                            }
-                                        } else {
-                                            snippet.clone()
-                                        }
-                                    } else if cfg.formatting.smart_code
-                                        && (crate::vocab::is_code_snippet(&snippet)
-                                            || snippet.starts_with("```"))
-                                    {
-                                        let tag = crate::vocab::detect_code_language(&snippet)
-                                            .unwrap_or("");
-                                        if snippet.starts_with("```") {
-                                            snippet.clone()
-                                        } else if tag.is_empty() {
-                                            format!("```\n{}\n```", snippet)
-                                        } else {
-                                            format!("```{tag}\n{}\n```", snippet)
-                                        }
-                                    } else {
-                                        snippet.clone()
-                                    }
-                                } else if cfg.formatting.smart_code
-                                    && (crate::vocab::is_code_snippet(&snippet)
-                                        || snippet.starts_with("```"))
-                                {
-                                    let tag =
-                                        crate::vocab::detect_code_language(&snippet).unwrap_or("");
-                                    if snippet.starts_with("```") {
-                                        snippet.clone()
-                                    } else if tag.is_empty() {
-                                        format!("```\n{}\n```", snippet)
-                                    } else {
-                                        format!("```{tag}\n{}\n```", snippet)
-                                    }
-                                } else {
-                                    snippet.clone()
-                                }
-                            } else if cfg.formatting.smart_code
-                                && (crate::vocab::is_code_snippet(&snippet)
-                                    || snippet.starts_with("```"))
-                            {
-                                let tag =
-                                    crate::vocab::detect_code_language(&snippet).unwrap_or("");
-                                if snippet.starts_with("```") {
-                                    snippet.clone()
-                                } else if tag.is_empty() {
-                                    format!("```\n{}\n```", snippet)
-                                } else {
-                                    format!("```{tag}\n{}\n```", snippet)
-                                }
-                            } else {
-                                snippet.clone()
-                            };
-                            processed_pieces
-                                .push(crate::vocab::TranscriptPiece::Inserted(formatted_snippet));
-                        }
-                    }
-                }
-                crate::vocab::assemble_transcript_pieces(
-                    &processed_pieces,
-                    cfg.formatting.smart_code,
-                )
-            } else {
-                let spoken_texts: Vec<String> = resolved_pieces
-                    .into_iter()
-                    .filter_map(|p| match p {
-                        crate::vocab::TranscriptPiece::Spoken(s) => Some(s),
-                        _ => None,
-                    })
-                    .collect();
-                let mut full_text = spoken_texts.join(" ");
-                if cfg.vocab.enabled {
-                    full_text =
-                        crate::vocab::clean_text(&full_text, active_app.as_ref(), &user_terms);
-                }
-
-                let jev_decision = if cfg.formatting.jev.enabled {
-                    if let Some(api_key) = cfg.formatting.jev.resolve_api_key() {
-                        let app_name = active_app
-                            .as_ref()
-                            .and_then(|a| a.name.as_deref().or(a.bundle_id.as_deref()));
-                        let decision_res = if cfg.formatting.jev.model == crate::jev::DEFAULT_MODEL
-                        {
-                            crate::jev::decide_formatting(
-                                &full_text,
-                                app_name,
-                                &api_key,
-                                cfg.formatting.jev.timeout_ms,
-                            )
-                            .await
-                        } else {
-                            crate::jev::decide_formatting_with_model(
-                                &full_text,
-                                app_name,
-                                &api_key,
-                                cfg.formatting.jev.timeout_ms,
-                                &cfg.formatting.jev.model,
-                            )
-                            .await
-                        };
-                        match decision_res {
-                            Ok(dec) => {
-                                eprintln!(
-                                    "[jev] decision: is_code={} ({:.2}) lang={} layout={}",
-                                    dec.is_code, dec.code_probability, dec.language, dec.layout
-                                );
-                                Some(dec)
-                            }
-                            Err(e) => {
-                                eprintln!("[jev] decision skipped (falling back): {e:#}");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                crate::vocab::format_with_fallback(
-                    &full_text,
-                    jev_decision.as_ref(),
-                    cfg.formatting.smart_code,
-                )
-            };
-
-            eprintln!(
-                "[assemble] pieces={} chars={}",
-                n_pieces,
-                text.chars().count()
-            );
-            println!("[result]  {text}");
-
-            let images = shared.lock().unwrap().captured_context_images.clone();
-
-            let t_inject = Instant::now();
-            let used = inject_text(&text, injectors, cfg, &images).await?;
-            // Safety net: the transcript is always on the clipboard too, so a
-            // missed portal paste never means digging through daemon logs. The
-            // text was already typed, so a copy failure is non-fatal.
-            if used == "portal" {
-                match injectors.clipboard_inject(&text).await {
-                    Ok(()) => eprintln!("[clipboard] copied chars={}", text.chars().count()),
-                    Err(e) => eprintln!("[clipboard] copy failed (text was typed): {e:#}"),
-                }
-            }
-            eprintln!(
-                "[inject]  method={} chars={} inject_ms={} finalize→done_ms={}",
-                used,
-                text.chars().count(),
-                t_inject.elapsed().as_millis(),
-                t_end.elapsed().as_millis()
-            );
-            Ok(Some((used, text, last_audio_id, total_duration_s)))
-        });
+        }
+        eprintln!(
+            "[inject]  method={} chars={} inject_ms={} finalize→done_ms={}",
+            used,
+            text.chars().count(),
+            t_inject.elapsed().as_millis(),
+            t_end.elapsed().as_millis()
+        );
+        Ok(Some((used, text, last_audio_id, total_duration_s)))
+    });
     match &outcome {
         Ok(None) => {
             eprintln!("[skip] no speech detected");
@@ -1292,47 +1175,49 @@ fn handle_client(
 }
 
 #[cfg(test)]
-pub(crate) fn assemble_pieces(
-    pieces: &[crate::vocab::TranscriptPiece],
-    smart_code: bool,
-) -> String {
-    crate::vocab::assemble_transcript_pieces(pieces, smart_code)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::vocab::TranscriptPiece;
 
     #[test]
-    fn test_daemon_multi_piece_assembly_spoken_inserted_spoken() {
+    fn voice_trigger_inserts_clipboard_as_a_pasted_piece() {
+        let text = "Here is the function paste clipboard please review it.";
+        let clip = "def calculate_sum(a, b):\n    return a + b";
+        assert_eq!(
+            split_voice_clipboard_triggers_with(text, Some(clip)),
+            vec![
+                TranscriptPiece::Spoken("Here is the function".to_string()),
+                TranscriptPiece::Inserted(clip.to_string()),
+                TranscriptPiece::Spoken("please review it.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn voice_trigger_keeps_dollar_signs_and_needs_a_clipboard() {
+        let text = "Check this script: paste clipboard and run it.";
+        let clip = "#!/bin/bash\nexport PATH=\"$HOME/bin:$PATH\"\necho $1";
+        let pieces = split_voice_clipboard_triggers_with(text, Some(clip));
+        assert_eq!(pieces[1], TranscriptPiece::Inserted(clip.to_string()));
+        assert_eq!(
+            split_voice_clipboard_triggers_with(text, None),
+            vec![TranscriptPiece::Spoken(text.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn dictation_without_jev_candidates_formats_locally() {
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        cfg.formatting.jev.enabled = true;
         let pieces = vec![
             TranscriptPiece::Spoken("Speech before".to_string()),
             TranscriptPiece::Inserted("const x: number = 42;\nconsole.log(x);".to_string()),
             TranscriptPiece::Spoken("Speech after".to_string()),
         ];
-        let result = assemble_pieces(&pieces, true);
-        let expected = "Speech before\n\n```typescript\nconst x: number = 42;\nconsole.log(x);\n```\n\nSpeech after";
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_daemon_apply_voice_clipboard_triggers_isolates_code() {
-        let text = "Here is the function paste clipboard please review it.";
-        let clip = "def calculate_sum(a, b):\n    return a + b";
-        let result = apply_voice_clipboard_triggers_with(text, Some(clip));
+        let out = format_dictation(&pieces, None, &cfg).await;
         assert_eq!(
-            result,
-            "Here is the function\n\n```python\ndef calculate_sum(a, b):\n    return a + b\n```\n\nplease review it."
+            out,
+            "Speech before\n\n```typescript\nconst x: number = 42;\nconsole.log(x);\n```\n\nSpeech after"
         );
-    }
-
-    #[test]
-    fn test_daemon_apply_voice_clipboard_triggers_preserves_dollar_signs() {
-        let text = "Check this script: paste clipboard and run it.";
-        let clip = "#!/bin/bash\nexport PATH=\"$HOME/bin:$PATH\"\necho $1";
-        let result = apply_voice_clipboard_triggers_with(text, Some(clip));
-        assert!(result.contains("$HOME/bin:$PATH"));
-        assert!(result.contains("echo $1"));
     }
 }

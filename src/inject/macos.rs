@@ -688,7 +688,12 @@ mod tests {
         child.wait().unwrap();
 
         // Perform injection with image and restore enabled
-        let res = inject_macos_blocking("Hello with screenshot", &[temp_png.clone()], true, 50);
+        let res = inject_macos_blocking(
+            "Hello with screenshot",
+            std::slice::from_ref(&temp_png),
+            true,
+            50,
+        );
         assert!(res.is_ok(), "Injection with image failed: {:?}", res);
 
         // Sleep slightly to let the restore thread complete

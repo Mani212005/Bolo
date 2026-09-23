@@ -757,7 +757,7 @@
   }
   
   /* Inputs, Textareas & Clean Flat Selects */
-  input[type="text"], textarea {
+  input[type="text"], input[type="password"], input[type="number"], textarea {
     width: 100%;
     box-sizing: border-box;
     background: var(--surface);
@@ -770,7 +770,7 @@
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input[type="text"]:focus, textarea:focus {
+  input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, textarea:focus {
     border-color: rgba(56, 189, 248, 0.4);
     box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
   }
@@ -1163,14 +1163,34 @@
           Smart Code Pasting
         </div>
         <p class="setting-desc">Automatically detect multi-line programming code and wrap it in triple backtick markdown blocks (```).</p>
-        <div class="setting-row" style="margin-top: 10px;">
-          <div>
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">Format Code Blocks in Markdown</div>
-            <div class="setting-hint">Wraps structured functions, classes, and code syntax in ``` for instant IDE/chat pasting</div>
+            <div class="setting-desc">Wraps structured functions, classes, and code syntax in ``` for instant IDE/chat pasting</div>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="settingSmartCode" checked>
-            <span class="slider"></span>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">Automatic Paragraphs</div>
+            <div class="setting-desc">Long dictations are split into paragraphs at natural topic changes</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingParagraphs" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">Spoken List Cues</div>
+            <div class="setting-desc">Say &quot;bullet points&quot; or &quot;to-do list&quot; to get a list; &quot;first, second, third&quot; asks Jev</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settingListCues" checked>
+            <span class="toggle-slider"></span>
           </label>
         </div>
       </div>
@@ -1182,42 +1202,43 @@
           Jev Real-Time Semantic Engine
           <span id="jevStatusBadge" class="badge" style="margin-left:auto; background:rgba(255,255,255,0.06); color:var(--muted);">Checking…</span>
         </div>
-        <p class="setting-desc">Ultra-fast sub-400ms predictive decision engine using TypeSafe's Jev model on OpenRouter. Distinguishes code vs prose, tags language syntax for code blocks (```rust, ```python, etc.), and layers semantic lists and paragraphs in real time.</p>
+        <p class="setting-desc">Bolo formats locally first and only asks Jev when it can't tell: a paste that might be code, or a spoken numbered list. That is at most one request per dictation, usually none.</p>
+        <div id="jevStats" class="setting-desc" style="margin-top:8px; font-variant-numeric:tabular-nums;">No dictations yet since Bolo started.</div>
         
-        <div class="setting-row" style="margin-top: 10px;">
-          <div>
-            <div class="setting-label">Real-Time Jev Semantic Decisions</div>
-            <div class="setting-hint">Fast predictive language tagging, code/prose boundary classification, and semantic list/paragraph layering</div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">Ask Jev When Unsure</div>
+            <div class="setting-desc">Off: ambiguous pastes stay as-is and numbered lists stay as sentences</div>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="settingJevEnabled" checked>
-            <span class="slider"></span>
+            <span class="toggle-slider"></span>
           </label>
         </div>
 
-        <div class="setting-row" style="margin-top: 10px;">
-          <div>
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">Jev Decision Model</div>
-            <div class="setting-hint">Model identifier on OpenRouter decisions endpoint (default: typesafe/jev-1.13)</div>
+            <div class="setting-desc">Model id; leave empty for the provider default (TypeSafe: jev-latest, OpenRouter: typesafe/jev-1.13)</div>
           </div>
-          <input type="text" id="settingJevModel" value="typesafe/jev-1.13" class="setting-input" style="width:200px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+          <input type="text" id="settingJevModel" value="jev-latest" class="setting-input" style="width:200px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
         </div>
 
-        <div class="setting-row" style="margin-top: 10px;">
-          <div>
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">Decision Timeout (ms)</div>
-            <div class="setting-hint">Maximum latency wait before cleanly falling back to local heuristic format_smart_code (default: 400ms)</div>
+            <div class="setting-desc">How long to wait for Jev before pasting the local result (default: 2500ms)</div>
           </div>
-          <input type="number" id="settingJevTimeout" value="400" min="50" max="5000" class="setting-input" style="width:90px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+          <input type="number" id="settingJevTimeout" value="2500" min="50" max="5000" class="setting-input" style="width:90px; padding:6px 10px; font-size:13px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:6px; color:var(--text);">
         </div>
 
         <div style="margin-top: 14px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-            <label class="setting-label" style="font-size:12.5px;">OpenRouter API Key</label>
+            <label class="setting-label" style="font-size:12.5px;">Jev API Key (TypeSafe or OpenRouter)</label>
             <span id="openrouterKeyStatusBadge" class="badge" style="background:rgba(255,255,255,0.06); color:var(--muted);">Checking…</span>
           </div>
           <div style="display:flex; gap:8px;">
-            <input type="password" id="openrouterApiKeyInput" placeholder="sk-or-…" style="flex:1;">
+            <input type="password" id="openrouterApiKeyInput" placeholder="TypeSafe key, or sk-or-… for OpenRouter" style="flex:1;">
             <button class="action-btn" id="toggleOpenRouterKeyVisibility" title="Show/Hide Key">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
             </button>
@@ -1234,10 +1255,10 @@
         </div>
         <p class="setting-desc">Configure LLM model and API credentials for prompt rewriting and smart structuring.</p>
         
-        <div class="setting-row" style="margin-top: 10px;">
-          <div>
+        <div class="setting-row">
+          <div class="setting-info">
             <div class="setting-label">Enhance LLM Model</div>
-            <div class="setting-hint">Model used to restructure and refine raw voice transcripts</div>
+            <div class="setting-desc">Model used to restructure and refine raw voice transcripts</div>
           </div>
           <select class="setting-select" id="enhanceModelSelect">
             <option value="llama-3.3-70b-versatile">LLaMA-3.3 70B Versatile (Recommended)</option>
@@ -1262,7 +1283,7 @@
 
         <div style="margin-top: 16px;">
           <div class="setting-label" style="font-size:12.5px; margin-bottom:4px;">Custom Enhance Prompt Template</div>
-          <div class="setting-hint" style="margin-bottom:8px;">Custom system prompt instructions for prompt refinement.</div>
+          <div class="setting-desc" style="margin-bottom:8px;">Custom system prompt instructions for prompt refinement.</div>
           <textarea id="enhancePromptInput" rows="4" style="width:100%;" placeholder="Leave empty for built-in prompt optimization defaults…"></textarea>
           <div style="display:flex; justify-content:flex-end; margin-top:8px;">
             <button class="action-btn" id="saveEnhancePrompt">Save Enhance Prompt</button>
@@ -1464,8 +1485,15 @@
     $("settingNotifications").checked = !!state.notifications;
     if ($("settingSmartCode")) $("settingSmartCode").checked = state.smart_code !== false;
     if ($("settingJevEnabled")) $("settingJevEnabled").checked = state.jev_enabled !== false;
-    if ($("settingJevModel")) $("settingJevModel").value = state.jev_model || "typesafe/jev-1.13";
-    if ($("settingJevTimeout")) $("settingJevTimeout").value = state.jev_timeout_ms || 400;
+    if ($("settingJevModel")) $("settingJevModel").value = state.jev_model || "jev-latest";
+    if ($("settingJevTimeout")) $("settingJevTimeout").value = state.jev_timeout_ms || 2500;
+    if ($("settingParagraphs")) $("settingParagraphs").checked = state.paragraphs !== false;
+    if ($("settingListCues")) $("settingListCues").checked = state.list_cues !== false;
+    const st = state.jev_stats;
+    if ($("jevStats") && st && st.dictations > 0) {
+      const avg = st.avg_latency_ms != null ? `, avg ${st.avg_latency_ms}ms` : "";
+      $("jevStats").textContent = `Since Bolo started: ${st.dictations} dictations, ${st.local_only} formatted locally, ${st.calls} Jev calls${avg}, ${st.fallbacks} fallbacks.`;
+    }
 
     const jevBadge = $("jevStatusBadge");
     if (jevBadge) {
@@ -1473,8 +1501,8 @@
         jevBadge.textContent = "Disabled";
         jevBadge.style.background = "rgba(255, 255, 255, 0.08)";
         jevBadge.style.color = "var(--text-secondary)";
-      } else if (state.has_openrouter_api_key) {
-        jevBadge.textContent = "Active (Sub-400ms)";
+      } else if (state.has_jev_api_key ?? state.has_openrouter_api_key) {
+        jevBadge.textContent = "Active";
         jevBadge.style.background = "rgba(16, 185, 129, 0.18)";
         jevBadge.style.color = "#34d399";
       } else {
@@ -1486,8 +1514,8 @@
 
     const orBadge = $("openrouterKeyStatusBadge");
     if (orBadge) {
-      if (state.has_openrouter_api_key) {
-        orBadge.textContent = "Configured";
+      if (state.has_jev_api_key ?? state.has_openrouter_api_key) {
+        orBadge.textContent = state.jev_provider === "openrouter" ? "Configured (OpenRouter)" : "Configured (TypeSafe)";
         orBadge.style.background = "rgba(16, 185, 129, 0.18)";
         orBadge.style.color = "#34d399";
       } else {
@@ -2106,8 +2134,10 @@
       notifications: $("settingNotifications").checked,
       smart_code: $("settingSmartCode") ? $("settingSmartCode").checked : true,
       jev_enabled: $("settingJevEnabled") ? $("settingJevEnabled").checked : true,
-      jev_model: $("settingJevModel") ? $("settingJevModel").value : "typesafe/jev-1.13",
-      jev_timeout_ms: $("settingJevTimeout") ? parseInt($("settingJevTimeout").value, 10) : 400,
+      jev_model: $("settingJevModel") ? $("settingJevModel").value : "",
+      jev_timeout_ms: $("settingJevTimeout") ? parseInt($("settingJevTimeout").value, 10) : 2500,
+      paragraphs: $("settingParagraphs") ? $("settingParagraphs").checked : true,
+      list_cues: $("settingListCues") ? $("settingListCues").checked : true,
       enhance_model: $("enhanceModelSelect") ? $("enhanceModelSelect").value : "llama-3.3-70b-versatile",
     };
     await api("config", { method: "POST", body: JSON.stringify(payload) });
@@ -2120,6 +2150,8 @@
   $("settingNotifications").onchange = saveConfig;
   if ($("settingSmartCode")) $("settingSmartCode").onchange = saveConfig;
   if ($("settingJevEnabled")) $("settingJevEnabled").onchange = saveConfig;
+  if ($("settingParagraphs")) $("settingParagraphs").onchange = saveConfig;
+  if ($("settingListCues")) $("settingListCues").onchange = saveConfig;
   if ($("settingJevModel")) $("settingJevModel").onchange = saveConfig;
   if ($("settingJevTimeout")) $("settingJevTimeout").onchange = saveConfig;
   if ($("enhanceModelSelect")) $("enhanceModelSelect").onchange = saveConfig;
