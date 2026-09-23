@@ -71,8 +71,7 @@ pub fn ensure_model_blocking(name: &str) -> anyhow::Result<PathBuf> {
         while let Some(chunk) = resp.chunk().await? {
             file.write_all(&chunk)?;
             done += chunk.len() as u64;
-            if total > 0 {
-                let pct = done * 100 / total;
+            if let Some(pct) = (done * 100).checked_div(total) {
                 if pct >= last_pct + 5 {
                     last_pct = pct;
                     eprintln!("[model] {pct}% ({done}/{total} bytes)");

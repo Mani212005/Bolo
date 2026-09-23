@@ -34,8 +34,17 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FormattingConfig {
-    /// Automatically format multi-line code blocks in markdown backticks
+    /// Detect pasted code and put it in code blocks.
     pub smart_code: bool,
+    /// Break long dictated prose into paragraphs.
+    pub paragraphs: bool,
+    /// Format lists when asked by name ("todo list", "bullet points") or,
+    /// with Jev's confirmation, when enumerated ("first... second...").
+    pub list_cues: bool,
+    /// Apps (name or bundle id substrings) that get bare code, no fences.
+    pub raw_code_apps: Vec<String>,
+    /// Apps that get ``` fences even if Bolo would treat them as editors.
+    pub fenced_code_apps: Vec<String>,
     #[serde(default)]
     pub jev: JevConfig,
 }
@@ -44,6 +53,10 @@ impl Default for FormattingConfig {
     fn default() -> Self {
         Self {
             smart_code: true,
+            paragraphs: true,
+            list_cues: true,
+            raw_code_apps: Vec::new(),
+            fenced_code_apps: Vec::new(),
             jev: JevConfig::default(),
         }
     }

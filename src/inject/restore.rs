@@ -155,15 +155,15 @@ pub mod macos_pasteboard {
 
     pub fn get_change_count() -> Option<i64> {
         unsafe {
-            let cls_pb = objc_getClass(b"NSPasteboard\0".as_ptr() as *const i8);
-            let sel_gen = sel_registerName(b"generalPasteboard\0".as_ptr() as *const i8);
+            let cls_pb = objc_getClass(c"NSPasteboard".as_ptr());
+            let sel_gen = sel_registerName(c"generalPasteboard".as_ptr());
             let msg_send_id: unsafe extern "C" fn(Id, Sel) -> Id =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let pb: Id = msg_send_id(cls_pb, sel_gen);
             if pb.is_null() {
                 return None;
             }
-            let sel_cc = sel_registerName(b"changeCount\0".as_ptr() as *const i8);
+            let sel_cc = sel_registerName(c"changeCount".as_ptr());
             let msg_send_int: unsafe extern "C" fn(Id, Sel) -> isize =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let cc: isize = msg_send_int(pb, sel_cc);
@@ -173,8 +173,8 @@ pub mod macos_pasteboard {
 
     pub fn snapshot() -> Option<ClipboardSnapshot> {
         unsafe {
-            let cls_pb = objc_getClass(b"NSPasteboard\0".as_ptr() as *const i8);
-            let sel_gen = sel_registerName(b"generalPasteboard\0".as_ptr() as *const i8);
+            let cls_pb = objc_getClass(c"NSPasteboard".as_ptr());
+            let sel_gen = sel_registerName(c"generalPasteboard".as_ptr());
             let msg_send_id: unsafe extern "C" fn(Id, Sel) -> Id =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let pb: Id = msg_send_id(cls_pb, sel_gen);
@@ -184,13 +184,13 @@ pub mod macos_pasteboard {
 
             let change_count = get_change_count();
 
-            let sel_items = sel_registerName(b"pasteboardItems\0".as_ptr() as *const i8);
+            let sel_items = sel_registerName(c"pasteboardItems".as_ptr());
             let items_arr: Id = msg_send_id(pb, sel_items);
             if items_arr.is_null() {
                 return None;
             }
 
-            let sel_count = sel_registerName(b"count\0".as_ptr() as *const i8);
+            let sel_count = sel_registerName(c"count".as_ptr());
             let msg_send_uint: unsafe extern "C" fn(Id, Sel) -> usize =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let count: usize = msg_send_uint(items_arr, sel_count);
@@ -198,12 +198,12 @@ pub mod macos_pasteboard {
                 return None;
             }
 
-            let sel_obj_at = sel_registerName(b"objectAtIndex:\0".as_ptr() as *const i8);
-            let sel_types = sel_registerName(b"types\0".as_ptr() as *const i8);
-            let sel_utf8 = sel_registerName(b"UTF8String\0".as_ptr() as *const i8);
-            let sel_data_for_type = sel_registerName(b"dataForType:\0".as_ptr() as *const i8);
-            let sel_length = sel_registerName(b"length\0".as_ptr() as *const i8);
-            let sel_bytes = sel_registerName(b"bytes\0".as_ptr() as *const i8);
+            let sel_obj_at = sel_registerName(c"objectAtIndex:".as_ptr());
+            let sel_types = sel_registerName(c"types".as_ptr());
+            let sel_utf8 = sel_registerName(c"UTF8String".as_ptr());
+            let sel_data_for_type = sel_registerName(c"dataForType:".as_ptr());
+            let sel_length = sel_registerName(c"length".as_ptr());
+            let sel_bytes = sel_registerName(c"bytes".as_ptr());
 
             let msg_send_obj_at: unsafe extern "C" fn(Id, Sel, usize) -> Id =
                 transmute(objc_msgSend as unsafe extern "C" fn());
@@ -275,8 +275,8 @@ pub mod macos_pasteboard {
 
     pub fn restore(snapshot: &ClipboardSnapshot) -> bool {
         unsafe {
-            let cls_pb = objc_getClass(b"NSPasteboard\0".as_ptr() as *const i8);
-            let sel_gen = sel_registerName(b"generalPasteboard\0".as_ptr() as *const i8);
+            let cls_pb = objc_getClass(c"NSPasteboard".as_ptr());
+            let sel_gen = sel_registerName(c"generalPasteboard".as_ptr());
             let msg_send_id: unsafe extern "C" fn(Id, Sel) -> Id =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let pb: Id = msg_send_id(cls_pb, sel_gen);
@@ -284,20 +284,20 @@ pub mod macos_pasteboard {
                 return false;
             }
 
-            let sel_clear = sel_registerName(b"clearContents\0".as_ptr() as *const i8);
+            let sel_clear = sel_registerName(c"clearContents".as_ptr());
             let msg_send_int: unsafe extern "C" fn(Id, Sel) -> isize =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             msg_send_int(pb, sel_clear);
 
-            let cls_item = objc_getClass(b"NSPasteboardItem\0".as_ptr() as *const i8);
-            let cls_nsstr = objc_getClass(b"NSString\0".as_ptr() as *const i8);
-            let cls_nsdata = objc_getClass(b"NSData\0".as_ptr() as *const i8);
+            let cls_item = objc_getClass(c"NSPasteboardItem".as_ptr());
+            let cls_nsstr = objc_getClass(c"NSString".as_ptr());
+            let cls_nsdata = objc_getClass(c"NSData".as_ptr());
 
-            let sel_alloc = sel_registerName(b"alloc\0".as_ptr() as *const i8);
-            let sel_init = sel_registerName(b"init\0".as_ptr() as *const i8);
-            let sel_str_utf8 = sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const i8);
-            let sel_data_bytes = sel_registerName(b"dataWithBytes:length:\0".as_ptr() as *const i8);
-            let sel_set_data = sel_registerName(b"setData:forType:\0".as_ptr() as *const i8);
+            let sel_alloc = sel_registerName(c"alloc".as_ptr());
+            let sel_init = sel_registerName(c"init".as_ptr());
+            let sel_str_utf8 = sel_registerName(c"stringWithUTF8String:".as_ptr());
+            let sel_data_bytes = sel_registerName(c"dataWithBytes:length:".as_ptr());
+            let sel_set_data = sel_registerName(c"setData:forType:".as_ptr());
 
             let item_alloc = msg_send_id(cls_item, sel_alloc);
             let pb_item: Id = msg_send_id(item_alloc, sel_init);
@@ -323,16 +323,16 @@ pub mod macos_pasteboard {
                 msg_send_set_data(pb_item, sel_set_data, data_ns, type_nsstr);
             }
 
-            let cls_arr = objc_getClass(b"NSMutableArray\0".as_ptr() as *const i8);
-            let sel_arr = sel_registerName(b"array\0".as_ptr() as *const i8);
+            let cls_arr = objc_getClass(c"NSMutableArray".as_ptr());
+            let sel_arr = sel_registerName(c"array".as_ptr());
             let arr: Id = msg_send_id(cls_arr, sel_arr);
 
-            let sel_add = sel_registerName(b"addObject:\0".as_ptr() as *const i8);
+            let sel_add = sel_registerName(c"addObject:".as_ptr());
             let msg_send_add: unsafe extern "C" fn(Id, Sel, Id) =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             msg_send_add(arr, sel_add, pb_item);
 
-            let sel_write = sel_registerName(b"writeObjects:\0".as_ptr() as *const i8);
+            let sel_write = sel_registerName(c"writeObjects:".as_ptr());
             let msg_send_write: unsafe extern "C" fn(Id, Sel, Id) -> bool =
                 transmute(objc_msgSend as unsafe extern "C" fn());
             let ok: bool = msg_send_write(pb, sel_write, arr);
