@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="demo/index.html"><img src="https://img.shields.io/badge/Web%20Demo-Try%20Bolo%20in%20Browser-0284c7?style=for-the-badge&logo=vercel" alt="Try Bolo Web Demo" /></a>
+  <a href="https://demo-ten-ochre-18.vercel.app"><img src="https://img.shields.io/badge/Web%20Demo-Try%20Bolo%20in%20Browser-0284c7?style=for-the-badge&logo=vercel" alt="Try Bolo Web Demo" /></a>
   <a href="https://github.com/Mani212005/Bolo"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="MIT License" /></a>
 </p>
 
