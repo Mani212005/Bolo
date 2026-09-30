@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="demo/index.html"><img src="https://img.shields.io/badge/Web%20Demo-Try%20Bolo%20in%20Browser-0284c7?style=for-the-badge&logo=vercel" alt="Try Bolo Web Demo" /></a>
+  <a href="https://demo-ten-ochre-18.vercel.app"><img src="https://img.shields.io/badge/Web%20Demo-Try%20Bolo%20in%20Browser-0284c7?style=for-the-badge&logo=vercel" alt="Try Bolo Web Demo" /></a>
   <a href="https://github.com/Mani212005/Bolo"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="MIT License" /></a>
 </p>
 
@@ -51,7 +51,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **Custom Vocabulary Biasing**: Add technical terms, proper nouns, and acronyms for accurate phonetic transcription.
 - **Audio File Drag and Drop**: Drop any audio file directly into the dashboard for immediate speech-to-text transcription.
 - **Circle-to-Capture Screen Context**: Hover pointer in a circle (hover only, do not click or press) during dictation to capture and attach screenshots of relevant UI or code.
-- **Browser Web Demo**: Try Bolo online via the hosted web playground (`demo/`).
+- **Browser Web Demo & Launch Page**: Try Bolo online via the hosted launch page and interactive speech playground (`demo/`).
 
 ---
 
@@ -198,4 +198,4 @@ Bolo configuration files live in `~/.config/bolo/`:
 
 ## License
 
-[MIT License](file:///Users/manijoshi/firstmate/projects/Bolo/LICENSE). Free and open source.
+[MIT License](LICENSE). Free and open source.
