@@ -297,6 +297,7 @@ pub struct InjectConfig {
     pub restore_clipboard: bool,
     #[serde(default = "default_restore_delay_ms")]
     pub restore_delay_ms: u64,
+    pub terminal: TerminalPasteConfig,
 }
 
 impl Default for InjectConfig {
@@ -306,6 +307,52 @@ impl Default for InjectConfig {
             type_delay_ms: 2,
             restore_clipboard: true,
             restore_delay_ms: 300,
+            terminal: TerminalPasteConfig::default(),
+        }
+    }
+}
+
+/// How dictation is pasted into terminals. Terminal agents collapse a large
+/// paste into a placeholder, so Bolo sends several small pastes instead.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct TerminalPasteConfig {
+    /// Paste into terminals as several small pastes so agents show the text.
+    pub split_paste: bool,
+    /// Per piece, in UTF-16 units (Claude Code collapses above 800, agy above 1000).
+    pub max_paste_chars: usize,
+    /// Line breaks per piece (Claude Code collapses above 2; keep >= 2 for blank lines).
+    pub max_paste_newlines: usize,
+    /// Pause between pieces so the terminal reads one before the next is copied.
+    pub settle_ms: u64,
+    /// Above this many text pieces, paste once as before.
+    pub max_pieces: usize,
+    /// Also treat these apps (name or bundle id substrings) as terminals.
+    pub extra_apps: Vec<String>,
+    /// Never treat these apps as terminals; wins over everything.
+    pub exclude_apps: Vec<String>,
+}
+
+impl Default for TerminalPasteConfig {
+    fn default() -> Self {
+        Self {
+            split_paste: true,
+            max_paste_chars: 800,
+            max_paste_newlines: 2,
+            settle_ms: 50,
+            max_pieces: 40,
+            extra_apps: Vec::new(),
+            exclude_apps: Vec::new(),
+        }
+    }
+}
+
+impl TerminalPasteConfig {
+    /// The per-piece budget, clamped so every piece can hold at least one unit.
+    pub fn budget(&self) -> crate::inject::split::PasteBudget {
+        crate::inject::split::PasteBudget {
+            max_units: self.max_paste_chars.max(1),
+            max_breaks: self.max_paste_newlines.max(1),
         }
     }
 }
@@ -350,5 +397,83 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
         Ok(toml::from_str(&text)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inject_from(toml_text: &str) -> InjectConfig {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            inject: InjectConfig,
+        }
+        toml::from_str::<Wrapper>(toml_text).unwrap().inject
+    }
+
+    #[test]
+    fn terminal_paste_defaults_when_section_is_absent() {
+        let cfg = inject_from("[inject]\nmethod = \"paste\"\n");
+        assert_eq!(cfg.terminal, TerminalPasteConfig::default());
+        assert!(cfg.terminal.split_paste);
+        assert_eq!(cfg.terminal.max_paste_chars, 800);
+        assert_eq!(cfg.terminal.max_paste_newlines, 2);
+        assert_eq!(cfg.terminal.settle_ms, 50);
+        assert_eq!(cfg.terminal.max_pieces, 40);
+        assert!(cfg.terminal.extra_apps.is_empty());
+        assert!(cfg.terminal.exclude_apps.is_empty());
+        assert_eq!(inject_from("").terminal, TerminalPasteConfig::default());
+        assert_eq!(
+            InjectConfig::default().terminal,
+            TerminalPasteConfig::default()
+        );
+    }
+
+    #[test]
+    fn terminal_paste_custom_values_parse() {
+        let cfg = inject_from(
+            r#"
+            [inject.terminal]
+            split_paste = false
+            max_paste_chars = 150
+            max_paste_newlines = 1
+            settle_ms = 100
+            max_pieces = 10
+            extra_apps = ["com.microsoft.VSCode"]
+            exclude_apps = ["Warp"]
+            "#,
+        );
+        assert!(!cfg.terminal.split_paste);
+        assert_eq!(cfg.terminal.max_paste_chars, 150);
+        assert_eq!(cfg.terminal.max_paste_newlines, 1);
+        assert_eq!(cfg.terminal.settle_ms, 100);
+        assert_eq!(cfg.terminal.max_pieces, 10);
+        assert_eq!(cfg.terminal.extra_apps, vec!["com.microsoft.VSCode"]);
+        assert_eq!(cfg.terminal.exclude_apps, vec!["Warp"]);
+        // The rest of [inject] keeps its defaults.
+        assert!(cfg.restore_clipboard);
+        assert_eq!(cfg.restore_delay_ms, 300);
+    }
+
+    #[test]
+    fn terminal_paste_partial_section_keeps_other_defaults() {
+        let cfg = inject_from("[inject.terminal]\nsettle_ms = 75\n");
+        assert_eq!(cfg.terminal.settle_ms, 75);
+        assert_eq!(cfg.terminal.max_paste_chars, 800);
+        assert!(cfg.terminal.split_paste);
+    }
+
+    #[test]
+    fn terminal_paste_budget_is_clamped_to_at_least_one() {
+        let cfg = inject_from("[inject.terminal]\nmax_paste_chars = 0\nmax_paste_newlines = 0\n");
+        let budget = cfg.terminal.budget();
+        assert_eq!(budget.max_units, 1);
+        assert_eq!(budget.max_breaks, 1);
+
+        let default = TerminalPasteConfig::default().budget();
+        assert_eq!(default.max_units, 800);
+        assert_eq!(default.max_breaks, 2);
     }
 }

@@ -5,6 +5,7 @@ pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod portal;
 pub mod restore;
+pub mod split;
 
 #[async_trait::async_trait]
 pub trait TextInjector: Send + Sync {

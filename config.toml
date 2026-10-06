@@ -38,6 +38,17 @@ sounds = true                       # chime on recording start/stop
 method = "paste"
 type_delay_ms = 2                   # pacing between keystrokes (portal mode)
 
+[inject.terminal]
+# macOS: terminals collapse a big paste into "[Pasted text #1 +4 lines]", so Bolo
+# pastes a dictation there as several small pastes that every agent shows in full.
+# split_paste = true                # false = one paste everywhere, as before
+# max_paste_chars = 800             # per piece, UTF-16 units (Claude Code collapses above 800, agy above 1000)
+# max_paste_newlines = 2            # line breaks per piece (Claude Code collapses above 2; keep >= 2)
+# settle_ms = 50                    # pause between pieces; raise to 100 if a piece is ever lost or doubled
+# max_pieces = 40                   # above this, paste once as before
+# extra_apps = ["com.microsoft.VSCode"]  # also split in these apps (name or bundle id substrings)
+# exclude_apps = []                 # never split in these apps; wins over everything
+
 [enhance]
 # NOTE: Enhance sends the transcript to Groq's LLM even when stt.provider is
 # "whisper" (local). Clicking Enhance is the opt-in.

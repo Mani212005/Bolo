@@ -120,11 +120,22 @@ fn main() -> anyhow::Result<()> {
             let use_jev = args.iter().any(|a| a == "--jev");
             return tokio::runtime::Runtime::new()?.block_on(format_eval::run(&cfg, use_jev));
         }
+        Some("split-preview") => {
+            // bolo split-preview  - stdin text -> JSON array of terminal paste pieces.
+            let terminal = Config::load(&config_path)
+                .map(|cfg| cfg.inject.terminal)
+                .unwrap_or_default();
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            let pieces = inject::split::split_for_terminal(&text, terminal.budget());
+            println!("{}", serde_json::to_string(&pieces)?);
+            return Ok(());
+        }
         Some("record") => {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
         None => {
@@ -797,26 +808,25 @@ mod regression_audit_tests {
 
     #[test]
     fn test_feature_attach_screenshot_to_paste_session_flow() {
-        use crate::inject::macos::{format_image_paths_for_cli, plan_paste_sequence, PasteStep};
+        use crate::config::TerminalPasteConfig;
+        use crate::inject::macos::{format_image_paths_for_cli, plan_pastes, Paste, Target};
+
+        let cfg = TerminalPasteConfig::default();
 
         let mut shared = Shared::default();
 
         // 1. Session without any circle gestures -> no screenshots captured
         assert!(shared.captured_context_images.is_empty());
 
-        let plan_no_img = plan_paste_sequence(
+        let plan_no_img = plan_pastes(
             "transcribed text",
             &shared.captured_context_images,
-            true,
-            false,
+            Target::Other,
+            &cfg,
         );
         assert_eq!(
             plan_no_img,
-            vec![
-                PasteStep::CopyText("transcribed text".to_string()),
-                PasteStep::TriggerPasteChord,
-                PasteStep::RestoreOriginalClipboard,
-            ]
+            vec![Paste::Text("transcribed text".to_string())]
         );
 
         // 2. Session with multiple circle gestures -> captures context-1, context-2, context-3
@@ -832,44 +842,62 @@ mod regression_audit_tests {
         // All captured images are retained and pasted sequentially
         assert_eq!(shared.captured_context_images.len(), 3);
 
-        let plan_with_img = plan_paste_sequence(
+        let plan_with_img = plan_pastes(
             "dictated message",
             &shared.captured_context_images,
-            true,
-            false,
+            Target::Other,
+            &cfg,
         );
         assert_eq!(
             plan_with_img,
             vec![
-                PasteStep::CopyText("dictated message".to_string()),
-                PasteStep::TriggerPasteChord,
-                PasteStep::CopyImage(img1.clone()),
-                PasteStep::TriggerPasteChord,
-                PasteStep::CopyImage(img2.clone()),
-                PasteStep::TriggerPasteChord,
-                PasteStep::CopyImage(img3.clone()),
-                PasteStep::TriggerPasteChord,
-                PasteStep::RestoreOriginalClipboard,
+                Paste::Text("dictated message".to_string()),
+                Paste::Image(img1.clone()),
+                Paste::Image(img2.clone()),
+                Paste::Image(img3.clone()),
             ]
         );
 
-        // Terminal fallback plans text stream insertion with space-separated quoted file paths
-        let plan_terminal = plan_paste_sequence(
+        // Terminals get the text, then each quoted file path as its own paste
+        let plan_terminal = plan_pastes(
             "terminal command",
             &shared.captured_context_images,
-            true,
-            true,
+            Target::Terminal,
+            &cfg,
         );
         assert_eq!(
             plan_terminal,
             vec![
-                PasteStep::CopyText(format!(
-                    "terminal command {}",
-                    format_image_paths_for_cli(&shared.captured_context_images)
-                )),
-                PasteStep::TriggerPasteChord,
-                PasteStep::RestoreOriginalClipboard,
+                Paste::Text("terminal command ".to_string()),
+                Paste::ImagePath {
+                    text: format!("\"{}\"", img1.display()),
+                    path: img1.clone()
+                },
+                Paste::ImagePath {
+                    text: format!(" \"{}\"", img2.display()),
+                    path: img2.clone()
+                },
+                Paste::ImagePath {
+                    text: format!(" \"{}\"", img3.display()),
+                    path: img3.clone()
+                },
             ]
+        );
+        // ...and together they are the single string a terminal got before splitting
+        let joined: String = plan_terminal
+            .iter()
+            .map(|p| match p {
+                Paste::Text(t) => t.clone(),
+                Paste::ImagePath { text, .. } => text.clone(),
+                Paste::Image(_) => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            joined,
+            format!(
+                "terminal command {}",
+                format_image_paths_for_cli(&shared.captured_context_images)
+            )
         );
 
         // 3. Clear per-session state as finalize does
