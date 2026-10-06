@@ -599,7 +599,10 @@ async fn inject_text(
 ) -> anyhow::Result<&'static str> {
     #[cfg(target_os = "macos")]
     {
-        injectors.macos.inject_with_images(text, images).await?;
+        let outcome = injectors.macos.inject_with_images(text, images).await?;
+        if let Some(notice) = outcome.notice() {
+            notify(cfg, &notice);
+        }
         Ok("macos")
     }
 

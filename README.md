@@ -111,6 +111,8 @@ bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
 bolo history             # View transcription history in terminal
 bolo transcribe <file>   # Transcribe a local audio WAV file
+bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
+bolo split-preview       # Read text on stdin, print terminal paste pieces as JSON
 ```
 
 ---
@@ -147,13 +149,37 @@ Bolo configuration files live in `~/.config/bolo/`:
   enabled = true              # real-time semantic predictive formatting via Jev
   # provider = "typesafe"    # "typesafe" (default) or "openrouter"; inferred from the key when unset
   # model = "jev-latest"     # empty = provider default
-  timeout_ms = 400            # async decision timeout (cleanly falls back if exceeded)
+  timeout_ms = 2500           # async decision timeout (cleanly falls back if exceeded)
   # api_key = "..."          # optional: config, else TYPESAFE_API_KEY / OPENROUTER_API_KEY from env or ~/.env
   ```
 
 - **`~/.config/bolo/vocabulary.txt`**: Custom word prompts (names, brand terms, acronyms).
 - **`~/.config/bolo/enhance_prompt.txt`**: Prompt template for AI enhancement.
 - **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` and `TYPESAFE_API_KEY=...` (or `OPENROUTER_API_KEY=sk-or-...`) for cloud transcription, LLaMA enhancement, and Jev formatting decisions.
+
+---
+
+## Dictating into terminal agents
+
+Terminal agents such as Claude Code and Antigravity (`agy`) collapse a large paste into a placeholder like `[Pasted text #1 +4 lines]`, so you cannot see or fix what you dictated. On macOS, when the frontmost app is a terminal (Terminal, iTerm2, WezTerm, Ghostty, kitty, Alacritty, Warp, Hyper, Tabby, Termius), Bolo pastes the dictation as several small pastes instead of one. Each piece stays under the agents' collapse limits, so every word shows. Paragraph breaks are kept, the clipboard is saved once before the first piece and restored once after the last, and other apps still get a single paste.
+
+- **Interrupted pastes:** if you switch apps mid-paste, Bolo stops and tells you how many parts landed. If you copy something new mid-paste, Bolo stops and keeps your copy. `bolo insert-last` (Alt+I) inserts the whole dictation again.
+- **Screenshots:** each screenshot path is its own paste. Claude Code turns a paste that is only an image path into an attached image (`[Image #1]`); `agy` keeps the quoted path as text.
+- **Long dictations:** one that needs more than `max_pieces` (40) pieces is pasted once, and the agent shows a placeholder.
+- **Built-in terminals in an IDE:** VS Code, Cursor, Zed and JetBrains look like the IDE to Bolo, not a terminal, so they keep a single paste. To split there, add the IDE to `extra_apps`.
+
+```toml
+[inject.terminal]
+split_paste = true          # false = always one paste
+max_paste_chars = 800       # per piece, UTF-16 units (Claude Code collapses above 800, agy above 1000)
+max_paste_newlines = 2      # line breaks per piece (Claude Code collapses above 2)
+settle_ms = 50              # pause between pieces; raise to 100 if a piece is ever lost or doubled
+max_pieces = 40             # above this, paste once
+extra_apps = ["com.microsoft.VSCode"]  # also split in these apps (name or bundle id substring)
+exclude_apps = []           # never split in these apps; wins over everything
+```
+
+`bolo split-preview` reads text on stdin and prints the pieces as a JSON array. `scripts/paste-e2e/paste_e2e.py` checks the pieces against the installed Claude Code and `agy` in a private tmux server (it never submits a prompt).
 
 ---
 
