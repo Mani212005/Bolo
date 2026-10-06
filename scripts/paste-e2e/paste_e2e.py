@@ -101,8 +101,10 @@ class Lab:
 
     # -- agents -------------------------------------------------------------
     def start(self, agent):
-        env = ["-e", f"EDITOR={self.dump_sh}", "-e", f"VISUAL={self.dump_sh}"]
-        tmux("new-session", "-d", "-s", agent, "-x", "200", "-y", "50", "-c", self.work, *env, agent)
+        agent_bin = shutil.which(agent) or agent
+        path_val = os.environ.get("PATH", "")
+        cmd = f'env EDITOR="{self.dump_sh}" VISUAL="{self.dump_sh}" PATH="{path_val}" {agent_bin}'
+        tmux("new-session", "-d", "-s", agent, "-x", "200", "-y", "50", "-c", self.work, cmd)
         target = agent
         if not self.wait_for(target, r"trust|❯|ask anything"):
             raise RuntimeError(f"{agent} did not start:\n{self.screen(target)}")

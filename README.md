@@ -111,6 +111,8 @@ bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
 bolo history             # View transcription history in terminal
 bolo transcribe <file>   # Transcribe a local audio WAV file
+bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
+bolo split-preview       # Read text on stdin, print terminal paste pieces as JSON
 ```
 
 ---
@@ -147,7 +149,7 @@ Bolo configuration files live in `~/.config/bolo/`:
   enabled = true              # real-time semantic predictive formatting via Jev
   # provider = "typesafe"    # "typesafe" (default) or "openrouter"; inferred from the key when unset
   # model = "jev-latest"     # empty = provider default
-  timeout_ms = 400            # async decision timeout (cleanly falls back if exceeded)
+  timeout_ms = 2500           # async decision timeout (cleanly falls back if exceeded)
   # api_key = "..."          # optional: config, else TYPESAFE_API_KEY / OPENROUTER_API_KEY from env or ~/.env
   ```
 
