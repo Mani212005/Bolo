@@ -7,15 +7,19 @@
 //! A dedicated hub thread owns the subscribers and writes with a short
 //! timeout, dropping any client that errors or stalls, so a stuck renderer can
 //! never delay audio capture.
+//!
+//! The hub also knows the live pill settings (they change without a daemon
+//! restart) and whether a pill renderer is connected, which the daemon uses to
+//! decide whether its state banners are redundant.
 
-use crate::config::PillConfig;
+use crate::config::{PillConfig, PillStyle};
 use crate::daemon::Phase;
 use crossbeam_channel::{Receiver, Sender};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Protocol version, sent in `hello`.
@@ -42,6 +46,8 @@ pub enum Event {
         detail: &'static str,
         chars: Option<usize>,
     },
+    /// The pill settings changed (dashboard, `bolo pill-style`, or the pill's own menu).
+    Config(PillConfig),
 }
 
 impl Event {
@@ -65,6 +71,11 @@ impl Event {
                 }
                 v
             }
+            Event::Config(pill) => json!({
+                "type": "config",
+                "style": pill.style.as_str(),
+                "show_idle": pill.show_when_idle,
+            }),
         }
     }
 }
@@ -103,7 +114,11 @@ pub fn level_from_chunk(chunk: &[i16]) -> f32 {
 
 enum HubMsg {
     Event(Event),
-    Subscribe(UnixStream),
+    /// A new connection; `pill` marks the on-screen renderer (`subscribe pill`).
+    Subscribe {
+        stream: UnixStream,
+        pill: bool,
+    },
 }
 
 /// Cloneable handle to the broadcaster thread. `EventHub::default()` is a
@@ -112,18 +127,51 @@ enum HubMsg {
 pub struct EventHub {
     tx: Option<Sender<HubMsg>>,
     subscribers: Arc<AtomicUsize>,
+    /// How many of the subscribers are the pill renderer.
+    pill_clients: Arc<AtomicUsize>,
+    /// The live pill settings.
+    pill: Arc<Mutex<PillConfig>>,
 }
 
 impl EventHub {
     pub fn spawn(pill: PillConfig) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let subscribers = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&subscribers);
-        std::thread::spawn(move || run_hub(rx, pill, count));
-        Self {
+        let hub = Self {
             tx: Some(tx),
-            subscribers,
+            pill: Arc::new(Mutex::new(pill)),
+            ..Self::default()
+        };
+        let worker = hub.clone();
+        std::thread::spawn(move || run_hub(rx, worker));
+        hub
+    }
+
+    /// The pill settings as they are now.
+    pub fn pill(&self) -> PillConfig {
+        self.pill.lock().unwrap().clone()
+    }
+
+    /// Applies new pill settings and tells every subscriber. Returns false when
+    /// nothing changed.
+    pub fn set_pill(&self, pill: PillConfig) -> bool {
+        {
+            let mut current = self.pill.lock().unwrap();
+            if *current == pill {
+                return false;
+            }
+            *current = pill.clone();
         }
+        self.publish(Event::Config(pill));
+        true
+    }
+
+    /// True when a pill renderer is connected and its style draws something.
+    /// The daemon's "Listening / Paused / Transcribing" banners are redundant
+    /// then; without it (plain `cargo build`, Linux, Hidden style) they are the
+    /// only live cue and stay.
+    pub fn pill_visible(&self) -> bool {
+        self.pill.lock().unwrap().style != PillStyle::Hidden
+            && self.pill_clients.load(Ordering::Relaxed) > 0
     }
 
     pub fn publish(&self, event: Event) {
@@ -141,27 +189,45 @@ impl EventHub {
 
     /// Hands a connection to the hub; it receives `hello` and then every event.
     pub fn subscribe(&self, stream: UnixStream) {
+        self.send_subscribe(stream, false);
+    }
+
+    /// Like `subscribe`, for the on-screen pill (`subscribe pill`): the hub
+    /// counts it so the daemon knows the pill is really there.
+    pub fn subscribe_pill(&self, stream: UnixStream) {
+        self.send_subscribe(stream, true);
+    }
+
+    fn send_subscribe(&self, stream: UnixStream, pill: bool) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(HubMsg::Subscribe(stream));
+            let _ = tx.send(HubMsg::Subscribe { stream, pill });
         }
     }
 }
 
-fn run_hub(rx: Receiver<HubMsg>, pill: PillConfig, count: Arc<AtomicUsize>) {
+fn run_hub(rx: Receiver<HubMsg>, hub: EventHub) {
     let mut phase = Phase::Idle;
-    let mut subscribers: Vec<UnixStream> = Vec::new();
+    // (connection, is the pill renderer)
+    let mut subscribers: Vec<(UnixStream, bool)> = Vec::new();
+    let publish_counts = |subscribers: &[(UnixStream, bool)]| {
+        hub.subscribers.store(subscribers.len(), Ordering::Relaxed);
+        hub.pill_clients.store(
+            subscribers.iter().filter(|(_, pill)| *pill).count(),
+            Ordering::Relaxed,
+        );
+    };
     for msg in rx.iter() {
         let line = match msg {
-            HubMsg::Subscribe(stream) => {
+            HubMsg::Subscribe { stream, pill } => {
                 let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-                subscribers.push(stream);
+                subscribers.push((stream, pill));
                 // Only the new client gets the snapshot.
-                let snapshot = hello(phase, &pill).to_string();
+                let snapshot = hello(phase, &hub.pill()).to_string();
                 let last = subscribers.len() - 1;
-                if !write_line(&mut subscribers[last], &snapshot) {
+                if !write_line(&mut subscribers[last].0, &snapshot) {
                     subscribers.pop();
                 }
-                count.store(subscribers.len(), Ordering::Relaxed);
+                publish_counts(&subscribers);
                 continue;
             }
             HubMsg::Event(event) => {
@@ -171,8 +237,8 @@ fn run_hub(rx: Receiver<HubMsg>, pill: PillConfig, count: Arc<AtomicUsize>) {
                 event.to_json().to_string()
             }
         };
-        subscribers.retain_mut(|stream| write_line(stream, &line));
-        count.store(subscribers.len(), Ordering::Relaxed);
+        subscribers.retain_mut(|(stream, _)| write_line(stream, &line));
+        publish_counts(&subscribers);
     }
 }
 
@@ -381,6 +447,51 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn config_event_and_hello_follow_the_live_pill_settings() {
+        use crate::config::PillStyle;
+        let large = PillConfig {
+            style: PillStyle::Large,
+            show_when_idle: false,
+        };
+        assert_eq!(
+            Event::Config(large.clone()).to_json(),
+            json!({ "type": "config", "style": "large", "show_idle": false })
+        );
+
+        let hub = EventHub::spawn(pill());
+        assert!(hub.set_pill(large.clone()));
+        assert!(!hub.set_pill(large.clone()), "no change, no event");
+        // A client that connects after the change learns it from hello.
+        let (hub_end, client) = connection();
+        hub.subscribe(hub_end);
+        let first = next(&client);
+        assert_eq!(first["style"], "large");
+        assert_eq!(first["show_idle"], false);
+        assert_eq!(hub.pill(), large);
+    }
+
+    #[test]
+    fn pill_visible_needs_a_connected_pill_with_a_style_that_draws() {
+        use crate::config::PillStyle;
+        let hub = EventHub::spawn(pill());
+        assert!(!hub.pill_visible(), "nothing connected");
+        let (plain_end, _plain) = connection();
+        hub.subscribe(plain_end);
+        let (pill_end, _pill_client) = connection();
+        hub.subscribe_pill(pill_end);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !hub.pill_visible() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        hub.set_pill(PillConfig {
+            style: PillStyle::Hidden,
+            ..pill()
+        });
+        assert!(!hub.pill_visible(), "hidden style draws nothing");
     }
 
     #[test]
