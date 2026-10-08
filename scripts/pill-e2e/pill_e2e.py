@@ -45,12 +45,18 @@ import time
 # third-party Python packages.
 JXA = r"""
 ObjC.import('CoreGraphics');
-function pillWindows() {
+function pillWindows(pids) {
   const all = ObjC.deepUnwrap(ObjC.castRefToObject(
     $.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll, 0)));
-  return all.filter(w => w.kCGWindowOwnerName === 'bolo-pill').map(w => ({
+  const pidSet = (pids && pids.length) ? pids.map(Number) : null;
+  return all.filter(w => {
+    if (w.kCGWindowOwnerName !== 'bolo-pill') return false;
+    if (pidSet && !pidSet.includes(w.kCGWindowOwnerPID)) return false;
+    return true;
+  }).map(w => ({
     layer: w.kCGWindowLayer, onscreen: w.kCGWindowIsOnscreen,
     sharing: w.kCGWindowSharingState, bounds: w.kCGWindowBounds,
+    pid: w.kCGWindowOwnerPID,
   }));
 }
 function post(type, x, y) {
@@ -58,7 +64,7 @@ function post(type, x, y) {
   $.CGEventPost($.kCGHIDEventTap, e);
 }
 function run(argv) {
-  if (argv[0] === 'windows') return JSON.stringify(pillWindows());
+  if (argv[0] === 'windows') return JSON.stringify(pillWindows(argv.slice(1)));
   if (argv[0] === 'pointer') {
     const p = $.CGEventGetLocation($.CGEventCreate($()));
     return JSON.stringify({x: p.x, y: p.y});
@@ -211,16 +217,22 @@ class Lab:
         out = run(["osascript", "-l", "JavaScript", self.jxa, *map(str, args)])
         return (out.stdout + out.stderr).strip()
 
-    def windows(self):
+    def windows(self, pids=None):
+        if pids is None:
+            pids = self.pill_pids()
+            if not pids:
+                return []
+        elif len(pids) == 0:
+            return []
         try:
-            return json.loads(self.jxa_run("windows"))
+            return json.loads(self.jxa_run("windows", *pids))
         except ValueError:
             return []
 
-    def pill_window(self, timeout=8):
+    def pill_window(self, timeout=8, pids=None):
         end = time.time() + timeout
         while time.time() < end:
-            on = [w for w in self.windows() if w["onscreen"]]
+            on = [w for w in self.windows(pids=pids) if w["onscreen"]]
             if on:
                 return on[0]
             time.sleep(0.2)
@@ -429,7 +441,7 @@ def run_checks(lab, args):
     while time.time() < end and lab.pill_pids():
         time.sleep(0.2)
     check(not lab.pill_pids(), "pill exits when the daemon is killed")
-    check(not [w for w in lab.windows() if w["onscreen"]], "and its window is gone")
+    check(not [w for w in lab.windows(pids=pids) if w["onscreen"]], "and its window is gone")
 
     print("snapshots")
     snap = os.path.join(lab.home, "snap")
