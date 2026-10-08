@@ -114,6 +114,18 @@ if [ "$OS" = "Darwin" ]; then
     fi
 fi
 
+if [ "$OS" = "Darwin" ]; then
+    say "Compiling the recording pill (bolo-pill)…"
+    swiftc -O "$REPO/src/ui/BoloPill.swift" -o "$REPO/target/release/bolo-pill" -framework Cocoa -framework QuartzCore
+    # bolo starts bolo-pill from next to its own binary, so install both side by side.
+    for dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+        [ -d "$dir" ] || continue
+        cp "$REPO/target/release/bolo-pill" "$dir/bolo-pill"
+        codesign --force --deep -s - "$dir/bolo-pill"
+        say "Installed $dir/bolo-pill"
+    done
+fi
+
 # ---------------------------------------------------------------- config
 if [ ! -f "$CONF_DIR/config.toml" ]; then
     cp "$REPO/config.toml" "$CONF_DIR/config.toml"
@@ -178,7 +190,10 @@ cat <<'EOF'
 
   Quickstart:
     bolo        Launch daemon & open native popup dashboard
-    bolo exit   Stop daemon and close popup window
+    bolo exit   Stop daemon, recording pill and popup window
+
+  A small pill at the bottom of the screen shows when Bolo is recording (live
+  waveform) and transcribing. Click it to start, stop or resume. Drag to move it.
 
   Shortcuts:
     Ctrl+Space  Start dictating / finish (text pastes at cursor)
