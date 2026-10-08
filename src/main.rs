@@ -3,12 +3,14 @@ mod config;
 mod config_edit;
 mod daemon;
 mod enhance;
+mod events;
 mod format;
 mod format_eval;
 mod hotkey;
 mod inject;
 mod jev;
 mod mictest;
+mod pill;
 mod resample;
 mod sound;
 mod stt;
@@ -76,9 +78,15 @@ fn main() -> anyhow::Result<()> {
                 .arg("-f")
                 .arg("bolo-ui")
                 .status();
+            // The daemon stops its pill on quit; this catches one it no longer supervises.
+            let _ = std::process::Command::new("pkill")
+                .arg("-x")
+                .arg("bolo-pill")
+                .status();
             println!("Thank you for using Bolo 😊");
             return Ok(());
         }
+        Some("events") => return print_events(),
         Some("settings" | "ui" | "history" | "dashboard") => {
             let cfg = Config::load(&config_path)?;
             return open_settings_app(cfg.ui.port);
@@ -135,7 +143,7 @@ fn main() -> anyhow::Result<()> {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
         None => {
@@ -213,7 +221,14 @@ fn main() -> anyhow::Result<()> {
     let input_rate = info.sample_rate;
     let endpointing = !manual;
     let worker = std::thread::spawn(move || {
-        vad::run_endpointer(audio_rx, control_rx, &vad_cfg, input_rate, endpointing)
+        vad::run_endpointer(
+            audio_rx,
+            control_rx,
+            &vad_cfg,
+            input_rate,
+            endpointing,
+            &|_, _| {},
+        )
     });
     let utterance = worker
         .join()
@@ -329,6 +344,30 @@ fn open_settings_app(port: u16) -> anyhow::Result<()> {
             .context("no browser found")?;
         Ok(())
     }
+}
+
+/// `bolo events`: subscribe to the daemon's event stream and print one JSON
+/// line per event until the daemon goes away.
+fn print_events() -> anyhow::Result<()> {
+    let path = daemon::socket_path();
+    let mut conn = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "no bolo daemon on {} ({e}); start one with `bolo daemon`",
+            path.display()
+        )
+    })?;
+    writeln!(conn, "subscribe")?;
+    let stdout = std::io::stdout();
+    for line in BufReader::new(conn).lines() {
+        let mut out = stdout.lock();
+        if writeln!(out, "{}", line?)
+            .and_then(|()| out.flush())
+            .is_err()
+        {
+            break; // stdout closed, e.g. `bolo events | head`
+        }
+    }
+    Ok(())
 }
 
 /// Send one command to the running daemon and print its reply.

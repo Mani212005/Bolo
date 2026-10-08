@@ -29,6 +29,8 @@ pub struct Config {
     pub vision: VisionConfig,
     #[serde(default)]
     pub formatting: FormattingConfig,
+    #[serde(default)]
+    pub pill: PillConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,6 +166,45 @@ fn provider_key(provider: crate::jev::JevProvider) -> Option<String> {
             .trim();
         (!clean.is_empty()).then(|| clean.to_string())
     })
+}
+
+/// The on-screen recording pill (macOS), drawn by the `bolo-pill` helper.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PillConfig {
+    pub style: PillStyle,
+    /// Keep a tiny handle on screen while idle; click it to start dictating.
+    pub show_when_idle: bool,
+}
+
+impl Default for PillConfig {
+    fn default() -> Self {
+        Self {
+            // Linux has no pill renderer yet, so it keeps today's chime and banners.
+            style: if cfg!(target_os = "macos") {
+                PillStyle::Small
+            } else {
+                PillStyle::Hidden
+            },
+            show_when_idle: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PillStyle {
+    Small,
+    Hidden,
+}
+
+impl PillStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PillStyle::Small => "small",
+            PillStyle::Hidden => "hidden",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -411,6 +452,44 @@ mod tests {
             inject: InjectConfig,
         }
         toml::from_str::<Wrapper>(toml_text).unwrap().inject
+    }
+
+    fn pill_from(toml_text: &str) -> PillConfig {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            pill: PillConfig,
+        }
+        toml::from_str::<Wrapper>(toml_text).unwrap().pill
+    }
+
+    #[test]
+    fn pill_defaults_to_a_small_pill_with_an_idle_handle_on_macos() {
+        let cfg = pill_from("");
+        assert_eq!(
+            cfg.style,
+            if cfg!(target_os = "macos") {
+                PillStyle::Small
+            } else {
+                PillStyle::Hidden
+            }
+        );
+        assert!(cfg.show_when_idle);
+        let shipped = Config::load(Path::new("config.toml")).unwrap().pill;
+        assert_eq!(shipped.style, PillStyle::Small);
+        assert!(shipped.show_when_idle);
+    }
+
+    #[test]
+    fn pill_settings_parse() {
+        let cfg = pill_from("[pill]\nstyle = \"hidden\"\nshow_when_idle = false\n");
+        assert_eq!(cfg.style, PillStyle::Hidden);
+        assert!(!cfg.show_when_idle);
+        assert_eq!(cfg.style.as_str(), "hidden");
+        assert_eq!(
+            pill_from("[pill]\nstyle = \"small\"\n").style.as_str(),
+            "small"
+        );
     }
 
     #[test]

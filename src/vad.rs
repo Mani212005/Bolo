@@ -71,12 +71,16 @@ impl State {
 ///
 /// `endpointing` false = M1 manual mode: VAD state is still traced, but only
 /// ForceStop (or the max-utterance cap) ends the capture.
+///
+/// `on_level` is called once per 32 ms chunk with the chunk's mic level (0..1)
+/// and whether the VAD heard speech in it, for the live meter.
 pub fn run_endpointer(
     audio_rx: Receiver<Vec<f32>>,
     control_rx: Receiver<Control>,
     config: &VadConfig,
     input_rate: u32,
     endpointing: bool,
+    on_level: &dyn Fn(f32, bool),
 ) -> anyhow::Result<Utterance> {
     let mut vad = VoiceActivityDetector::builder()
         .sample_rate(PIPELINE_SAMPLE_RATE as i64)
@@ -170,6 +174,7 @@ pub fn run_endpointer(
                     let chunk: Vec<i16> = chunk_buf.drain(..VAD_CHUNK_SIZE).collect();
                     let prob = vad.predict(chunk.clone());
                     let is_speech = prob > config.speech_threshold;
+                    on_level(crate::events::level_from_chunk(&chunk), is_speech);
                     chunks += 1;
                     total_ms += CHUNK_MS;
 
