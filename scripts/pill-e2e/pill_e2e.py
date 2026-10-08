@@ -2,7 +2,7 @@
 """End-to-end check of the macOS recording pill (`bolo-pill`) against a real daemon.
 
 Not run by `cargo test`. It starts a private daemon (its own HOME under /tmp, its own
-config and socket, hotkeys off, no banners, no chime, a dummy Groq key), lets the daemon
+config and socket, hotkeys off, no banners, no chime), lets the daemon
 start `bolo-pill`, and checks through the window server and `bolo events` that:
 
   * the pill window is on screen at layer 1000 (above full-screen apps) and excluded
@@ -105,9 +105,9 @@ class Lab:
         self.env = dict(
             os.environ,
             HOME=self.home,
-            GROQ_API_KEY="dummy-key-for-e2e",
             BOLO_NO_HOTKEYS="1",
         )
+        self.env["GROQ_API_KEY"] = os.environ.get("GROQ_API_KEY", "test")
         self.env.pop("TYPESAFE_API_KEY", None)
         self.env.pop("OPENROUTER_API_KEY", None)
         self.daemon = None
