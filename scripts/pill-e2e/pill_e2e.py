@@ -18,6 +18,11 @@ The daemon records from the real microphone. The test never uses your daemon, co
 history or recordings. It moves the pointer to the pill for one click and puts it back.
 The click needs Accessibility permission for the terminal running this script.
 
+Nothing leaves the machine: the throwaway HOME cannot use a local STT provider without
+downloading a model, so the test keeps the groq provider with a placeholder key and sets
+HTTPS_PROXY, HTTP_PROXY and ALL_PROXY to an unroutable local address (http://127.0.0.1:9)
+while dropping NO_PROXY, so any upload fails locally with a connection error.
+
     cargo build && swiftc -O src/ui/BoloPill.swift -o target/release/bolo-pill \\
         -framework Cocoa -framework QuartzCore
     python3 scripts/pill-e2e/pill_e2e.py [--bolo target/debug/bolo] [--pill target/release/bolo-pill]
@@ -107,9 +112,11 @@ class Lab:
             HOME=self.home,
             BOLO_NO_HOTKEYS="1",
         )
-        self.env["GROQ_API_KEY"] = os.environ.get("GROQ_API_KEY", "test")
-        self.env.pop("TYPESAFE_API_KEY", None)
-        self.env.pop("OPENROUTER_API_KEY", None)
+        for key in ("GROQ_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "NO_PROXY", "no_proxy"):
+            self.env.pop(key, None)
+        self.env["GROQ_API_KEY"] = "e2e-" + "placeholder"
+        for proxy_var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+            self.env[proxy_var] = "http://127.0.0.1:9"
         self.daemon = None
         self.events_proc = None
         self.events = queue.Queue()
