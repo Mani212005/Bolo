@@ -11,10 +11,18 @@ start `bolo-pill`, and checks through the window server and `bolo events` that:
     same before and after (the pill never takes focus);
   * the event stream shows phase recording, live mic levels, processing, an outcome
     and idle, in that order, and the pill returns to its idle handle;
+  * the style changes live, with no daemon or pill restart: `pill-style large` draws the
+    300x84 panel while recording and pausing, `hidden` stops the helper, `small` brings it
+    back, `pill-idle off` removes the idle handle, and the choice is saved to config.toml;
+  * one real click on the Large panel's Stop button stops a dictation without taking focus;
+  * one real right-click opens the pill's menu without taking focus, and choosing a style
+    in it reaches the daemon;
   * killing the daemon with SIGKILL makes the pill exit (no orphan);
-  * `bolo-pill --snapshot` renders every state.
+  * `bolo-pill --selftest` passes and `--snapshot` renders every state of every style.
 
-The daemon records from the real microphone. The test never uses your daemon, config,
+The daemon records from the real microphone. Banners are off in the test config, so the
+state banners (Listening, Paused, Transcribing) that stand down while the pill runs are
+covered by the Rust tests, not here. The test never uses your daemon, config,
 history or recordings. It moves the pointer to the pill for one click and puts it back.
 The click needs Accessibility permission for the terminal running this script.
 
@@ -70,6 +78,17 @@ function run(argv) {
     return JSON.stringify({x: p.x, y: p.y});
   }
   if (argv[0] === 'move') { post($.kCGEventMouseMoved, +argv[1], +argv[2]); return 'ok'; }
+  if (argv[0] === 'rclick') {
+    const x = +argv[1], y = +argv[2];
+    post($.kCGEventMouseMoved, x, y);
+    delay(0.15);
+    for (const type of [$.kCGEventRightMouseDown, $.kCGEventRightMouseUp]) {
+      const e = $.CGEventCreateMouseEvent($(), type, {x: x, y: y}, 1);
+      $.CGEventPost($.kCGHIDEventTap, e);
+      delay(0.06);
+    }
+    return 'ok';
+  }
   if (argv[0] === 'click') {
     const x = +argv[1], y = +argv[2];
     post($.kCGEventMouseMoved, x, y);
@@ -232,7 +251,7 @@ class Lab:
     def pill_window(self, timeout=8, pids=None):
         end = time.time() + timeout
         while time.time() < end:
-            on = [w for w in self.windows(pids=pids) if w["onscreen"]]
+            on = [w for w in self.windows(pids=pids) if w.get("onscreen")]
             if on:
                 return on[0]
             time.sleep(0.2)
@@ -432,6 +451,8 @@ def run_checks(lab, args):
         f"frontmost app still unchanged at the end ({before_name} -> {front_name(end_front)})",
     )
 
+    run_style_checks(lab, before, before_name)
+
     print("no orphan after the daemon dies")
     pids = lab.pill_pids()
     check(len(pids) == 1, f"exactly one bolo-pill is running ({pids})")
@@ -441,16 +462,152 @@ def run_checks(lab, args):
     while time.time() < end and lab.pill_pids():
         time.sleep(0.2)
     check(not lab.pill_pids(), "pill exits when the daemon is killed")
-    check(not [w for w in lab.windows(pids=pids) if w["onscreen"]], "and its window is gone")
+    check(not [w for w in lab.windows(pids=pids) if w.get("onscreen")], "and its window is gone")
+
+    print("self test")
+    out = run([lab.pill, "--selftest"])
+    check(out.returncode == 0 and "selftest passed" in out.stdout, "bolo-pill --selftest passes")
+    if out.returncode != 0:
+        print(out.stdout)
 
     print("snapshots")
     snap = os.path.join(lab.home, "snap")
     out = run([lab.pill, "--snapshot", snap])
     pngs = sorted(os.listdir(snap)) if os.path.isdir(snap) else []
     check(out.returncode == 0 and "pill-states.png" in pngs, f"--snapshot renders the state sheet ({len(pngs)} files)")
-    for state in ("idle", "recording-speech", "paused", "transcribing", "done-pasted", "error-no-speech"):
+    for state in (
+        "idle", "recording-speech", "paused", "transcribing", "done-pasted", "error-no-speech",
+        "transcribing-reduced-motion", "large-recording-speech", "large-recording-long",
+        "large-stop-pressed", "large-paused", "large-transcribing", "large-transcribing-reduced-motion",
+        "large-done-pasted",
+    ):
         path = os.path.join(snap, f"pill-{state}.png")
         check(os.path.exists(path) and os.path.getsize(path) > 200, f"snapshot pill-{state}.png")
+
+
+def size_of(win):
+    return (win["bounds"]["Width"], win["bounds"]["Height"]) if win else None
+
+
+def wait_size(lab, size, timeout=6):
+    """Waits until the pill window has exactly `size`; returns the window (or the last seen)."""
+    end = time.time() + timeout
+    win = None
+    while time.time() < end:
+        win = lab.pill_window(timeout=0.5)
+        if win and size_of(win) == size:
+            return win
+        time.sleep(0.15)
+    return win
+
+
+def wait_until(pred, timeout=6):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.15)
+    return False
+
+
+def run_style_checks(lab, before_front, before_name):
+    print("styles change live, without a restart")
+    pill_pids = lab.pill_pids()
+    daemon_pid = lab.daemon.pid
+    lab.backlog.clear()
+
+    reply = lab.command("pill-style huge")
+    check(reply.startswith("err usage"), f"an unknown style is refused ({reply!r})")
+    reply = lab.command("pill-style large")
+    check(reply == "ok pill large idle on", f"pill-style large is accepted ({reply!r})")
+    cfg = lab.wait_event(lambda e: e.get("type") == "config")
+    check(
+        cfg == {"type": "config", "style": "large", "show_idle": True},
+        f"subscribers get a config event ({cfg})",
+    )
+    with open(lab.config_path) as f:
+        saved = f.read()
+    check('style = "large"' in saved and '(waveform, timer, Pause, Stop)' in saved,
+          "the style is saved to config.toml and its comment kept")
+    idle = lab.pill_window()
+    check(size_of(idle) == (44, 8), f"Large idles as the 44x8 handle ({size_of(idle)})")
+
+    reply = lab.command("toggle")
+    check(reply == "ok recording", f"toggle starts a dictation ({reply!r})")
+    rec = wait_size(lab, (300, 84))
+    mic_down = lab.wait_event(lambda e: e.get("type") == "outcome", timeout=0.8)
+    if mic_down and mic_down.get("kind") == "mic-unavailable":
+        print("  note  the microphone is not available to this terminal; skipping the live Large checks")
+    else:
+        check(size_of(rec) == (300, 84), f"Large recording is a 300x84 panel ({size_of(rec)})")
+        check(rec and rec["layer"] == 1000 and rec["sharing"] == 0, "the Large panel keeps layer 1000 and capture exclusion")
+        reply = lab.command("pause")
+        check(reply == "ok paused", f"pause is accepted ({reply!r})")
+        paused = wait_size(lab, (300, 84))
+        check(size_of(paused) == (300, 84), f"Large stays 300x84 while paused ({size_of(paused)})")
+        reply = lab.command("pause")
+        check(reply == "ok recording", f"resume is accepted ({reply!r})")
+        time.sleep(0.9)  # past the 800 ms start debounce
+        # One real click on the Large panel's Stop button (bottom right of the panel).
+        panel = lab.pill_window()
+        wait_for_quiet()
+        pointer = json.loads(lab.jxa_run("pointer"))
+        pb = panel["bounds"]
+        lab.jxa_run("click", pb["X"] + 259, pb["Y"] + 64)
+        stopped = lab.wait_event(lambda e: e.get("type") == "phase" and e.get("phase") == "processing", timeout=3)
+        lab.jxa_run("move", pointer["x"], pointer["y"])
+        check(stopped is not None, "a real click on Stop stops the dictation and starts transcribing")
+        check(front() == before_front, f"the Stop click does not take focus ({before_name} -> {front_name(front())})")
+        if stopped is None:
+            lab.command("toggle")
+        proc = wait_size(lab, (300, 84), timeout=1.5)
+        check(proc is not None, "the pill stays on screen while transcribing")
+    lab.wait_event(lambda e: e.get("type") == "phase" and e.get("phase") == "idle", timeout=30)
+    time.sleep(2.2)  # the result lingers up to 1.8 s
+    check(lab.pill_pids() == pill_pids, f"same bolo-pill process after the switch ({lab.pill_pids()} vs {pill_pids})")
+    check(lab.daemon.poll() is None and lab.daemon.pid == daemon_pid, "same daemon process")
+
+    reply = lab.command("pill-style hidden")
+    check(reply == "ok pill hidden idle on", f"pill-style hidden is accepted ({reply!r})")
+    check(wait_until(lambda: not lab.pill_pids()), "hidden stops the helper")
+    check(lab.daemon.poll() is None, "and the daemon keeps running")
+    reply = lab.command("pill-style small")
+    check(reply == "ok pill small idle on", f"pill-style small is accepted ({reply!r})")
+    check(wait_until(lambda: len(lab.pill_pids()) == 1), "small starts the helper again")
+    handle = wait_size(lab, (44, 8), timeout=8)
+    check(size_of(handle) == (44, 8), f"the idle handle is back ({size_of(handle)})")
+
+    reply = lab.command("pill-idle off")
+    check(reply == "ok pill small idle off", f"pill-idle off is accepted ({reply!r})")
+    check(wait_until(lambda: not [w for w in lab.windows() if w.get("onscreen")], timeout=4),
+          "with the idle handle off nothing is on screen while idle")
+    reply = lab.command("pill-idle on")
+    check(wait_until(lambda: lab.pill_window(timeout=0.5) is not None), f"the idle handle comes back ({reply!r})")
+
+    print("right-click menu")
+    win = lab.pill_window()
+    if not win:
+        check(False, "pill window for the right-click")
+        return
+    wait_for_quiet()
+    pointer = json.loads(lab.jxa_run("pointer"))
+    b = win["bounds"]
+    lab.jxa_run("rclick", b["X"] + b["Width"] / 2, b["Y"] + b["Height"] / 2)
+    time.sleep(0.5)
+    wins = [w for w in lab.windows() if w.get("onscreen")]
+    menus = [w for w in wins if w["bounds"]["Height"] > 60 and w["bounds"]["Width"] > 60]
+    check(len(menus) >= 1, f"a right-click opens a menu window ({[size_of(w) for w in wins]})")
+    check(front() == before_front, f"the menu does not take focus ({before_name} -> {front_name(front())})")
+    if menus:
+        m = menus[0]["bounds"]
+        # Rows are about 22 pt tall under a 5 pt margin: the second row is "Large".
+        lab.jxa_run("click", m["X"] + 30, m["Y"] + 5 + 22 + 11)
+        picked = lab.wait_event(lambda e: e.get("type") == "config" and e.get("style") == "large", timeout=4)
+        check(picked is not None, "choosing Large in the menu reaches the daemon")
+    lab.jxa_run("move", pointer["x"], pointer["y"])
+    check(front() == before_front, "focus still unchanged after the menu")
+    lab.command("pill-style small")
+    lab.wait_event(lambda e: e.get("type") == "config" and e.get("style") == "small", timeout=4)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,9 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("events") => return print_events(),
+        Some(cmd @ ("pill-style" | "pill-idle")) => {
+            return pill_setting(cmd, args.get(2).map(String::as_str), &config_path);
+        }
         Some("settings" | "ui" | "history" | "dashboard") => {
             let cfg = Config::load(&config_path)?;
             return open_settings_app(cfg.ui.port);
@@ -143,38 +146,10 @@ fn main() -> anyhow::Result<()> {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo & open the UI\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open web & native settings UI\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
-        None => {
-            // Default `bolo` command: ensure background daemon is up, then greet
-            let socket = daemon::socket_path();
-            let daemon_up = std::os::unix::net::UnixStream::connect(&socket).is_ok();
-            if !daemon_up {
-                let exe = std::env::current_exe()?;
-                let log_dir = userdata::config_dir();
-                let _ = std::fs::create_dir_all(&log_dir);
-                let log_path = log_dir.join("bolo-daemon.log");
-                let log_file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_path)
-                    .unwrap_or_else(|_| std::fs::File::create("/tmp/bolo-daemon.log").unwrap());
-                let err_file = log_file.try_clone().unwrap();
-
-                let _ = std::process::Command::new(exe)
-                    .arg("daemon")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(log_file)
-                    .stderr(err_file)
-                    .spawn();
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-            println!("hello Bolo!");
-            let cfg = Config::load(&config_path)?;
-            let _ = open_settings_app(cfg.ui.port);
-            return Ok(());
-        }
+        None => return start_bolo(&config_path),
         Some(other) => {
             eprintln!("Unknown command '{other}'. Run `bolo --help` for usage.");
             return Ok(());
@@ -262,6 +237,122 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("[stt-raw] {}", transcript.raw_json);
     println!("[result]  {}", transcript.text);
+    Ok(())
+}
+
+/// Plain `bolo`: make sure the daemon is running. The recording pill, which the
+/// daemon starts, is the everyday surface, so no window opens; `bolo settings`
+/// opens the dashboard.
+fn start_bolo(config_path: &std::path::Path) -> anyhow::Result<()> {
+    let socket = daemon::socket_path();
+    let daemon_up = || std::os::unix::net::UnixStream::connect(&socket).is_ok();
+    if !daemon_up() {
+        let exe = std::env::current_exe()?;
+        let log_dir = userdata::config_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("bolo-daemon.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap_or_else(|_| std::fs::File::create("/tmp/bolo-daemon.log").unwrap());
+        let err_file = log_file.try_clone()?;
+        std::process::Command::new(exe)
+            .arg("daemon")
+            .arg("--config")
+            .arg(config_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(log_file)
+            .stderr(err_file)
+            .spawn()
+            .context("cannot start the bolo daemon")?;
+        for _ in 0..30 {
+            if daemon_up() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        anyhow::ensure!(
+            daemon_up(),
+            "the bolo daemon did not come up; see {}",
+            log_path.display()
+        );
+    }
+    println!("hello Bolo!");
+    let cfg = Config::load(config_path)?;
+    println!(
+        "{}",
+        start_message(pill_status(
+            cfg!(target_os = "macos"),
+            cfg.pill.style,
+            pill::locate_helper().is_some()
+        ))
+    );
+    Ok(())
+}
+
+/// Whether the daemon can show the recording pill on this machine.
+#[derive(Debug, PartialEq, Eq)]
+enum PillStatus {
+    Shown,
+    Hidden,
+    HelperMissing,
+    Unsupported,
+}
+
+fn pill_status(macos: bool, style: config::PillStyle, helper_found: bool) -> PillStatus {
+    if !macos {
+        PillStatus::Unsupported
+    } else if style == config::PillStyle::Hidden {
+        PillStatus::Hidden
+    } else if !helper_found {
+        PillStatus::HelperMissing
+    } else {
+        PillStatus::Shown
+    }
+}
+
+fn start_message(status: PillStatus) -> String {
+    match status {
+        PillStatus::Shown => "Bolo is running. Click the pill at the bottom of the screen to dictate, or right-click it for options. `bolo settings` opens the dashboard.".to_string(),
+        PillStatus::Hidden => "Bolo is running. The recording pill is off ([pill] style = \"hidden\"): Bolo uses the start sound and notification banners. `bolo pill-style small` turns the pill on; `bolo settings` opens the dashboard.".to_string(),
+        PillStatus::HelperMissing => format!(
+            "Bolo is running, but the recording pill helper (bolo-pill) is not installed: {}. Until then Bolo uses the start sound and notification banners. `bolo settings` opens the dashboard.",
+            pill::INSTALL_HINT
+        ),
+        PillStatus::Unsupported => "Bolo is running. The recording pill is macOS only for now: Bolo uses the start sound and notification banners. `bolo settings` opens the dashboard.".to_string(),
+    }
+}
+
+/// `bolo pill-style small|large|hidden` and `bolo pill-idle on|off`. A running
+/// daemon applies it live; without one the setting is saved for the next start.
+fn pill_setting(
+    cmd: &str,
+    value: Option<&str>,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let usage = if cmd == "pill-style" {
+        "usage: bolo pill-style small|large|hidden"
+    } else {
+        "usage: bolo pill-idle on|off"
+    };
+    let value = value.context(usage)?;
+    let valid = if cmd == "pill-style" {
+        config::PillStyle::parse(value).is_some()
+    } else {
+        matches!(value, "on" | "off")
+    };
+    anyhow::ensure!(valid, "{usage}");
+    if std::os::unix::net::UnixStream::connect(daemon::socket_path()).is_ok() {
+        return client(&format!("{cmd} {value}"));
+    }
+    let (style, idle) = if cmd == "pill-style" {
+        (config::PillStyle::parse(value), None)
+    } else {
+        (None, Some(value == "on"))
+    };
+    pill::save_settings(config_path, &events::EventHub::default(), style, idle)?;
+    println!("ok saved; no daemon is running, so it applies when Bolo starts");
     Ok(())
 }
 
@@ -387,6 +478,77 @@ fn client(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use crate::config::PillStyle;
+
+    #[test]
+    fn pill_status_follows_platform_style_and_helper() {
+        assert_eq!(pill_status(true, PillStyle::Small, true), PillStatus::Shown);
+        assert_eq!(pill_status(true, PillStyle::Large, true), PillStatus::Shown);
+        assert_eq!(
+            pill_status(true, PillStyle::Hidden, true),
+            PillStatus::Hidden
+        );
+        assert_eq!(
+            pill_status(true, PillStyle::Hidden, false),
+            PillStatus::Hidden
+        );
+        assert_eq!(
+            pill_status(true, PillStyle::Small, false),
+            PillStatus::HelperMissing
+        );
+        assert_eq!(
+            pill_status(false, PillStyle::Small, true),
+            PillStatus::Unsupported
+        );
+    }
+
+    #[test]
+    fn plain_bolo_says_where_the_pill_and_the_dashboard_are() {
+        let shown = start_message(PillStatus::Shown);
+        assert!(shown.contains("pill") && shown.contains("bolo settings"));
+
+        // A missing helper names the fix, and the fallback cue.
+        let missing = start_message(PillStatus::HelperMissing);
+        assert!(missing.contains("bolo-pill"), "{missing}");
+        assert!(missing.contains("./install.sh"), "{missing}");
+        assert!(missing.contains("banners"), "{missing}");
+
+        // Every message keeps the dashboard reachable now that `bolo` no longer opens it.
+        for status in [
+            PillStatus::Shown,
+            PillStatus::Hidden,
+            PillStatus::HelperMissing,
+            PillStatus::Unsupported,
+        ] {
+            assert!(start_message(status).contains("bolo settings"));
+        }
+        assert!(start_message(PillStatus::Hidden).contains("bolo pill-style small"));
+    }
+
+    #[test]
+    fn pill_settings_without_a_daemon_edit_the_config_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("bolo-main-test-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::copy("config.toml", &path).unwrap();
+
+        // Usage errors never touch the file.
+        assert!(pill_setting("pill-style", None, &path).is_err());
+        assert!(pill_setting("pill-style", Some("huge"), &path).is_err());
+        assert!(pill_setting("pill-idle", Some("maybe"), &path).is_err());
+        assert_eq!(Config::load(&path).unwrap().pill.style, PillStyle::Small);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]

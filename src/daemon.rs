@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 use crate::config::InjectMethod;
-use crate::config::{Config, SttBackend, PIPELINE_SAMPLE_RATE};
+use crate::config::{Config, PillStyle, SttBackend, PIPELINE_SAMPLE_RATE};
 use crate::events::{Event, EventHub};
 #[cfg(target_os = "macos")]
 use crate::inject::macos::MacOsTextInjector;
@@ -14,7 +14,7 @@ use anyhow::Context;
 use crossbeam_channel::Sender;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -177,6 +177,38 @@ fn notify(cfg: &Config, body: &str) {
         .body(body)
         .timeout(notify_rust::Timeout::Milliseconds(2500))
         .show();
+}
+
+/// A banner that only says what the pill already shows ("Listening…",
+/// "Paused", "Transcribing…"). It is skipped while a pill is on screen and
+/// kept otherwise (plain `cargo build`, Linux, Hidden style), where it is the
+/// only live cue besides the chime. Result and error banners use `notify`.
+fn notify_state(cfg: &Config, hub: &EventHub, body: &str) {
+    if hub.pill_visible() {
+        return;
+    }
+    notify(cfg, body);
+}
+
+fn notify_listening(cfg: &Config, hub: &EventHub) {
+    if cfg.vision.enabled {
+        notify_state(
+            cfg,
+            hub,
+            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
+        );
+    } else {
+        notify_state(
+            cfg,
+            hub,
+            "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
+        );
+    }
+}
+
+/// The hub of the running daemon, for callers that hold no lock.
+fn hub_of(shared: &Arc<Mutex<Shared>>) -> EventHub {
+    shared.lock().unwrap().events.clone()
 }
 
 /// Result notification with an Enhance action button. GNOME shows the button
@@ -459,10 +491,13 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let cfg = cfg.clone();
         let start_tx = start_tx.clone();
         let pipeline_tx = pipeline_tx.clone();
+        let config_path = config_path.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
-                if let Err(e) = handle_client(conn, &shared, &start_tx, &pipeline_tx, &cfg) {
+                if let Err(e) =
+                    handle_client(conn, &shared, &start_tx, &pipeline_tx, &cfg, &config_path)
+                {
                     // A client hanging up before reading its reply is routine
                     // (hotkey scripts, probes) - not worth an error line.
                     match e.downcast_ref::<std::io::Error>() {
@@ -475,7 +510,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     }
 
     // The pill helper subscribes to the socket above, so start it after the listener.
-    crate::pill::spawn_supervisor(&cfg.pill);
+    crate::pill::spawn_supervisor(&events);
 
     // Hotkey listener: on macOS, this intercepts keystrokes via CGEventTap.
     // On Linux, it's a no-op (hotkeys are handled by GNOME settings).
@@ -847,7 +882,7 @@ fn finalize(
     let t_end = Instant::now();
     let n_pieces = pieces.len();
     if n_pieces > 0 {
-        notify(cfg, "Transcribing…");
+        notify_state(cfg, &hub_of(shared), "Transcribing…");
     }
     // notify-rust's blocking show() cannot run inside block_on (it spins up
     // its own runtime), so the async block only returns what to say.
@@ -1088,12 +1123,45 @@ pub(crate) fn toggle(
     })
 }
 
+/// `pill-style small|large|hidden` and `pill-idle on|off`: save to config.toml
+/// and tell the pill, which applies it live.
+fn pill_command(cmd: &str, shared: &Arc<Mutex<Shared>>, config_path: &Path) -> String {
+    let mut words = cmd.split_whitespace();
+    let name = words.next().unwrap_or_default();
+    let arg = words.next();
+    let saved = match (name, arg) {
+        ("pill-style", Some(value)) => match PillStyle::parse(value) {
+            Some(style) => {
+                crate::pill::save_settings(config_path, &hub_of(shared), Some(style), None)
+            }
+            None => return "err usage: pill-style small|large|hidden".to_string(),
+        },
+        ("pill-idle", Some("on")) => {
+            crate::pill::save_settings(config_path, &hub_of(shared), None, Some(true))
+        }
+        ("pill-idle", Some("off")) => {
+            crate::pill::save_settings(config_path, &hub_of(shared), None, Some(false))
+        }
+        ("pill-style", None) => return "err usage: pill-style small|large|hidden".to_string(),
+        _ => return "err usage: pill-idle on|off".to_string(),
+    };
+    match saved {
+        Ok(pill) => format!(
+            "ok pill {} idle {}",
+            pill.style.as_str(),
+            if pill.show_when_idle { "on" } else { "off" }
+        ),
+        Err(e) => format!("err cannot save pill settings: {e:#}"),
+    }
+}
+
 fn handle_client(
     conn: UnixStream,
     shared: &Arc<Mutex<Shared>>,
     start_tx: &Sender<()>,
     pipeline_tx: &Sender<PipelineMsg>,
     cfg: &Config,
+    config_path: &Path,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut conn = conn;
@@ -1104,17 +1172,7 @@ fn handle_client(
     let reply = match line.trim() {
         "toggle" => match toggle(shared, start_tx, pipeline_tx, cfg)? {
             Toggle::Started => {
-                if cfg.vision.enabled {
-                    notify(
-                        cfg,
-                        "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
-                    );
-                } else {
-                    notify(
-                        cfg,
-                        "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
-                    );
-                }
+                notify_listening(cfg, &hub_of(shared));
                 "ok recording".to_string()
             }
             Toggle::Stopping => "ok stopping".to_string(),
@@ -1179,9 +1237,11 @@ fn handle_client(
                     if let Some(tx) = s.control_tx.as_ref() {
                         let _ = tx.send(Control::Pause);
                     }
+                    let hub = s.events.clone();
                     drop(s);
-                    notify(
+                    notify_state(
                         cfg,
+                        &hub,
                         "Paused - Alt+I insert clipboard · Alt+P resume · Ctrl+Space finish",
                     );
                     "ok paused".to_string()
@@ -1199,19 +1259,10 @@ fn handle_client(
                     }
                     s.set_phase(Phase::Recording);
                     s.toggle_t0 = Some(Instant::now());
+                    let hub = s.events.clone();
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
-                    if cfg.vision.enabled {
-                        notify(
-                            cfg,
-                            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
-                        );
-                    } else {
-                        notify(
-                            cfg,
-                            "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
-                        );
-                    }
+                    notify_listening(cfg, &hub);
                     "ok recording".to_string()
                 }
                 phase => format!("err not recording (phase: {})", phase.as_str()),
@@ -1314,12 +1365,21 @@ fn handle_client(
             }
         }
         "status" => shared.lock().unwrap().phase.as_str().to_string(),
-        "subscribe" => {
+        // `subscribe pill` is the on-screen renderer, which the daemon counts to
+        // know its own state banners are redundant.
+        subscription @ ("subscribe" | "subscribe pill") => {
             // The hub owns the connection from here; this thread must not
             // block, because it serves every other command.
-            let hub = shared.lock().unwrap().events.clone();
-            hub.subscribe(conn);
+            let hub = hub_of(shared);
+            if subscription == "subscribe pill" {
+                hub.subscribe_pill(conn);
+            } else {
+                hub.subscribe(conn);
+            }
             return Ok(());
+        }
+        cmd if cmd.starts_with("pill-style") || cmd.starts_with("pill-idle") => {
+            pill_command(cmd, shared, config_path)
         }
         "quit" => {
             crate::pill::stop();
@@ -1337,6 +1397,7 @@ fn handle_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PillConfig;
     use crate::vocab::TranscriptPiece;
     use std::time::Duration;
 
@@ -1391,9 +1452,28 @@ mod tests {
         pipeline_tx: &Sender<PipelineMsg>,
         cfg: &Config,
     ) -> String {
+        command_with_config(
+            line,
+            shared,
+            start_tx,
+            pipeline_tx,
+            cfg,
+            Path::new("config.toml"),
+        )
+    }
+
+    /// Like `command`, with the config file the socket handler may rewrite.
+    fn command_with_config(
+        line: &str,
+        shared: &Arc<Mutex<Shared>>,
+        start_tx: &Sender<()>,
+        pipeline_tx: &Sender<PipelineMsg>,
+        cfg: &Config,
+        config_path: &Path,
+    ) -> String {
         let (server, mut client) = UnixStream::pair().unwrap();
         writeln!(client, "{line}").unwrap();
-        handle_client(server, shared, start_tx, pipeline_tx, cfg).unwrap();
+        handle_client(server, shared, start_tx, pipeline_tx, cfg, config_path).unwrap();
         let mut reply = String::new();
         BufReader::new(client).read_line(&mut reply).unwrap();
         reply.trim().to_string()
@@ -1496,7 +1576,15 @@ mod tests {
         shared.lock().unwrap().set_phase(Phase::Recording);
         let (server, mut client) = UnixStream::pair().unwrap();
         writeln!(client, "subscribe").unwrap();
-        handle_client(server, &shared, &start_tx, &pipeline_tx, &cfg).unwrap();
+        handle_client(
+            server,
+            &shared,
+            &start_tx,
+            &pipeline_tx,
+            &cfg,
+            Path::new("config.toml"),
+        )
+        .unwrap();
 
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1618,5 +1706,149 @@ mod tests {
             out,
             "Speech before\n\n```typescript\nconst x: number = 42;\nconsole.log(x);\n```\n\nSpeech after"
         );
+    }
+
+    /// A private copy of the shipped config the socket handler may rewrite.
+    fn scratch_config(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "bolo-daemon-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::copy("config.toml", &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn pill_style_command_saves_the_config_and_tells_subscribers_live() {
+        let (shared, hub, cfg) = daemon_state();
+        let events = subscribe(&hub);
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        let path = scratch_config("style");
+
+        let reply = command_with_config(
+            "pill-style large",
+            &shared,
+            &start_tx,
+            &pipeline_tx,
+            &cfg,
+            &path,
+        );
+
+        assert_eq!(reply, "ok pill large idle on");
+        assert_eq!(
+            next(&events),
+            json!({ "type": "config", "style": "large", "show_idle": true })
+        );
+        assert_eq!(hub.pill().style, PillStyle::Large);
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.pill.style, PillStyle::Large);
+        // The comments around the setting survive the rewrite.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("(waveform, timer, Pause, Stop)"), "{text}");
+
+        // The same value again changes nothing and publishes nothing.
+        let again = command_with_config(
+            "pill-style large",
+            &shared,
+            &start_tx,
+            &pipeline_tx,
+            &cfg,
+            &path,
+        );
+        assert_eq!(again, "ok pill large idle on");
+        let reply = command_with_config(
+            "pill-idle off",
+            &shared,
+            &start_tx,
+            &pipeline_tx,
+            &cfg,
+            &path,
+        );
+        assert_eq!(reply, "ok pill large idle off");
+        assert_eq!(
+            next(&events),
+            json!({ "type": "config", "style": "large", "show_idle": false })
+        );
+        assert!(!Config::load(&path).unwrap().pill.show_when_idle);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pill_style_command_rejects_unknown_styles_without_touching_anything() {
+        let (shared, hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        let path = scratch_config("bad");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        for line in [
+            "pill-style huge",
+            "pill-style",
+            "pill-idle maybe",
+            "pill-idle",
+        ] {
+            let reply = command_with_config(line, &shared, &start_tx, &pipeline_tx, &cfg, &path);
+            assert!(reply.starts_with("err usage:"), "{line}: {reply}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(hub.pill(), cfg.pill);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn subscribe_pill_marks_the_pill_renderer_so_state_banners_can_stand_down() {
+        let (shared, hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        assert!(!hub.pill_visible(), "no pill connected yet");
+
+        // A plain subscriber (`bolo events`) is not a pill.
+        let _events = subscribe(&hub);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!hub.pill_visible());
+
+        let (server, mut client) = UnixStream::pair().unwrap();
+        writeln!(client, "subscribe pill").unwrap();
+        handle_client(
+            server,
+            &shared,
+            &start_tx,
+            &pipeline_tx,
+            &cfg,
+            Path::new("config.toml"),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !hub.pill_visible() {
+            assert!(Instant::now() < deadline, "pill subscriber never counted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Hidden style draws nothing, so the banners are the cue again.
+        assert!(hub.set_pill(PillConfig {
+            style: PillStyle::Hidden,
+            ..hub.pill()
+        }));
+        assert!(!hub.pill_visible());
+        // And a pill that went away stops counting.
+        assert!(hub.set_pill(PillConfig {
+            style: PillStyle::Small,
+            ..hub.pill()
+        }));
+        assert!(hub.pill_visible());
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.pill_visible() {
+            assert!(Instant::now() < deadline, "closed pill still counted");
+            hub.publish(Event::Phase(Phase::Idle)); // the hub notices on its next write
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

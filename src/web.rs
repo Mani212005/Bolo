@@ -3,7 +3,7 @@
 //! SuperWhisper-style UI (src/ui/app.html) and a rich JSON/Audio API over the same
 //! state the daemon uses.
 
-use crate::config::Config;
+use crate::config::{Config, PillConfig, PillStyle};
 use crate::config_edit::{ConfigDoc, MODELS};
 use crate::daemon::{Phase, PipelineMsg, Shared, Toggle};
 use crate::stt::SttProvider;
@@ -341,6 +341,14 @@ pub(crate) fn route(
     }
     if method == "POST" && clean_path == "/api/config" {
         let changes: Value = serde_json::from_str(body).context("bad JSON body")?;
+        // Checked before anything is written, so a bad value saves nothing.
+        let pill_style = match changes["pill_style"].as_str() {
+            Some(name) => Some(PillStyle::parse(name).with_context(|| {
+                format!("unknown pill style {name:?} (small, large or hidden)")
+            })?),
+            None => None,
+        };
+        let pill_show_when_idle = changes["pill_show_when_idle"].as_bool();
         let mut doc = ConfigDoc::load(config_path)?;
         if let Some(v) = changes["provider"].as_str() {
             doc.set(&["stt", "provider"], v.into());
@@ -409,9 +417,18 @@ pub(crate) fn route(
             }
         }
         doc.save()?;
+        // The pill applies live (the supervisor and the helper follow the event
+        // stream), so it is saved after the rest and needs no restart.
+        if pill_style.is_some() || pill_show_when_idle.is_some() {
+            let events = shared.lock().unwrap().events.clone();
+            crate::pill::save_settings(config_path, &events, pill_style, pill_show_when_idle)?;
+        }
+        let only_pill = changes
+            .as_object()
+            .is_some_and(|keys| keys.keys().all(|k| k.starts_with("pill_")));
         eprintln!("[web] config saved");
         return Ok(WebResponse::Json(
-            json!({ "ok": true, "needs_restart": true }),
+            json!({ "ok": true, "needs_restart": !only_pill }),
         ));
     }
     if method == "POST" && clean_path == "/api/restart" {
@@ -580,6 +597,10 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "jev_provider": jev_target.as_ref().map(|t| t.provider),
         "paragraphs": doc.bool_at(&["formatting", "paragraphs"], true),
         "list_cues": doc.bool_at(&["formatting", "list_cues"], true),
+        "pill_style": doc.str_at(&["pill", "style"], PillConfig::default().style.as_str()),
+        "pill_show_when_idle": doc.bool_at(&["pill", "show_when_idle"], true),
+        // Only macOS has a pill renderer so far.
+        "pill_supported": cfg!(target_os = "macos"),
         "jev_timeout_ms": doc.int_at(
             &["formatting", "jev", "timeout_ms"],
             crate::jev::DEFAULT_TIMEOUT_MS as i64,
@@ -796,5 +817,114 @@ mod tests {
         assert!(s.get("jev_model").is_some());
         assert!(s.get("jev_timeout_ms").is_some());
         assert!(s.get("has_openrouter_api_key").is_some());
+    }
+
+    #[test]
+    fn test_state_includes_the_pill_settings() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let s = state(Path::new("config.toml"), &shared).unwrap();
+        assert_eq!(s["pill_style"], "small");
+        assert_eq!(s["pill_show_when_idle"], true);
+        assert_eq!(s["pill_supported"], cfg!(target_os = "macos"));
+    }
+
+    /// A private copy of the shipped config, so a test never edits the repo's.
+    fn scratch_config(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "bolo-web-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::copy("config.toml", &path).unwrap();
+        path
+    }
+
+    fn post_config(
+        body: &str,
+        config_path: &Path,
+        shared: &Arc<Mutex<Shared>>,
+    ) -> anyhow::Result<Value> {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let cfg = Config::load(config_path).unwrap();
+        match route(
+            "POST",
+            "/api/config",
+            body,
+            body.as_bytes(),
+            config_path,
+            shared,
+            &cfg,
+            &start_tx,
+            &pipeline_tx,
+            &stt,
+        )? {
+            WebResponse::Json(v) => Ok(v),
+            _ => panic!("expected JSON"),
+        }
+    }
+
+    #[test]
+    fn test_pill_settings_round_trip_through_api_config_and_apply_live() {
+        use crate::events::testing::{next, subscribe};
+        let path = scratch_config("pill");
+        let hub = crate::events::EventHub::spawn(PillConfig::default());
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().events = hub.clone();
+        let events = subscribe(&hub);
+
+        let reply = post_config(
+            r#"{"pill_style":"large","pill_show_when_idle":false}"#,
+            &path,
+            &shared,
+        )
+        .unwrap();
+
+        // The pill is applied live: no restart, and subscribers hear about it.
+        assert_eq!(reply["needs_restart"], false);
+        assert_eq!(
+            next(&events),
+            json!({ "type": "config", "style": "large", "show_idle": false })
+        );
+        assert_eq!(hub.pill().style, PillStyle::Large);
+        let saved = Config::load(&path).unwrap().pill;
+        assert_eq!(saved.style, PillStyle::Large);
+        assert!(!saved.show_when_idle);
+        let s = state(&path, &shared).unwrap();
+        assert_eq!(s["pill_style"], "large");
+        assert_eq!(s["pill_show_when_idle"], false);
+
+        // Other settings still ask for a restart, and leave the pill alone.
+        let reply = post_config(r#"{"sounds":false}"#, &path, &shared).unwrap();
+        assert_eq!(reply["needs_restart"], true);
+        assert_eq!(Config::load(&path).unwrap().pill.style, PillStyle::Large);
+
+        // One request can carry both kinds; the pill part still lands.
+        let reply =
+            post_config(r#"{"sounds":true,"pill_style":"hidden"}"#, &path, &shared).unwrap();
+        assert_eq!(reply["needs_restart"], true);
+        assert_eq!(Config::load(&path).unwrap().pill.style, PillStyle::Hidden);
+        assert!(Config::load(&path).unwrap().daemon.sounds);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_unknown_pill_style_is_rejected_and_nothing_is_saved() {
+        let path = scratch_config("badpill");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+
+        let err =
+            post_config(r#"{"sounds":false,"pill_style":"huge"}"#, &path, &shared).unwrap_err();
+
+        assert!(err.to_string().contains("unknown pill style"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

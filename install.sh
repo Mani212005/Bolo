@@ -189,11 +189,13 @@ cat <<'EOF'
   🎙️ Bolo is installed and ready on macOS!
 
   Quickstart:
-    bolo        Launch daemon & open native popup dashboard
-    bolo exit   Stop daemon, recording pill and popup window
+    bolo          Start Bolo (daemon and recording pill, no window)
+    bolo settings Open the settings & history dashboard
+    bolo exit     Stop daemon, recording pill and dashboard window
 
   A small pill at the bottom of the screen shows when Bolo is recording (live
-  waveform) and transcribing. Click it to start, stop or resume. Drag to move it.
+  waveform) and transcribing. Click it to start, stop or resume. Drag to move it;
+  right-click for Small / Large / Hidden and the dashboard.
 
   Shortcuts:
     Ctrl+Space  Start dictating / finish (text pastes at cursor)
@@ -213,8 +215,9 @@ cat <<'EOF'
   🎙️ Bolo is installed and ready on Linux!
 
   Quickstart:
-    bolo        Launch daemon & open dashboard
-    bolo exit   Stop daemon
+    bolo          Start the daemon
+    bolo settings Open the dashboard
+    bolo exit     Stop daemon
 
   Shortcuts:
     Ctrl+Space  Start dictating / finish (text pastes at cursor)

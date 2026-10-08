@@ -49,7 +49,8 @@ impl ConfigDoc {
         Some(item)
     }
 
-    pub fn set(&mut self, path: &[&str], value: toml_edit::Value) {
+    /// Sets a value; a comment on the replaced line (`key = 1  # note`) stays.
+    pub fn set(&mut self, path: &[&str], mut value: toml_edit::Value) {
         let mut item = self.doc.as_item_mut();
         for key in &path[..path.len() - 1] {
             if item.get(key).is_none() {
@@ -57,7 +58,11 @@ impl ConfigDoc {
             }
             item = &mut item[key];
         }
-        item[path[path.len() - 1]] = toml_edit::value(value);
+        let key = path[path.len() - 1];
+        if let Some(old) = item.get(key).and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        item[key] = toml_edit::value(value);
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

@@ -169,7 +169,7 @@ fn provider_key(provider: crate::jev::JevProvider) -> Option<String> {
 }
 
 /// The on-screen recording pill (macOS), drawn by the `bolo-pill` helper.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct PillConfig {
     pub style: PillStyle,
@@ -195,6 +195,7 @@ impl Default for PillConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PillStyle {
     Small,
+    Large,
     Hidden,
 }
 
@@ -202,7 +203,18 @@ impl PillStyle {
     pub fn as_str(self) -> &'static str {
         match self {
             PillStyle::Small => "small",
+            PillStyle::Large => "large",
             PillStyle::Hidden => "hidden",
+        }
+    }
+
+    /// The names `as_str` produces, as typed by `bolo pill-style` or sent by the dashboard.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "small" => Some(PillStyle::Small),
+            "large" => Some(PillStyle::Large),
+            "hidden" => Some(PillStyle::Hidden),
+            _ => None,
         }
     }
 }
@@ -490,6 +502,20 @@ mod tests {
             pill_from("[pill]\nstyle = \"small\"\n").style.as_str(),
             "small"
         );
+        assert_eq!(
+            pill_from("[pill]\nstyle = \"large\"\n").style,
+            PillStyle::Large
+        );
+    }
+
+    #[test]
+    fn pill_style_names_round_trip() {
+        for style in [PillStyle::Small, PillStyle::Large, PillStyle::Hidden] {
+            assert_eq!(PillStyle::parse(style.as_str()), Some(style));
+        }
+        assert_eq!(PillStyle::parse(" Large "), Some(PillStyle::Large));
+        assert_eq!(PillStyle::parse("huge"), None);
+        assert_eq!(PillStyle::parse(""), None);
     }
 
     #[test]
