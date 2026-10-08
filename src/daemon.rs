@@ -1751,7 +1751,7 @@ mod tests {
         assert_eq!(saved.pill.style, PillStyle::Large);
         // The comments around the setting survive the rewrite.
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("hidden = chime and banners only"), "{text}");
+        assert!(text.contains("(waveform, timer, Pause, Stop)"), "{text}");
 
         // The same value again changes nothing and publishes nothing.
         let again = command_with_config(

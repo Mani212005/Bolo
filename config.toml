@@ -57,8 +57,10 @@ model = "llama-3.3-70b-versatile"
 [pill]
 # macOS: a small pill on screen shows when Bolo is recording (live mic waveform) and
 # transcribing. Click it to start, stop or resume. It never takes focus from your app.
-# Needs the bolo-pill helper that ./install.sh builds next to bolo.
-style = "small"                     # "small" | "hidden" (hidden = chime and banners only)
+# Needs the bolo-pill helper that ./install.sh builds next to bolo. Changes apply at once:
+# edit here, use the dashboard's Recording indicator card, `bolo pill-style`, or right-click the pill.
+# With the pill showing, Bolo skips its "Listening / Paused / Transcribing" banners; result and error banners stay.
+style = "small"                     # "small" | "large" (waveform, timer, Pause, Stop) | "hidden" (start sound and banners only)
 show_when_idle = true               # keep a tiny handle on screen; click it to start dictating
 
 [ui]
