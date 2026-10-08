@@ -5,15 +5,13 @@
 
 use crate::config::Config;
 use crate::config_edit::{ConfigDoc, MODELS};
-use crate::daemon::{Phase, PipelineMsg, Shared};
+use crate::daemon::{Phase, PipelineMsg, Shared, Toggle};
 use crate::stt::SttProvider;
-use crate::vad::Control;
 use anyhow::Context;
 use crossbeam_channel::Sender;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 const APP_HTML: &str = include_str!("ui/app.html");
 const HOTKEY_ACTIONS: [(&str, &str); 3] = [
@@ -316,47 +314,10 @@ pub(crate) fn route(
         }
     }
     if method == "POST" && clean_path == "/api/toggle" {
-        let mut s = shared.lock().unwrap();
-        let status = match s.phase {
-            Phase::Idle => {
-                s.phase = Phase::Recording;
-                s.toggle_t0 = Some(Instant::now());
-                if cfg.vision.enabled {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let session_dir =
-                        crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
-                    if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                        eprintln!(
-                            "[vision] failed to create session dir {}: {e:#}",
-                            session_dir.display()
-                        );
-                    }
-                    s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
-                        cfg.vision.min_angle_degrees,
-                    ));
-                    s.vision_session_dir = Some(session_dir);
-                    s.captured_context_images.clear();
-                }
-                drop(s);
-                let _ = start_tx.send(());
-                "recording"
-            }
-            Phase::Recording => {
-                if let Some(tx) = s.control_tx.as_ref() {
-                    let _ = tx.send(Control::ForceStop);
-                }
-                "stopping"
-            }
-            Phase::Paused => {
-                s.phase = Phase::Processing;
-                drop(s);
-                let _ = pipeline_tx.send(PipelineMsg::Finalize);
-                "processing"
-            }
-            Phase::Processing => "processing",
+        let status = match crate::daemon::toggle(shared, start_tx, pipeline_tx, cfg)? {
+            Toggle::Started | Toggle::Debounced => "recording",
+            Toggle::Stopping => "stopping",
+            Toggle::Finishing | Toggle::Busy => "processing",
         };
         return Ok(WebResponse::Json(json!({ "ok": true, "phase": status })));
     }
@@ -721,6 +682,53 @@ mod tests {
             s.vision_session_dir.is_none(),
             "Vision session dir must not be initialized when disabled"
         );
+    }
+
+    #[test]
+    fn test_web_toggle_is_debounced_like_the_hotkey() {
+        let (start_tx, _start_rx) = unbounded();
+        let (pipeline_tx, _pipeline_rx) = unbounded();
+        let (control_tx, control_rx) = unbounded();
+        let stt: Arc<dyn SttProvider> = Arc::new(DummyStt);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        cfg.vision.enabled = false;
+        {
+            let mut s = shared.lock().unwrap();
+            s.set_phase(Phase::Recording);
+            s.toggle_t0 = Some(std::time::Instant::now());
+            s.control_tx = Some(control_tx);
+        }
+        let post_toggle = || {
+            route(
+                "POST",
+                "/api/toggle",
+                "",
+                &[],
+                Path::new("config.toml"),
+                &shared,
+                &cfg,
+                &start_tx,
+                &pipeline_tx,
+                &stt,
+            )
+            .unwrap()
+        };
+
+        // Within 800 ms of the start a second toggle is an accidental double tap.
+        post_toggle();
+        assert!(control_rx.try_recv().is_err());
+
+        shared.lock().unwrap().toggle_t0 =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        match post_toggle() {
+            WebResponse::Json(v) => assert_eq!(v["phase"], "stopping"),
+            _ => panic!("expected json"),
+        }
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(crate::vad::Control::ForceStop)
+        ));
     }
 
     #[test]

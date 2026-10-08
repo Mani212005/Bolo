@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 use crate::config::InjectMethod;
 use crate::config::{Config, SttBackend, PIPELINE_SAMPLE_RATE};
+use crate::events::{Event, EventHub};
 #[cfg(target_os = "macos")]
 use crate::inject::macos::MacOsTextInjector;
 #[cfg(target_os = "linux")]
@@ -107,6 +108,19 @@ pub(crate) struct Shared {
     pub(crate) vision_session_dir: Option<PathBuf>,
     /// Chronological context images captured during session
     pub(crate) captured_context_images: Vec<PathBuf>,
+    /// Broadcasts phase changes, levels and outcomes to subscribers.
+    pub(crate) events: EventHub,
+}
+
+impl Shared {
+    /// The only way to change the phase: every change is published, so the
+    /// event stream (and the pill drawn from it) never misses a transition.
+    pub(crate) fn set_phase(&mut self, phase: Phase) {
+        if self.phase != phase {
+            self.phase = phase;
+            self.events.publish(Event::Phase(phase));
+        }
+    }
 }
 
 pub(crate) enum PipelineMsg {
@@ -135,6 +149,23 @@ pub fn socket_path() -> PathBuf {
     let dir = crate::userdata::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     dir.join("bolo.sock")
+}
+
+fn outcome_event(kind: &'static str, detail: &'static str, chars: Option<usize>) -> Event {
+    Event::Outcome {
+        kind,
+        detail,
+        chars,
+    }
+}
+
+/// Ends a session that never reached the pipeline (no mic, endpointer error):
+/// report why, then go idle.
+fn end_session(shared: &Arc<Mutex<Shared>>, closing: Event) {
+    let mut s = shared.lock().unwrap();
+    s.events.publish(closing);
+    s.set_phase(Phase::Idle);
+    s.toggle_t0 = None;
 }
 
 fn notify(cfg: &Config, body: &str) {
@@ -314,6 +345,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     }
     let stt = crate::stt::make_provider(&cfg)?;
 
+    let events = EventHub::spawn(cfg.pill.clone());
     let shared = Arc::new(Mutex::new(Shared {
         phase: Phase::Idle,
         control_tx: None,
@@ -323,6 +355,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         vision_detector: None,
         vision_session_dir: None,
         captured_context_images: Vec::new(),
+        events: events.clone(),
     }));
     let (start_tx, start_rx) = crossbeam_channel::unbounded::<()>();
     let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded::<PipelineMsg>();
@@ -334,6 +367,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let pipeline_tx = pipeline_tx.clone();
         let vad_cfg = cfg.vad.clone();
         let cfg_audio = cfg.clone();
+        let events = events.clone();
         std::thread::spawn(move || {
             for () in start_rx.iter() {
                 let (audio_tx, audio_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
@@ -343,9 +377,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     Ok(x) => x,
                     Err(e) => {
                         eprintln!("[daemon] audio start failed: {e:#}");
-                        let mut s = shared.lock().unwrap();
-                        s.phase = Phase::Idle;
-                        s.toggle_t0 = None;
+                        end_session(&shared, outcome_event("mic-unavailable", "", None));
                         continue;
                     }
                 };
@@ -370,6 +402,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         &vad_cfg,
                         info.sample_rate,
                         vad_cfg.auto_endpoint,
+                        &|rms, speech| events.publish_level(rms, speech),
                     );
 
                     match result {
@@ -401,7 +434,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                                 s.control_tx = None;
                                 s.toggle_t0 = None;
                                 if utt.reason != StopReason::Pause {
-                                    s.phase = Phase::Processing;
+                                    s.set_phase(Phase::Processing);
                                 }
                             }
                             let _ = pipeline_tx.send(PipelineMsg::Segment(utt));
@@ -411,7 +444,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                             eprintln!("[daemon] endpointer failed: {e:#}");
                             drop(stream);
                             crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
-                            shared.lock().unwrap().phase = Phase::Idle;
+                            end_session(&shared, outcome_event("error", "", None));
                             break;
                         }
                     }
@@ -441,9 +474,16 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         });
     }
 
+    // The pill helper subscribes to the socket above, so start it after the listener.
+    crate::pill::spawn_supervisor(&cfg.pill);
+
     // Hotkey listener: on macOS, this intercepts keystrokes via CGEventTap.
     // On Linux, it's a no-op (hotkeys are handled by GNOME settings).
-    {
+    // A test daemon (scripts/pill-e2e) sets BOLO_NO_HOTKEYS so it never reacts
+    // to the real keyboard alongside the user's own daemon.
+    if std::env::var_os("BOLO_NO_HOTKEYS").is_some() {
+        eprintln!("[daemon] global hotkeys disabled by BOLO_NO_HOTKEYS");
+    } else {
         let listener = crate::hotkey::get_listener();
         let path = path.clone();
         let shared_hotkey = Arc::clone(&shared);
@@ -489,6 +529,8 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let mut injectors = Injectors::new(&cfg);
     let mut pieces: Vec<Piece> = Vec::new();
+    // The session hit the max-length cap; reported with its outcome.
+    let mut capped = false;
 
     for msg in pipeline_rx.iter() {
         match msg {
@@ -526,6 +568,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     }
                 }
                 if utt.reason == StopReason::MaxCap {
+                    capped = true;
                     notify(
                         &cfg,
                         &format!(
@@ -535,7 +578,14 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     );
                 }
                 if utt.reason != StopReason::Pause && !matches!(utt.reason, StopReason::Splice(_)) {
-                    finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
+                    finalize(
+                        &runtime,
+                        &mut pieces,
+                        &mut injectors,
+                        &cfg,
+                        &shared,
+                        std::mem::take(&mut capped),
+                    );
                 }
             }
             PipelineMsg::Insert(text) => {
@@ -543,12 +593,20 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                 pieces.push(Piece::Inserted(text));
             }
             PipelineMsg::Finalize => {
-                finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared);
+                finalize(
+                    &runtime,
+                    &mut pieces,
+                    &mut injectors,
+                    &cfg,
+                    &shared,
+                    std::mem::take(&mut capped),
+                );
             }
             PipelineMsg::InsertLast(text) => {
                 let outcome = runtime.block_on(inject_text(&text, &mut injectors, &cfg, &[]));
                 match outcome {
-                    Ok(used) => {
+                    Ok(injected) => {
+                        let used = injected.method;
                         eprintln!(
                             "[insert-last] method={} chars={}",
                             used,
@@ -589,21 +647,58 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How a dictation was injected.
+struct Injected {
+    /// The method actually used (portal falls back to clipboard).
+    method: &'static str,
+    /// Set when a multi-piece paste stopped early, with the reason.
+    interrupted: Option<&'static str>,
+}
+
+impl Injected {
+    #[cfg(target_os = "linux")]
+    fn new(method: &'static str) -> Self {
+        Self {
+            method,
+            interrupted: None,
+        }
+    }
+
+    /// What the pill says about a finished injection.
+    fn detail(&self) -> &'static str {
+        match self.method {
+            "portal" => "typed",
+            "clipboard" | "clipboard-fallback" => "copied",
+            _ => "pasted",
+        }
+    }
+}
+
 /// Inject `text` by the configured method (portal falls back to clipboard).
-/// Returns the method actually used.
 async fn inject_text(
     text: &str,
     injectors: &mut Injectors,
     #[allow(unused)] cfg: &Config,
     images: &[std::path::PathBuf],
-) -> anyhow::Result<&'static str> {
+) -> anyhow::Result<Injected> {
     #[cfg(target_os = "macos")]
     {
+        use crate::inject::macos::{InterruptReason, PasteOutcome};
         let outcome = injectors.macos.inject_with_images(text, images).await?;
         if let Some(notice) = outcome.notice() {
             notify(cfg, &notice);
         }
-        Ok("macos")
+        let interrupted = match outcome {
+            PasteOutcome::Done => None,
+            PasteOutcome::Interrupted { reason, .. } => Some(match reason {
+                InterruptReason::FocusChanged => "focus-changed",
+                InterruptReason::ClipboardChanged => "clipboard-changed",
+            }),
+        };
+        Ok(Injected {
+            method: "macos",
+            interrupted,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -641,25 +736,25 @@ async fn inject_text(
                                 }
                             });
                         }
-                        Ok("paste")
+                        Ok(Injected::new("paste"))
                     }
                     Err(e) => {
                         eprintln!("[inject] paste chord failed ({e:#}); text is on the clipboard");
-                        Ok("clipboard")
+                        Ok(Injected::new("clipboard"))
                     }
                 }
             }
             InjectMethod::Portal => match injectors.portal.inject(text).await {
-                Ok(()) => Ok("portal"),
+                Ok(()) => Ok(Injected::new("portal")),
                 Err(e) => {
                     eprintln!("[inject] portal failed ({e:#}); falling back to clipboard");
                     injectors.clipboard.inject(text).await?;
-                    Ok("clipboard-fallback")
+                    Ok(Injected::new("clipboard-fallback"))
                 }
             },
             InjectMethod::Clipboard => {
                 injectors.clipboard.inject(text).await?;
-                Ok("clipboard")
+                Ok(Injected::new("clipboard"))
             }
         }
     }
@@ -719,8 +814,27 @@ async fn format_dictation(
     plan.render(answers.as_ref(), style)
 }
 
-/// STT provider used, final text, last audio id and total audio seconds.
-type Transcribed = (&'static str, String, Option<String>, f64);
+/// How the text went in, final text, last audio id and total audio seconds.
+type Transcribed = (Injected, String, Option<String>, f64);
+
+/// The event that closes a dictation. `capped` marks a session that hit the
+/// max-length limit; its text was still transcribed and pasted.
+fn finalize_outcome(result: &anyhow::Result<Option<Transcribed>>, capped: bool) -> Event {
+    match result {
+        Ok(None) => outcome_event("no-speech", "", None),
+        Ok(Some((injected, text, _, _))) => {
+            let chars = Some(text.chars().count());
+            if let Some(reason) = injected.interrupted {
+                outcome_event("paste-interrupted", reason, chars)
+            } else if capped {
+                outcome_event("max-length", injected.detail(), chars)
+            } else {
+                outcome_event("done", injected.detail(), chars)
+            }
+        }
+        Err(_) => outcome_event("error", "", None),
+    }
+}
 
 fn finalize(
     runtime: &tokio::runtime::Runtime,
@@ -728,6 +842,7 @@ fn finalize(
     injectors: &mut Injectors,
     cfg: &Config,
     shared: &Arc<Mutex<Shared>>,
+    capped: bool,
 ) {
     let t_end = Instant::now();
     let n_pieces = pieces.len();
@@ -799,7 +914,8 @@ fn finalize(
         let images = shared.lock().unwrap().captured_context_images.clone();
 
         let t_inject = Instant::now();
-        let used = inject_text(&text, injectors, cfg, &images).await?;
+        let injected = inject_text(&text, injectors, cfg, &images).await?;
+        let used = injected.method;
         // Safety net: the transcript is always on the clipboard too, so a
         // missed portal paste never means digging through daemon logs. The
         // text was already typed, so a copy failure is non-fatal.
@@ -816,15 +932,16 @@ fn finalize(
             t_inject.elapsed().as_millis(),
             t_end.elapsed().as_millis()
         );
-        Ok(Some((used, text, last_audio_id, total_duration_s)))
+        Ok(Some((injected, text, last_audio_id, total_duration_s)))
     });
+    let closing = finalize_outcome(&outcome, capped);
     match &outcome {
         Ok(None) => {
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
-        Ok(Some((used, text, audio_id, duration_s))) => {
-            let head = match *used {
+        Ok(Some((injected, text, audio_id, duration_s))) => {
+            let head = match injected.method {
                 "paste" => "Pasted + on clipboard",
                 "portal" => "Typed + copied - Ctrl+V pastes it elsewhere",
                 _ => "On clipboard - paste with Ctrl+V",
@@ -893,8 +1010,82 @@ fn finalize(
     }
 
     let mut s = shared.lock().unwrap();
-    s.phase = Phase::Idle;
+    // The outcome comes first so a renderer shows the result before it goes idle.
+    s.events.publish(closing);
+    s.set_phase(Phase::Idle);
     s.clip_snapshot = None;
+}
+
+/// What a toggle did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Toggle {
+    /// Idle: recording started.
+    Started,
+    /// Recording: stop requested, the audio thread finishes the segment.
+    Stopping,
+    /// Recording, within 800 ms of the start: ignored.
+    Debounced,
+    /// Paused: the dictation so far is being transcribed.
+    Finishing,
+    /// Already transcribing.
+    Busy,
+}
+
+/// The single start/stop path shared by the hotkey, `bolo toggle`, the
+/// dashboard and the pill.
+pub(crate) fn toggle(
+    shared: &Arc<Mutex<Shared>>,
+    start_tx: &Sender<()>,
+    pipeline_tx: &Sender<PipelineMsg>,
+    cfg: &Config,
+) -> anyhow::Result<Toggle> {
+    let mut s = shared.lock().unwrap();
+    Ok(match s.phase {
+        Phase::Idle => {
+            s.set_phase(Phase::Recording);
+            s.toggle_t0 = Some(Instant::now());
+            if cfg.vision.enabled {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
+                if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                    eprintln!(
+                        "[vision] failed to create session dir {}: {e:#}",
+                        session_dir.display()
+                    );
+                }
+                s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
+                    cfg.vision.min_angle_degrees,
+                ));
+                s.vision_session_dir = Some(session_dir);
+                s.captured_context_images.clear();
+            }
+            drop(s);
+            start_tx.send(()).context("audio thread gone")?;
+            Toggle::Started
+        }
+        Phase::Recording => {
+            // Debounce: ignore accidental rapid double-tap within 800ms of start
+            if s.toggle_t0.is_some_and(|t0| t0.elapsed().as_millis() < 800) {
+                return Ok(Toggle::Debounced);
+            }
+            if let Some(tx) = s.control_tx.as_ref() {
+                let _ = tx.send(Control::ForceStop);
+            }
+            Toggle::Stopping
+        }
+        Phase::Paused => {
+            s.set_phase(Phase::Processing);
+            drop(s);
+            pipeline_tx
+                .send(PipelineMsg::Finalize)
+                .context("pipeline gone")?;
+            Toggle::Finishing
+        }
+        Phase::Processing => Toggle::Busy,
+    })
 }
 
 fn handle_client(
@@ -911,69 +1102,27 @@ fn handle_client(
         return Ok(()); // connection probe (e.g. single-instance check), no command
     }
     let reply = match line.trim() {
-        "toggle" => {
-            let mut s = shared.lock().unwrap();
-            match s.phase {
-                Phase::Idle => {
-                    s.phase = Phase::Recording;
-                    s.toggle_t0 = Some(Instant::now());
-                    if cfg.vision.enabled {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0);
-                        let session_dir =
-                            crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
-                        if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                            eprintln!(
-                                "[vision] failed to create session dir {}: {e:#}",
-                                session_dir.display()
-                            );
-                        }
-                        s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
-                            cfg.vision.min_angle_degrees,
-                        ));
-                        s.vision_session_dir = Some(session_dir);
-                        s.captured_context_images.clear();
-                    }
-                    drop(s);
-                    start_tx.send(()).context("audio thread gone")?;
-                    if cfg.vision.enabled {
-                        notify(
-                            cfg,
-                            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
-                        );
-                    } else {
-                        notify(
-                            cfg,
-                            "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
-                        );
-                    }
-                    "ok recording".to_string()
+        "toggle" => match toggle(shared, start_tx, pipeline_tx, cfg)? {
+            Toggle::Started => {
+                if cfg.vision.enabled {
+                    notify(
+                        cfg,
+                        "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
+                    );
+                } else {
+                    notify(
+                        cfg,
+                        "Listening… (Ctrl+Space stop · Opt+V paste · Opt+P pause)",
+                    );
                 }
-                Phase::Recording => {
-                    // Debounce: ignore accidental rapid double-tap within 800ms of start
-                    if let Some(t0) = s.toggle_t0 {
-                        if t0.elapsed().as_millis() < 800 {
-                            return Ok(());
-                        }
-                    }
-                    if let Some(tx) = s.control_tx.as_ref() {
-                        let _ = tx.send(Control::ForceStop);
-                    }
-                    "ok stopping".to_string()
-                }
-                Phase::Paused => {
-                    s.phase = Phase::Processing;
-                    drop(s);
-                    pipeline_tx
-                        .send(PipelineMsg::Finalize)
-                        .context("pipeline gone")?;
-                    "ok finishing".to_string()
-                }
-                Phase::Processing => "busy processing".to_string(),
+                "ok recording".to_string()
             }
-        }
+            Toggle::Stopping => "ok stopping".to_string(),
+            // A second toggle right after the first is an accidental double tap.
+            Toggle::Debounced => return Ok(()),
+            Toggle::Finishing => "ok finishing".to_string(),
+            Toggle::Busy => "busy processing".to_string(),
+        },
         cmd if cmd.starts_with("mouse ") => {
             let mut s = shared.lock().unwrap();
             if s.phase == Phase::Recording && cfg.vision.enabled {
@@ -1025,7 +1174,7 @@ fn handle_client(
             let mut s = shared.lock().unwrap();
             match s.phase {
                 Phase::Recording => {
-                    s.phase = Phase::Paused;
+                    s.set_phase(Phase::Paused);
                     s.clip_snapshot = read_clipboard();
                     if let Some(tx) = s.control_tx.as_ref() {
                         let _ = tx.send(Control::Pause);
@@ -1048,7 +1197,7 @@ fn handle_client(
                             notify(cfg, &format!("Inserted {n} chars from clipboard"));
                         }
                     }
-                    s.phase = Phase::Recording;
+                    s.set_phase(Phase::Recording);
                     s.toggle_t0 = Some(Instant::now());
                     drop(s);
                     start_tx.send(()).context("audio thread gone")?;
@@ -1165,7 +1314,15 @@ fn handle_client(
             }
         }
         "status" => shared.lock().unwrap().phase.as_str().to_string(),
+        "subscribe" => {
+            // The hub owns the connection from here; this thread must not
+            // block, because it serves every other command.
+            let hub = shared.lock().unwrap().events.clone();
+            hub.subscribe(conn);
+            return Ok(());
+        }
         "quit" => {
+            crate::pill::stop();
             let _ = writeln!(conn, "ok bye");
             let _ = std::fs::remove_file(socket_path());
             eprintln!("[daemon] quit requested, exiting");
@@ -1181,6 +1338,7 @@ fn handle_client(
 mod tests {
     use super::*;
     use crate::vocab::TranscriptPiece;
+    use std::time::Duration;
 
     #[test]
     fn voice_trigger_inserts_clipboard_as_a_pasted_piece() {
@@ -1205,6 +1363,244 @@ mod tests {
         assert_eq!(
             split_voice_clipboard_triggers_with(text, None),
             vec![TranscriptPiece::Spoken(text.to_string())]
+        );
+    }
+
+    use crate::events::testing::{next, subscribe};
+    use serde_json::json;
+
+    /// Daemon state with a live event hub, as `run` builds it.
+    fn daemon_state() -> (Arc<Mutex<Shared>>, EventHub, Config) {
+        let mut cfg = Config::load(std::path::Path::new("config.toml")).unwrap();
+        // Tests must not pop banners or write capture sessions.
+        cfg.daemon.notifications = false;
+        cfg.vision.enabled = false;
+        let hub = EventHub::spawn(cfg.pill.clone());
+        let shared = Arc::new(Mutex::new(Shared {
+            events: hub.clone(),
+            ..Shared::default()
+        }));
+        (shared, hub, cfg)
+    }
+
+    /// Sends one command line through the real socket handler; returns the reply.
+    fn command(
+        line: &str,
+        shared: &Arc<Mutex<Shared>>,
+        start_tx: &Sender<()>,
+        pipeline_tx: &Sender<PipelineMsg>,
+        cfg: &Config,
+    ) -> String {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        writeln!(client, "{line}").unwrap();
+        handle_client(server, shared, start_tx, pipeline_tx, cfg).unwrap();
+        let mut reply = String::new();
+        BufReader::new(client).read_line(&mut reply).unwrap();
+        reply.trim().to_string()
+    }
+
+    #[test]
+    fn socket_toggle_from_idle_emits_phase_recording() {
+        let (shared, hub, cfg) = daemon_state();
+        let events = subscribe(&hub);
+        let (start_tx, start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+
+        let reply = command("toggle", &shared, &start_tx, &pipeline_tx, &cfg);
+
+        assert_eq!(reply, "ok recording");
+        assert_eq!(
+            next(&events),
+            json!({ "type": "phase", "phase": "recording" })
+        );
+        assert!(start_rx.try_recv().is_ok(), "audio thread was not started");
+    }
+
+    #[test]
+    fn pause_and_resume_emit_paused_then_recording() {
+        let (shared, hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        shared.lock().unwrap().set_phase(Phase::Recording);
+        let events = subscribe(&hub);
+
+        assert_eq!(
+            command("pause", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok paused"
+        );
+        assert_eq!(next(&events), json!({ "type": "phase", "phase": "paused" }));
+        assert_eq!(
+            command("pause", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok recording"
+        );
+        assert_eq!(
+            next(&events),
+            json!({ "type": "phase", "phase": "recording" })
+        );
+    }
+
+    #[test]
+    fn toggle_while_paused_finishes_the_dictation() {
+        let (shared, hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, pipeline_rx) = crossbeam_channel::unbounded();
+        shared.lock().unwrap().set_phase(Phase::Paused);
+        let events = subscribe(&hub);
+
+        assert_eq!(
+            command("toggle", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok finishing"
+        );
+        assert_eq!(
+            next(&events),
+            json!({ "type": "phase", "phase": "processing" })
+        );
+        assert!(matches!(pipeline_rx.try_recv(), Ok(PipelineMsg::Finalize)));
+        assert_eq!(
+            command("toggle", &shared, &start_tx, &pipeline_tx, &cfg),
+            "busy processing"
+        );
+    }
+
+    #[test]
+    fn toggle_within_800ms_of_the_start_is_ignored() {
+        let (shared, _hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        let (control_tx, control_rx) = crossbeam_channel::unbounded();
+        {
+            let mut s = shared.lock().unwrap();
+            s.set_phase(Phase::Recording);
+            s.toggle_t0 = Some(Instant::now());
+            s.control_tx = Some(control_tx);
+        }
+        assert_eq!(
+            toggle(&shared, &start_tx, &pipeline_tx, &cfg).unwrap(),
+            Toggle::Debounced
+        );
+        assert!(control_rx.try_recv().is_err());
+
+        shared.lock().unwrap().toggle_t0 = Instant::now().checked_sub(Duration::from_secs(1));
+        assert_eq!(
+            toggle(&shared, &start_tx, &pipeline_tx, &cfg).unwrap(),
+            Toggle::Stopping
+        );
+        assert!(matches!(control_rx.try_recv(), Ok(Control::ForceStop)));
+    }
+
+    #[test]
+    fn subscribe_command_streams_hello_and_hands_the_connection_to_the_hub() {
+        let (shared, _hub, cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        shared.lock().unwrap().set_phase(Phase::Recording);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        writeln!(client, "subscribe").unwrap();
+        handle_client(server, &shared, &start_tx, &pipeline_tx, &cfg).unwrap();
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let hello: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["v"], 1);
+        assert_eq!(hello["phase"], "recording");
+    }
+
+    #[test]
+    fn finalize_emits_the_outcome_then_idle() {
+        let (shared, hub, cfg) = daemon_state();
+        shared.lock().unwrap().set_phase(Phase::Processing);
+        let events = subscribe(&hub);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut injectors = Injectors::new(&cfg);
+
+        // Nothing was said: no pieces to transcribe.
+        finalize(
+            &runtime,
+            &mut Vec::new(),
+            &mut injectors,
+            &cfg,
+            &shared,
+            false,
+        );
+
+        assert_eq!(
+            next(&events),
+            json!({ "type": "outcome", "kind": "no-speech", "detail": "" })
+        );
+        assert_eq!(next(&events), json!({ "type": "phase", "phase": "idle" }));
+        assert_eq!(shared.lock().unwrap().phase, Phase::Idle);
+    }
+
+    #[test]
+    fn failed_sessions_report_why_then_go_idle() {
+        let (shared, hub, _cfg) = daemon_state();
+        shared.lock().unwrap().set_phase(Phase::Recording);
+        let events = subscribe(&hub);
+
+        end_session(&shared, outcome_event("mic-unavailable", "", None));
+
+        assert_eq!(
+            next(&events),
+            json!({ "type": "outcome", "kind": "mic-unavailable", "detail": "" })
+        );
+        assert_eq!(next(&events), json!({ "type": "phase", "phase": "idle" }));
+    }
+
+    #[test]
+    fn finalize_outcome_names_what_happened() {
+        let done = |method, interrupted| -> anyhow::Result<Option<Transcribed>> {
+            Ok(Some((
+                Injected {
+                    method,
+                    interrupted,
+                },
+                "hello".to_string(),
+                None,
+                1.0,
+            )))
+        };
+        let kind_detail = |e: Event| match e {
+            Event::Outcome {
+                kind,
+                detail,
+                chars,
+            } => (kind, detail, chars),
+            other => panic!("not an outcome: {other:?}"),
+        };
+        assert_eq!(
+            kind_detail(finalize_outcome(&done("macos", None), false)),
+            ("done", "pasted", Some(5))
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&done("portal", None), false)),
+            ("done", "typed", Some(5))
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&done("clipboard-fallback", None), false)),
+            ("done", "copied", Some(5))
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(
+                &done("macos", Some("focus-changed")),
+                false
+            )),
+            ("paste-interrupted", "focus-changed", Some(5))
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&done("macos", None), true)),
+            ("max-length", "pasted", Some(5))
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&Ok(None), false)),
+            ("no-speech", "", None)
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&Err(anyhow::anyhow!("boom")), false)),
+            ("error", "", None)
         );
     }
 

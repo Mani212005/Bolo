@@ -44,6 +44,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **Mid-Dictation Clipboard Splicing**: Press `Option + V` mid-speech to insert links, code, or copied text without pausing audio.
 - **On-Device Privacy & Local Models**: Run speech recognition completely offline with whisper.cpp and faster-whisper.
 - **Ultra-Fast Cloud Transcription**: Transcribe long voice notes in ~250ms using Groq Whisper-Large-v3.
+- **Recording Pill (macOS)**: A small always-on-top pill at the bottom of the screen shows a live mic waveform while Bolo records, a moving wave while it transcribes, and a check when the text lands. Click it to start, stop or resume; drag it anywhere. It never takes focus from the app you dictate into and stays out of screenshots and screen sharing.
 - **Native Popup & History Dashboard**: Search past voice dictations, filter image-bearing transcriptions, and listen back with the built-in audio playback engine.
 - **Screen Context Lightbox & Bulk Image Copy**: Browse captured screenshots with an always-visible per-card images section, expand images in a full-screen modal, and copy single screenshots or all transcription images directly to your clipboard.
 - **One-Click AI Prompt Enhancement**: Refine raw speech and rambles into structured prompts using LLaMA-3.3-70B with settings-configurable models and API keys.
@@ -85,6 +86,8 @@ bolo
 
 *Running `bolo` verifies the background daemon and opens the native popup dashboard. Run `bolo exit` to shut down.*
 
+On macOS the daemon also starts `bolo-pill` (built and installed next to `bolo` by `install.sh`): the small recording pill described above. It is optional; without the helper Bolo keeps the start chime and banners. Set `[pill] style = "hidden"` to turn it off.
+
 ### 2. macOS Permissions (One-Time Setup)
 
 Grant the following permissions in **System Settings > Privacy & Security**:
@@ -111,6 +114,7 @@ bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
 bolo history             # View transcription history in terminal
 bolo transcribe <file>   # Transcribe a local audio WAV file
+bolo events              # Print the live event stream (phase, mic level, outcome) as JSON lines
 bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
 bolo split-preview       # Read text on stdin, print terminal paste pieces as JSON
 ```
@@ -141,6 +145,10 @@ Bolo configuration files live in `~/.config/bolo/`:
   [vision]
   enabled = true              # hover pointer in a circle to capture screen context
   min_angle_degrees = 315.0   # minimum circle arc angle threshold
+
+  [pill]
+  style = "small"             # macOS recording pill: "small" or "hidden"
+  show_when_idle = true       # tiny handle on screen while idle; click it to dictate
 
   [formatting]
   smart_code = true           # fallback heuristic wrapping code in markdown backticks
@@ -205,6 +213,7 @@ exclude_apps = []           # never split in these apps; wins over everything
                  * Silero VAD (Speech Detection)
                  * Mid-Speech Splicing Engine
                  * WAV Capture Storage
+                 * Event stream -> bolo-pill (macOS recording pill)
                                |
             +------------------+------------------+
             |                                     |
