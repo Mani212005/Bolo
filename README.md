@@ -115,7 +115,6 @@ bolo quick-splice        # Splice clipboard into ongoing recording
 bolo pause               # Pause or resume ongoing voice recording
 bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
-bolo history             # View transcription history in terminal
 bolo transcribe <file>   # Transcribe a local audio WAV file
 bolo events              # Print the live event stream (phase, mic level, outcome) as JSON lines
 bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
