@@ -88,7 +88,6 @@ impl ClipboardStateMachine {
         }
     }
 
-    #[allow(dead_code)]
     pub fn record_skipped(&mut self) {
         self.state = RestoreState::Skipped;
     }
