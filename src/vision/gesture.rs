@@ -14,6 +14,14 @@ impl CircleGesture {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct Bounds {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct Sample {
     point: (f64, f64),
     time: f64,
@@ -26,6 +34,7 @@ pub struct CircleGestureDetector {
     waiting_for_exit: Option<CircleGesture>,
     window: f64,
     minimum_angle_degrees: f64,
+    distances: Vec<f64>,
 }
 
 impl Default for CircleGestureDetector {
@@ -43,6 +52,7 @@ impl CircleGestureDetector {
             waiting_for_exit: None,
             window: 6.0,
             minimum_angle_degrees,
+            distances: Vec::new(),
         }
     }
 
@@ -86,7 +96,11 @@ impl CircleGestureDetector {
             return None;
         }
 
-        let gesture = self.recognized_gesture()?;
+        let gesture = Self::recognized_gesture(
+            &self.samples,
+            self.minimum_angle_degrees,
+            &mut self.distances,
+        )?;
 
         self.samples.clear();
         self.cooldown_until = time + 0.65;
@@ -94,18 +108,49 @@ impl CircleGestureDetector {
         Some(gesture)
     }
 
-    fn recognized_gesture(&self) -> Option<CircleGesture> {
-        let last = self.samples.last()?.point;
-        let count = self.samples.len();
+    fn recognized_gesture(
+        samples: &[Sample],
+        minimum_angle_degrees: f64,
+        distances: &mut Vec<f64>,
+    ) -> Option<CircleGesture> {
+        let last = samples.last()?.point;
+        let count = samples.len();
         if count < 12 {
             return None;
         }
-        for start in (0..=(count - 12)).rev() {
-            let first = self.samples[start].point;
-            if (first.0 - last.0).hypot(first.1 - last.1) < 160.0 {
-                if let Some(gesture) =
-                    Self::evaluate_subslice(&self.samples[start..], self.minimum_angle_degrees)
-                {
+        // Walk the start index back from the newest sample, growing the
+        // bounding box of samples[start..] one point at a time.
+        let (mut min_x, mut max_x) = (last.0, last.0);
+        let (mut min_y, mut max_y) = (last.1, last.1);
+        let mut path_length = 0.0;
+        for start in (0..count).rev() {
+            let first = samples[start].point;
+            if let Some(next) = samples.get(start + 1) {
+                path_length += (next.point.0 - first.0).hypot(next.point.1 - first.1);
+            }
+            min_x = min_x.min(first.0);
+            max_x = max_x.max(first.0);
+            min_y = min_y.min(first.1);
+            max_y = max_y.max(first.1);
+            if start + 12 > count {
+                continue;
+            }
+            let closure = (first.0 - last.0).hypot(first.1 - last.1);
+            if closure < 160.0 {
+                let bounds = Bounds {
+                    min_x,
+                    max_x,
+                    min_y,
+                    max_y,
+                };
+                if let Some(gesture) = Self::evaluate_subslice(
+                    &samples[start..],
+                    bounds,
+                    closure,
+                    path_length,
+                    minimum_angle_degrees,
+                    distances,
+                ) {
                     return Some(gesture);
                 }
             }
@@ -113,29 +158,20 @@ impl CircleGestureDetector {
         None
     }
 
-    fn evaluate_subslice(samples: &[Sample], minimum_angle_degrees: f64) -> Option<CircleGesture> {
-        let first = samples.first()?.point;
-        let last = samples.last()?.point;
-
-        let mut min_x = samples[0].point.0;
-        let mut max_x = samples[0].point.0;
-        let mut min_y = samples[0].point.1;
-        let mut max_y = samples[0].point.1;
-
-        for s in samples.iter().skip(1) {
-            if s.point.0 < min_x {
-                min_x = s.point.0;
-            }
-            if s.point.0 > max_x {
-                max_x = s.point.0;
-            }
-            if s.point.1 < min_y {
-                min_y = s.point.1;
-            }
-            if s.point.1 > max_y {
-                max_y = s.point.1;
-            }
-        }
+    fn evaluate_subslice(
+        samples: &[Sample],
+        bounds: Bounds,
+        closure: f64,
+        path_length: f64,
+        minimum_angle_degrees: f64,
+        distances: &mut Vec<f64>,
+    ) -> Option<CircleGesture> {
+        let Bounds {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        } = bounds;
 
         let width = max_x - min_x;
         let height = max_y - min_y;
@@ -148,11 +184,28 @@ impl CircleGestureDetector {
             return None;
         }
 
+        // The mean distance to the bounding-box centre can never exceed the
+        // half diagonal, so a pair of end points that far apart cannot close
+        // into a loop. This skips the O(n) passes below for most starts.
+        let max_radius = width.hypot(height) / 2.0 * (1.0 + 1e-9);
+        if closure >= 20.0_f64.max(max_radius * 0.65) {
+            return None;
+        }
+
+        // Likewise a path longer than 2.4 circumferences of that radius is
+        // too long (the sums run in a different order than the exact check
+        // below, hence the slack).
+        if path_length * (1.0 - 1e-9) >= 2.4 * 2.0 * PI * max_radius {
+            return None;
+        }
+
         let center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
-        let distances: Vec<f64> = samples
-            .iter()
-            .map(|s| (s.point.0 - center.0).hypot(s.point.1 - center.1))
-            .collect();
+        distances.clear();
+        distances.extend(
+            samples
+                .iter()
+                .map(|s| (s.point.0 - center.0).hypot(s.point.1 - center.1)),
+        );
 
         let count = distances.len() as f64;
         let radius: f64 = distances.iter().sum::<f64>() / count;
@@ -165,7 +218,6 @@ impl CircleGestureDetector {
             return None;
         }
 
-        let closure = (first.0 - last.0).hypot(first.1 - last.1);
         if closure >= 20.0_f64.max(radius * 0.65) {
             return None;
         }
@@ -627,6 +679,195 @@ mod tests {
         assert_eq!(
             captures, 1,
             "Continuous loop should capture exactly once until pointer leaves center"
+        );
+    }
+
+    /// The straightforward O(n^2) search: every start is evaluated from
+    /// scratch. `recognized_gesture` must return exactly the same result.
+    fn reference_recognized(
+        samples: &[Sample],
+        minimum_angle_degrees: f64,
+    ) -> Option<CircleGesture> {
+        let last = samples.last()?.point;
+        let count = samples.len();
+        if count < 12 {
+            return None;
+        }
+        for start in (0..=(count - 12)).rev() {
+            let first = samples[start].point;
+            if (first.0 - last.0).hypot(first.1 - last.1) < 160.0 {
+                if let Some(gesture) =
+                    reference_evaluate(&samples[start..], minimum_angle_degrees)
+                {
+                    return Some(gesture);
+                }
+            }
+        }
+        None
+    }
+
+    fn reference_evaluate(
+        samples: &[Sample],
+        minimum_angle_degrees: f64,
+    ) -> Option<CircleGesture> {
+        let first = samples.first()?.point;
+        let last = samples.last()?.point;
+
+        let mut min_x = samples[0].point.0;
+        let mut max_x = samples[0].point.0;
+        let mut min_y = samples[0].point.1;
+        let mut max_y = samples[0].point.1;
+
+        for s in samples.iter().skip(1) {
+            if s.point.0 < min_x {
+                min_x = s.point.0;
+            }
+            if s.point.0 > max_x {
+                max_x = s.point.0;
+            }
+            if s.point.1 < min_y {
+                min_y = s.point.1;
+            }
+            if s.point.1 > max_y {
+                max_y = s.point.1;
+            }
+        }
+
+        let width = max_x - min_x;
+        let height = max_y - min_y;
+        if width < 28.0 || height < 28.0 {
+            return None;
+        }
+
+        let ratio = width / height;
+        if ratio <= 0.45 || ratio >= 2.2 {
+            return None;
+        }
+
+        let center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let distances: Vec<f64> = samples
+            .iter()
+            .map(|s| (s.point.0 - center.0).hypot(s.point.1 - center.1))
+            .collect();
+
+        let count = distances.len() as f64;
+        let radius: f64 = distances.iter().sum::<f64>() / count;
+        if radius < 18.0 {
+            return None;
+        }
+
+        let variance: f64 = distances.iter().map(|d| (d - radius).powi(2)).sum::<f64>() / count;
+        if variance.sqrt() / radius >= 0.36 {
+            return None;
+        }
+
+        let closure = (first.0 - last.0).hypot(first.1 - last.1);
+        if closure >= 20.0_f64.max(radius * 0.65) {
+            return None;
+        }
+
+        let mut angle_travel = 0.0;
+        for i in 0..(samples.len() - 1) {
+            let a = samples[i].point;
+            let b = samples[i + 1].point;
+            let current = (a.1 - center.1).atan2(a.0 - center.0);
+            let next = (b.1 - center.1).atan2(b.0 - center.0);
+            let mut delta = next - current;
+            while delta > PI {
+                delta -= 2.0 * PI;
+            }
+            while delta < -PI {
+                delta += 2.0 * PI;
+            }
+            angle_travel += delta.abs();
+        }
+
+        let minimum_angle_rad = minimum_angle_degrees * PI / 180.0;
+        if angle_travel <= minimum_angle_rad || angle_travel >= 8.8 {
+            return None;
+        }
+
+        let mut path_length = 0.0;
+        for i in 0..(samples.len() - 1) {
+            let a = samples[i].point;
+            let b = samples[i + 1].point;
+            path_length += (b.0 - a.0).hypot(b.1 - a.1);
+        }
+
+        let circumference = 2.0 * PI * radius;
+        let path_ratio = path_length / circumference;
+        if path_ratio <= 0.65 || path_ratio >= 2.4 {
+            return None;
+        }
+
+        Some(CircleGesture { center, radius })
+    }
+
+    #[test]
+    fn test_recognized_gesture_matches_reference_search() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut rand = move |lo: f64, hi: f64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((state >> 33) as f64 / (1u64 << 31) as f64)
+        };
+        let mut distances = Vec::new();
+        let mut recognized = 0;
+        for case in 0..120 {
+            let minimum_angle = [315.0, 300.0, 340.0, 359.0][case % 4];
+            let center = (rand(100.0, 900.0), rand(100.0, 700.0));
+            let radius = rand(10.0, 200.0);
+            let noise = rand(0.0, 0.6) * radius;
+            let step = rand(0.05, 0.5);
+            let mut angle = rand(0.0, 2.0 * PI);
+            let mut walker = center;
+            let mut trace = Vec::new();
+            for index in 0..160 {
+                let point = match case % 5 {
+                    0 => {
+                        angle += step;
+                        let r = radius + rand(-noise, noise);
+                        (center.0 + r * angle.cos(), center.1 + r * angle.sin())
+                    }
+                    1 => {
+                        walker = (walker.0 + rand(-30.0, 30.0), walker.1 + rand(-30.0, 30.0));
+                        walker
+                    }
+                    2 => (center.0 + rand(0.0, 160.0), center.1 + rand(0.0, 160.0)),
+                    3 => {
+                        angle += step;
+                        let squash = rand(0.3, 2.0);
+                        (
+                            center.0 + radius * squash * angle.cos(),
+                            center.1 + radius * angle.sin(),
+                        )
+                    }
+                    _ => {
+                        walker = (walker.0 + rand(-3.0, 3.0), walker.1 + rand(-3.0, 3.0));
+                        walker
+                    }
+                };
+                trace.push(Sample {
+                    point,
+                    time: index as f64 / 60.0,
+                });
+            }
+            for end in 12..=trace.len() {
+                let window = &trace[end.saturating_sub(100)..end];
+                let expected = reference_recognized(window, minimum_angle);
+                let actual = CircleGestureDetector::recognized_gesture(
+                    window,
+                    minimum_angle,
+                    &mut distances,
+                );
+                assert_eq!(actual, expected, "case {case} window ending at {end}");
+                recognized += usize::from(expected.is_some());
+            }
+        }
+        assert!(
+            recognized > 50,
+            "fixture should include recognised gestures, got {recognized}"
         );
     }
 }
