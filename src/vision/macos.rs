@@ -4,6 +4,7 @@ use std::path::Path;
 
 /// Captures display screenshot under cursor gesture on macOS,
 /// and draws a highlight indicator around the target gesture area.
+#[allow(dead_code)]
 pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -46,6 +47,7 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
     Ok(())
 }
 
+#[allow(dead_code, unused_variables)]
 fn apply_circle_highlight(
     input_path: &Path,
     output_path: &Path,

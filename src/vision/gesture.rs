@@ -707,8 +707,8 @@ mod tests {
     }
 
     fn reference_evaluate(
-    samples: &[Sample],
-    minimum_angle_degrees: f64,
+        samples: &[Sample],
+        minimum_angle_degrees: f64,
     ) -> Option<CircleGesture> {
         let first = samples.first()?.point;
         let last = samples.last()?.point;

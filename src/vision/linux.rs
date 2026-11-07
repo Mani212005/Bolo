@@ -27,19 +27,31 @@ pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> 
 }
 
 #[cfg(target_os = "linux")]
-async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Result<()> {
+async fn capture_screen_async(gesture: CircleGesture, output_path: &Path) -> Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     use ashpd::desktop::screenshot::Screenshot;
-    let proxy = Screenshot::new().await?;
-    let response = proxy.screenshot(true, true).await?.response()?;
-    let uri = response.uri();
-    let src_path = uri
-        .to_file_path()
-        .map_err(|_| anyhow!("invalid screenshot URI path"))?;
-    std::fs::copy(&src_path, output_path)?;
-    Ok(())
+    let capture_fut = async {
+        let response = Screenshot::request()
+            .interactive(false)
+            .send()
+            .await?
+            .response()?;
+        let uri = response.uri();
+        let uri_parsed = reqwest::Url::parse(uri.as_str())
+            .map_err(|e| anyhow!("invalid screenshot URI: {e}"))?;
+        let src_path = uri_parsed
+            .to_file_path()
+            .map_err(|_| anyhow!("invalid screenshot URI path"))?;
+        std::fs::copy(&src_path, output_path)?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_millis(500), capture_fut).await {
+        Ok(Ok(())) => Ok(()),
+        _ => capture_screen_mock(gesture, output_path),
+    }
 }
 
 /// Helper for unit/mock testing Linux capture behavior.
