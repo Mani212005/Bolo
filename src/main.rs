@@ -1007,6 +1007,7 @@ mod regression_audit_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_feature_attach_screenshot_to_paste_session_flow() {
         use crate::config::TerminalPasteConfig;
