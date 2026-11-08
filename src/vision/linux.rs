@@ -32,9 +32,13 @@ async fn capture_screen_async(_gesture: CircleGesture, output_path: &Path) -> Re
         std::fs::create_dir_all(parent)?;
     }
     use ashpd::desktop::screenshot::Screenshot;
-    let proxy = Screenshot::new().await?;
-    let response = proxy.screenshot(true, true).await?.response()?;
-    let uri = response.uri();
+    let response = Screenshot::request()
+        .interactive(true)
+        .modal(true)
+        .send()
+        .await?
+        .response()?;
+    let uri = url::Url::parse(response.uri().as_str())?;
     let src_path = uri
         .to_file_path()
         .map_err(|_| anyhow!("invalid screenshot URI path"))?;
