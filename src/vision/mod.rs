@@ -1,8 +1,11 @@
 pub mod gesture;
+#[cfg(any(target_os = "linux", test))]
 pub mod linux;
+#[cfg(target_os = "macos")]
 pub mod macos;
+pub mod shot;
 
-pub use gesture::{CircleGesture, CircleGestureDetector};
+pub use gesture::CircleGestureDetector;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -12,26 +15,113 @@ pub const DEFAULT_MAX_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
 pub const DEFAULT_MAX_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 pub const ACCIDENTAL_THRESHOLD_SECS: f64 = 2.5;
 
-/// Cross-platform screen context capture entry point.
-pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> {
+/// One finished capture: the framed crop, and the small full-screen context
+/// image when the platform captured the whole display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captured {
+    pub image: PathBuf,
+    pub context: Option<PathBuf>,
+    /// Crop area over display area, in 0..=1.
+    pub region_fraction: f64,
+}
+
+/// `context-2.png` -> `context-2-screen.png`, next to it.
+pub fn context_image_path(crop: &Path) -> PathBuf {
+    let stem = crop
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("context");
+    crop.with_file_name(format!("{stem}-screen.png"))
+}
+
+/// Captures what the user points at into `output_path` (a PNG), plus the
+/// context image next to it.
+///
+/// `pointer` is the logical point the user pointed at (the circle's centre
+/// on macOS, or `None` for the current pointer). Linux has no global
+/// pointer read on Wayland, so it asks the user to select the area instead.
+pub fn capture_screen(
+    pointer: Option<(f64, f64)>,
+    output_path: &Path,
+    budget: shot::Budget,
+) -> Result<Captured> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     #[cfg(target_os = "macos")]
     {
-        macos::capture_screen(gesture, output_path)
+        let shot = macos::capture_shot(pointer, budget)?;
+        save_shot(&shot, output_path)
     }
     #[cfg(target_os = "linux")]
     {
-        linux::capture_screen(gesture, output_path)
+        let _ = pointer;
+        let shot = linux::capture_shot(budget)?;
+        save_shot(&shot, output_path)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (gesture, output_path);
+        let _ = (pointer, output_path, budget);
         Err(anyhow::anyhow!(
             "Screen capture not supported on this operating system"
         ))
     }
+}
+
+/// Writes the shot's images: the crop to `output_path`, the context image to
+/// [`context_image_path`].
+pub fn save_shot(shot: &shot::Shot, output_path: &Path) -> Result<Captured> {
+    shot::encode_png(&shot.crop, output_path)?;
+    let context = match &shot.context {
+        Some(img) => {
+            let path = context_image_path(output_path);
+            shot::encode_png(img, &path)?;
+            Some(path)
+        }
+        None => None,
+    };
+    let (w, h) = shot.crop.dimensions();
+    eprintln!(
+        "[vision] crop {w}x{h} tokens={} region={:.0}% of display context={}",
+        shot::Budget::tokens_for(w, h),
+        shot.region_fraction * 100.0,
+        context.as_ref().map_or("none".into(), |c| {
+            let (cw, ch) = shot.context.as_ref().map_or((0, 0), |i| i.dimensions());
+            format!("{cw}x{ch} {}", c.display())
+        })
+    );
+    Ok(Captured {
+        image: output_path.to_path_buf(),
+        context,
+        region_fraction: shot.region_fraction,
+    })
+}
+
+/// The images to hand the agent, in order: each crop, followed by its
+/// context image when `policy` wants it for this dictation. A crop whose
+/// capture has not finished (absent from `captures`) is sent alone.
+pub fn delivered_images(
+    crops: &[PathBuf],
+    captures: &[Captured],
+    policy: shot::ContextPolicy,
+    transcript: &str,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for crop in crops {
+        out.push(crop.clone());
+        let done = captures.iter().find(|c| &c.image == crop);
+        if let Some(Captured {
+            context: Some(context),
+            region_fraction,
+            ..
+        }) = done
+        {
+            if shot::wants_context(policy, *region_fraction, transcript) {
+                out.push(context.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Evaluates if a completed recording session should be discarded as an accidental tap.
@@ -62,12 +152,20 @@ pub fn write_context_bundle(
 
     if !images.is_empty() {
         markdown.push_str("\n## Screen context\n\n");
-        for (index, image_path) in images.iter().enumerate() {
+        let mut crop_number = 0;
+        for image_path in images {
             let filename = image_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("context.png");
-            markdown.push_str(&format!("![Context {}]({})\n\n", index + 1, filename));
+            if filename.ends_with("-screen.png") {
+                markdown.push_str(&format!(
+                    "![Context {crop_number}: full screen, region outlined]({filename})\n\n"
+                ));
+            } else {
+                crop_number += 1;
+                markdown.push_str(&format!("![Context {crop_number}]({filename})\n\n"));
+            }
         }
     }
 
@@ -227,60 +325,82 @@ mod tests {
     }
 
     #[test]
-    fn test_linux_mock_screen_capture() -> Result<()> {
-        let temp_dir = make_test_temp_dir("mock_cap");
-        let out_png = temp_dir.join("context-1.png");
-        let gesture = CircleGesture::new((500.0, 300.0), 40.0);
-
-        linux::capture_screen_mock(gesture, &out_png)?;
-        assert!(out_png.exists());
-        let bytes = std::fs::read(&out_png)?;
-        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        Ok(())
+    fn test_context_image_path_sits_next_to_the_crop() {
+        assert_eq!(
+            context_image_path(Path::new("/s/session_1/context-2.png")),
+            PathBuf::from("/s/session_1/context-2-screen.png")
+        );
     }
 
     #[test]
-    fn test_capture_screen_creates_parent_directory() -> Result<()> {
-        let temp_dir = make_test_temp_dir("capture_nonexistent");
-        let non_existent_session_dir = temp_dir.join("nested_sessions").join("session_123");
-        assert!(!non_existent_session_dir.exists());
-
-        let out_png = non_existent_session_dir.join("context-1.png");
-        let gesture = CircleGesture::new((500.0, 300.0), 40.0);
-
-        capture_screen(gesture, &out_png)?;
-        assert!(out_png.exists());
-        assert!(non_existent_session_dir.exists());
-        let bytes = std::fs::read(&out_png)?;
-        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        Ok(())
+    fn test_delivered_images_add_context_only_when_wanted() {
+        use shot::ContextPolicy;
+        let crop1 = PathBuf::from("/s/context-1.png");
+        let crop2 = PathBuf::from("/s/context-2.png");
+        let crop3 = PathBuf::from("/s/context-3.png");
+        let captures = vec![
+            Captured {
+                image: crop1.clone(),
+                context: Some(context_image_path(&crop1)),
+                region_fraction: 0.2,
+            },
+            Captured {
+                image: crop2.clone(),
+                context: Some(context_image_path(&crop2)),
+                region_fraction: 0.6,
+            },
+        ];
+        // crop3 is still being captured: sent alone.
+        let crops = vec![crop1.clone(), crop2.clone(), crop3.clone()];
+        assert_eq!(
+            delivered_images(&crops, &captures, ContextPolicy::Auto, "fix this"),
+            vec![
+                crop1.clone(),
+                context_image_path(&crop1),
+                crop2.clone(),
+                crop3.clone()
+            ]
+        );
+        assert_eq!(
+            delivered_images(
+                &crops,
+                &captures,
+                ContextPolicy::Auto,
+                "why is this page blank"
+            ),
+            vec![
+                crop1.clone(),
+                context_image_path(&crop1),
+                crop2.clone(),
+                context_image_path(&crop2),
+                crop3.clone()
+            ]
+        );
+        assert_eq!(
+            delivered_images(&crops, &captures, ContextPolicy::Never, "this page"),
+            crops
+        );
     }
 
     #[test]
-    fn test_linux_mock_screen_capture_creates_nonexistent_dir() -> Result<()> {
-        let temp_dir = make_test_temp_dir("mock_cap_nonexistent");
-        let non_existent_session_dir = temp_dir.join("nested").join("session_456");
-        assert!(!non_existent_session_dir.exists());
-
-        let out_png = non_existent_session_dir.join("context-1.png");
-        let gesture = CircleGesture::new((500.0, 300.0), 40.0);
-
-        linux::capture_screen_mock(gesture, &out_png)?;
-        assert!(out_png.exists());
-        assert!(non_existent_session_dir.exists());
-        let bytes = std::fs::read(&out_png)?;
-        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])); // Valid PNG header
-
+    fn test_bundle_labels_context_images() -> Result<()> {
+        let temp_dir = make_test_temp_dir("bundle_labels");
+        let images = vec![
+            temp_dir.join("context-1.png"),
+            temp_dir.join("context-1-screen.png"),
+            temp_dir.join("context-2.png"),
+        ];
+        let md = std::fs::read_to_string(write_context_bundle(&temp_dir, "look", &images)?)?;
+        assert!(md.contains("![Context 1](context-1.png)"));
+        assert!(md.contains("![Context 1: full screen, region outlined](context-1-screen.png)"));
+        assert!(md.contains("![Context 2](context-2.png)"));
         let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
     #[test]
     fn test_e2e_gesture_recognition_and_capture_flow() -> Result<()> {
+        use image::{Rgb, RgbImage};
         use std::f64::consts::PI;
 
         let temp_dir = make_test_temp_dir("e2e_flow");
@@ -303,24 +423,43 @@ mod tests {
 
         let gesture = detected_gesture.expect("Gesture detector should recognize the circle");
 
-        // 2. Perform capture into session directory (which might not exist prior to capture)
+        // 2. Crop a fixture 2x display frame around the gesture, as macOS does,
+        //    into a session directory that does not exist yet.
+        let display = shot::Rect::new(0.0, 0.0, 1512.0, 982.0);
+        let frame = RgbImage::from_fn(3024, 1964, |x, y| {
+            Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        });
+        let region = shot::choose_region(display, gesture.center, &[]);
+        let px = region.rect.to_pixels((0.0, 0.0), 2.0, frame.dimensions());
+        let rendered = shot::render_region(&frame, px, shot::Budget::STANDARD);
         let img_path = session_dir.join("context-1.png");
-        capture_screen(gesture, &img_path)?;
+        let captured = save_shot(&rendered, &img_path)?;
         assert!(img_path.exists());
-        let captured_images = vec![img_path];
+        assert_eq!(
+            image::open(&img_path)?.to_rgb8().dimensions(),
+            (1280 + 6, 800 + 6),
+            "640x400 points at 2x, native, plus the 3 px frame"
+        );
+        let context = captured.context.clone().expect("context image");
+        assert!(context.exists());
+        assert!(captured.region_fraction < shot::CONTEXT_FRACTION);
 
         // 3. Verify accidental session policy keeps session with context even if duration is short and no speech
-        assert!(!is_accidental_session(
-            false,
-            !captured_images.is_empty(),
-            1.0
-        ));
+        let delivered = delivered_images(
+            std::slice::from_ref(&img_path),
+            std::slice::from_ref(&captured),
+            shot::ContextPolicy::Auto,
+            "",
+        );
+        assert_eq!(delivered, vec![img_path.clone(), context]);
+        assert!(!is_accidental_session(false, !delivered.is_empty(), 1.0));
 
         // 4. Bundle markdown
-        let md_path = write_context_bundle(&session_dir, "", &captured_images)?;
+        let md_path = write_context_bundle(&session_dir, "", &delivered)?;
         assert!(md_path.exists());
         let md_content = std::fs::read_to_string(md_path)?;
         assert!(md_content.contains("![Context 1](context-1.png)"));
+        assert!(md_content.contains("(context-1-screen.png)"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())

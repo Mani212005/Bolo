@@ -288,8 +288,12 @@ mod tests {
     use super::testing::{connection, next};
     use super::*;
 
+    /// A pill that draws, on every platform (the Linux default is hidden).
     fn pill() -> PillConfig {
-        PillConfig::default()
+        PillConfig {
+            style: crate::config::PillStyle::Small,
+            show_when_idle: true,
+        }
     }
 
     fn sine(amplitude: f64, len: usize) -> Vec<i16> {

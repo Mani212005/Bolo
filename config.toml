@@ -68,9 +68,13 @@ show_when_idle = true               # keep a tiny handle on screen; click it to 
 port = 4525
 
 [vision]
-# Hover-only pointer-guided visual screen context capture
-enabled = true                      # hover pointer in a circle to capture screen context
+# Pointer-guided screenshots while dictating: Bolo crops to what you point at
+# and frames it. macOS: hold Control and circle the pointer over it.
+# Linux: tap Control alone (or run `bolo capture`) and select the area.
+enabled = true                      # capture screen context during dictation
 min_angle_degrees = 315.0           # minimum circle arc angle threshold
+resolution = "standard"             # "standard" (1568 px) | "high" (2576 px, about 3x the image tokens)
+context = "auto"                    # full-screen context image: "auto" (small crop or "this page"/"screen" wording) | "always" | "never"
 
 [formatting]
 smart_code = true                   # detect pasted code; fence it in chat apps, paste raw in editors

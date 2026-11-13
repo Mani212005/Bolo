@@ -88,6 +88,7 @@ impl ClipboardStateMachine {
         }
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS paste loop uses it
     pub fn record_skipped(&mut self) {
         self.state = RestoreState::Skipped;
     }
@@ -360,7 +361,7 @@ pub mod linux_clipboard {
 
                 let mut items = Vec::new();
                 for t in types {
-                    if let Ok(out) = Command::new("wl-paste").args(&["--type", t]).output() {
+                    if let Ok(out) = Command::new("wl-paste").args(["--type", t]).output() {
                         if out.status.success() && !out.stdout.is_empty() {
                             items.push(ClipboardItem {
                                 mime_type: t.to_string(),
@@ -380,7 +381,7 @@ pub mod linux_clipboard {
         }
 
         if let Ok(output) = Command::new("xclip")
-            .args(&["-selection", "clipboard", "-o"])
+            .args(["-selection", "clipboard", "-o"])
             .output()
         {
             if output.status.success() && !output.stdout.is_empty() {
@@ -401,7 +402,7 @@ pub mod linux_clipboard {
         for item in &snapshot.items {
             let wl_res = Command::new("timeout")
                 .arg("3")
-                .args(&["wl-copy", "--type", &item.mime_type])
+                .args(["wl-copy", "--type", &item.mime_type])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -421,7 +422,7 @@ pub mod linux_clipboard {
 
             let x_res = Command::new("timeout")
                 .arg("2")
-                .args(&[
+                .args([
                     "xclip",
                     "-selection",
                     "clipboard",

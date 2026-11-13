@@ -22,14 +22,7 @@ pub fn build_set_image_applescript(path: &Path) -> String {
     format!(r#"set the clipboard to (read (POSIX file "{escaped}") as «class PNGf»)"#)
 }
 
-/// Formats a list of image paths as space-separated quoted strings for CLI / terminal insertion.
-pub fn format_image_paths_for_cli(images: &[PathBuf]) -> String {
-    images
-        .iter()
-        .map(|p| format!("\"{}\"", p.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+pub use super::format_image_paths_for_cli;
 
 /// Selects the last captured screenshot image from a session image list.
 #[allow(dead_code)]
