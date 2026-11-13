@@ -46,6 +46,12 @@ pub const MIN_ELEMENT: (f64, f64) = (240.0, 80.0);
 /// whole editor, not something pointed at; the pointer box is used instead.
 #[cfg(any(target_os = "macos", test))]
 pub const MAX_ELEMENT_FRACTION: f64 = 0.5;
+/// Width of the box drawn on the pointed row of a table crop, in output pixels.
+#[cfg(any(target_os = "macos", test))]
+pub const ROW_MARK_PX: i64 = 2;
+/// How strongly the pointed row is tinted on the context image.
+#[cfg(any(target_os = "macos", test))]
+pub const ROW_BAND_ALPHA: f64 = 0.55;
 /// Width of the frame drawn around the crop, in output pixels.
 pub const BORDER_PX: u32 = 3;
 /// `#00BFFF`, readable on both light and dark UI.
@@ -149,6 +155,8 @@ pub enum RegionSource {
 pub struct Region {
     pub rect: Rect,
     pub source: RegionSource,
+    /// The pointed row of a [`RegionSource::Table`] region, to be marked.
+    pub mark: Option<Rect>,
 }
 
 /// Picks the region to capture on `display` (logical points).
@@ -176,11 +184,13 @@ pub fn choose_region(display: Rect, pointer: (f64, f64), elements: &[Rect]) -> R
         return Region {
             rect: padded.shifted_inside(display),
             source: RegionSource::Element,
+            mark: None,
         };
     }
     Region {
         rect: Rect::centered(pointer, DEFAULT_BOX.0, DEFAULT_BOX.1).shifted_inside(display),
         source: RegionSource::Pointer,
+        mark: None,
     }
 }
 
@@ -197,10 +207,11 @@ pub fn choose_region_in_frame(
 ) -> Region {
     let region = choose_region(display, pointer, elements);
     if region.source == RegionSource::Pointer {
-        if let Some(rect) = table::table_region(frame, display, scale, pointer, elements) {
+        if let Some(hit) = table::table_region(frame, display, scale, pointer, elements) {
             return Region {
-                rect,
+                rect: hit.region,
                 source: RegionSource::Table,
+                mark: Some(hit.row),
             };
         }
     }
@@ -336,6 +347,10 @@ pub fn render_pointed(
         region.source, region.rect.w, region.rect.h, region.rect.x, region.rect.y, px.w, px.h
     );
     let mut shot = render_region(frame, px, budget);
+    if let Some(row) = region.mark {
+        let row = row.to_pixels((display.x, display.y), scale, frame.dimensions());
+        mark_row(&mut shot, frame.dimensions(), px, row);
+    }
     if region.source == RegionSource::Table {
         // A table crop is wide because tables are, not because it already
         // shows the screen: the title, filters and caption around the table
@@ -344,6 +359,62 @@ pub fn render_pointed(
         shot.region_fraction = shot.region_fraction.min(table::CONTEXT_SHARE);
     }
     shot
+}
+
+/// Marks the pointed `row` (frame pixels) of a table crop, which spans many
+/// rows, so the agent can tell which one was meant: a [`ROW_MARK_PX`] box
+/// inside the row on the crop, and a band over the row on the context image.
+/// `region` is where the crop sits in the `frame_size` frame. The box lies on
+/// the row's own edges, where rows keep their padding, not on its text.
+#[cfg(any(target_os = "macos", test))]
+fn mark_row(shot: &mut Shot, frame_size: (u32, u32), region: PxRect, row: PxRect) {
+    let inner = (
+        shot.crop.width().saturating_sub(2 * BORDER_PX).max(1) as f64,
+        shot.crop.height().saturating_sub(2 * BORDER_PX).max(1) as f64,
+    );
+    let (sx, sy) = (inner.0 / region.w as f64, inner.1 / region.h as f64);
+    let to_crop = |v: u32, origin: u32, s: f64| {
+        BORDER_PX as i64 + ((v as f64 - origin as f64) * s).round() as i64
+    };
+    let x0 = to_crop(row.x, region.x, sx).max(BORDER_PX as i64);
+    let y0 = to_crop(row.y, region.y, sy);
+    let x1 = to_crop(row.x + row.w, region.x, sx).min(BORDER_PX as i64 + inner.0 as i64);
+    let y1 = to_crop(row.y + row.h, region.y, sy);
+    draw_inner_outline(&mut shot.crop, x0, y0, x1, y1, ROW_MARK_PX);
+    if let Some(ctx) = shot.context.as_mut() {
+        let s = ctx.width() as f64 / frame_size.0.max(1) as f64;
+        let to_ctx = |v: u32| (v as f64 * s).round() as i64;
+        let (cx0, cy0) = (to_ctx(row.x), to_ctx(row.y));
+        let (cx1, cy1) = (to_ctx(row.x + row.w), to_ctx(row.y + row.h).max(cy0 + 2));
+        tint(ctx, cx0, cy0, cx1, cy1, ROW_BAND_ALPHA);
+    }
+}
+
+/// Strokes `t` px just inside the box `[x0, x1) x [y0, y1)`, clipped to the image.
+#[cfg(any(target_os = "macos", test))]
+fn draw_inner_outline(img: &mut RgbImage, x0: i64, y0: i64, x1: i64, y1: i64, t: i64) {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    for y in y0.max(0)..y1.min(h) {
+        for x in x0.max(0)..x1.min(w) {
+            if x < x0 + t || x >= x1 - t || y < y0 + t || y >= y1 - t {
+                img.put_pixel(x as u32, y as u32, BORDER_COLOR);
+            }
+        }
+    }
+}
+
+/// Blends [`BORDER_COLOR`] over the box `[x0, x1) x [y0, y1)` at `alpha`.
+#[cfg(any(target_os = "macos", test))]
+fn tint(img: &mut RgbImage, x0: i64, y0: i64, x1: i64, y1: i64, alpha: f64) {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    for y in y0.max(0)..y1.min(h) {
+        for x in x0.max(0)..x1.min(w) {
+            let p = img.get_pixel_mut(x as u32, y as u32);
+            for (c, b) in p.0.iter_mut().zip(BORDER_COLOR.0) {
+                *c = (*c as f64 * (1.0 - alpha) + b as f64 * alpha).round() as u8;
+            }
+        }
+    }
 }
 
 /// Adds a [`BORDER_PX`] frame around the image. The frame is new canvas, so

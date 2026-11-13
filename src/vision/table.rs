@@ -47,6 +47,14 @@ const MIN_GUTTERS: usize = 2;
 /// ...and a column is blank when at most this share of its pixels is ink.
 const BLANK_COLUMN_SHARE: f64 = 0.01;
 
+/// A table row under the pointer: the region to capture and the row in it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableHit {
+    pub region: Rect,
+    /// The pointed row, in points, for the mark that says which row it is.
+    pub row: Rect,
+}
+
 /// The region for the table row under `pointer`, or `None` when the pointer
 /// is not on a table row. `elements` are the accessibility frames under the
 /// pointer, innermost first; `scale` is frame pixels per point.
@@ -56,16 +64,28 @@ pub fn table_region(
     scale: f64,
     pointer: (f64, f64),
     elements: &[Rect],
-) -> Option<Rect> {
+) -> Option<TableHit> {
     for (i, row) in elements.iter().enumerate() {
         if !is_short_row(row, pointer) {
             continue;
         }
         // The nearest ancestor that could be the row's table decides; a
         // bigger one would only add whatever surrounds the table.
-        let Some(table) = elements[i + 1..].iter().find(|t| is_table_frame(t, row)) else {
+        let ancestors = &elements[i + 1..];
+        let Some(first) = ancestors.iter().position(|t| is_table_frame(t, row)) else {
             continue;
         };
+        // The row's group (a body without the header) is no wider than the
+        // table around it: climb to the widest frame with the same columns,
+        // which is the one that holds the header.
+        let mut table = ancestors[first];
+        for outer in &ancestors[first + 1..] {
+            if !same_columns(outer, &table) {
+                break;
+            }
+            table = *outer;
+        }
+        let table = &table;
         let Some(visible) = intersect(*table, display) else {
             continue;
         };
@@ -73,7 +93,10 @@ pub fn table_region(
         if !looks_like_table(frame, px, row.h * scale, scale) {
             continue;
         }
-        return Some(expand(display, visible, row));
+        return Some(TableHit {
+            region: expand(display, visible, row),
+            row: *row,
+        });
     }
     None
 }
@@ -99,6 +122,14 @@ fn is_table_frame(table: &Rect, row: &Rect) -> bool {
         && row.w >= MIN_ROW_WIDTH_SHARE * table.w
 }
 
+/// Whether `outer` holds `inner` and spans the same columns.
+fn same_columns(outer: &Rect, inner: &Rect) -> bool {
+    (outer.x - inner.x).abs() <= FRAME_SLACK
+        && (outer.w - inner.w).abs() <= 2.0 * FRAME_SLACK
+        && outer.y <= inner.y + FRAME_SLACK
+        && outer.y + outer.h + FRAME_SLACK >= inner.y + inner.h
+}
+
 fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     let x0 = a.x.max(b.x);
     let y0 = a.y.max(b.y);
@@ -108,9 +139,12 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 }
 
 /// Full table width from the header (the top of the table) to one row below
-/// the pointed row, padded and shifted inside the display like any region.
+/// the pointed row, padded at the sides and bottom and shifted inside the
+/// display like any region.
 fn expand(display: Rect, table: Rect, row: &Rect) -> Rect {
-    let top = table.y - ELEMENT_PADDING;
+    // The header is the top edge: padding above it would cut through the
+    // page title or the text around the table.
+    let top = table.y;
     let bottom = (row.y + row.h + TRAILING_ROWS * row.h).min(table.y + table.h) + ELEMENT_PADDING;
     let height = (bottom - top).max(MIN_ELEMENT.1);
     Rect::new(
@@ -434,12 +468,14 @@ mod tests {
         let img = t.draw(2.0);
         let row = t.row(15);
         let elements = [row, t.frame(), Rect::new(0.0, 24.0, 800.0, 576.0)];
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &elements).expect("table");
+        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &elements)
+            .expect("table")
+            .region;
         // Full table width plus padding.
         assert_eq!(r.x, t.x - ELEMENT_PADDING);
         assert_eq!(r.w, t.w + 2.0 * ELEMENT_PADDING);
-        // From the header, with padding, down to one row after the pointed one.
-        assert_eq!(r.y, t.y - ELEMENT_PADDING);
+        // From the header down to one row after the pointed one, padded below.
+        assert_eq!(r.y, t.y);
         assert_eq!(r.y + r.h, row.y + 2.0 * row.h + ELEMENT_PADDING);
         assert!(r.contains((t.x, t.y)) && r.contains(pointer_on(row)));
     }
@@ -449,8 +485,9 @@ mod tests {
         let t = Table::new(8);
         let img = t.draw(2.0);
         let row = t.row(7); // the last row
-        let r =
-            table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()]).expect("table");
+        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()])
+            .expect("table")
+            .region;
         let table = t.frame();
         assert_eq!(r.y + r.h, table.y + table.h + ELEMENT_PADDING);
     }
@@ -461,7 +498,8 @@ mod tests {
         let img = t.draw(2.0);
         let header = Rect::new(t.x, t.y, t.w, t.pitch);
         let r = table_region(&img, DISPLAY, 2.0, pointer_on(header), &[header, t.frame()])
-            .expect("table");
+            .expect("table")
+            .region;
         assert!(r.h >= MIN_ELEMENT.1);
         assert!(r.contains(pointer_on(header)));
     }
@@ -481,7 +519,8 @@ mod tests {
             pointer_on(cell),
             &[cell, row, t.frame()],
         )
-        .expect("table");
+        .expect("table")
+        .region;
         assert_eq!(r.w, t.w + 2.0 * ELEMENT_PADDING);
     }
 
@@ -492,8 +531,9 @@ mod tests {
         t.w = 792.0;
         let img = t.draw(2.0);
         let row = t.row(3);
-        let r =
-            table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()]).expect("table");
+        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()])
+            .expect("table")
+            .region;
         assert!(r.x >= 0.0 && r.x + r.w <= DISPLAY.w + 1e-9);
         assert!(r.y >= 0.0 && r.y + r.h <= DISPLAY.h + 1e-9);
     }
@@ -507,7 +547,7 @@ mod tests {
         let table = t.frame();
         let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, table]);
         // Only the visible part of the table is inspected; it still repeats.
-        let r = r.expect("visible rows form a table");
+        let r = r.expect("visible rows form a table").region;
         assert!(r.y >= 0.0 && r.contains(pointer_on(row)));
     }
 
@@ -606,5 +646,101 @@ mod tests {
             shot.region_fraction,
             "check this row"
         ));
+    }
+
+    /// The interior of a framed crop: everything inside the 3 px frame.
+    fn interior_cyan(img: &RgbImage) -> Vec<(u32, u32)> {
+        let b = crate::vision::shot::BORDER_PX;
+        let cyan = crate::vision::shot::BORDER_COLOR;
+        (b..img.height() - b)
+            .flat_map(|y| (b..img.width() - b).map(move |x| (x, y)))
+            .filter(|&(x, y)| *img.get_pixel(x, y) == cyan)
+            .collect()
+    }
+
+    #[test]
+    fn the_pointed_row_is_boxed_on_the_crop_and_banded_on_the_context_image() {
+        use crate::vision::shot::{render_pointed, Budget, BORDER_COLOR};
+        let mut t = Table::new(20);
+        t.x = 0.0;
+        t.w = 790.0;
+        let img = t.draw(2.0);
+        let row = t.row(12);
+        let elements = [row, t.frame()];
+        let shot = render_pointed(&img, DISPLAY, pointer_on(row), &elements, Budget::STANDARD);
+        let region = choose_region_in_frame(&img, DISPLAY, 2.0, pointer_on(row), &elements);
+        // Rows of the crop where the row sits: its top and bottom edges.
+        let inner_h = shot.crop.height() as f64 - 6.0;
+        let sy = inner_h / (region.rect.h * 2.0);
+        let top = 3.0 + (row.y - region.rect.y) * 2.0 * sy;
+        let bottom = top + row.h * 2.0 * sy;
+        let cyan = interior_cyan(&shot.crop);
+        assert!(!cyan.is_empty(), "the row is marked");
+        for (_, y) in &cyan {
+            let y = *y as f64;
+            assert!(
+                (y - top).abs() <= 3.0 || (y - bottom).abs() <= 3.0 || (top..bottom).contains(&y),
+                "mark at y={y} is outside the pointed row {top}..{bottom}"
+            );
+        }
+        // The text of the row stays readable: its middle is not painted over.
+        let mid = ((top + bottom) / 2.0) as u32;
+        let painted_mid = cyan
+            .iter()
+            .filter(|&&(x, y)| y == mid && x > 20 && x < 700)
+            .count();
+        assert_eq!(painted_mid, 0);
+        // The context image has a band over the row and none on other rows.
+        let ctx = shot.context.expect("context image");
+        let s = ctx.width() as f64 / img.width() as f64;
+        let in_row = |y: f64| y >= row.y * 2.0 * s && y < (row.y + row.h) * 2.0 * s;
+        let tinted = |x: u32, y: u32| {
+            let p = ctx.get_pixel(x, y);
+            p.0[0] < 200 && p.0[2] > 200 && *p != BORDER_COLOR
+        };
+        let mid_x = (400.0 * 2.0 * s) as u32;
+        let ry = ((row.y + row.h / 2.0) * 2.0 * s) as u32;
+        assert!(tinted(mid_x, ry), "the pointed row is banded");
+        let other = ((t.row(3).y + 6.0) * 2.0 * s) as u32;
+        assert!(!in_row(other as f64) && !tinted(mid_x, other));
+    }
+
+    #[test]
+    fn crops_that_are_not_table_rows_are_not_marked() {
+        use crate::vision::shot::{render_pointed, Budget};
+        let t = Table::new(20);
+        let img = t.draw(2.0);
+        let row = t.row(12);
+        // An element crop of the same frame carries only its frame.
+        let card = Rect::new(t.x, row.y - 100.0, t.w, 240.0);
+        let shot = render_pointed(
+            &img,
+            DISPLAY,
+            pointer_on(row),
+            &[row, card, t.frame()],
+            Budget::STANDARD,
+        );
+        assert!(interior_cyan(&shot.crop).is_empty());
+    }
+
+    #[test]
+    fn a_body_group_climbs_to_the_table_that_holds_the_header() {
+        let t = Table::new(20);
+        let img = t.draw(2.0);
+        let row = t.row(10);
+        // Body frame without the header row, then the table, then a wider page.
+        let body = Rect::new(t.x, t.y + t.pitch, t.w, t.pitch * 20.0);
+        let page = Rect::new(t.x - 20.0, t.y - 40.0, t.w + 40.0, 560.0);
+        let hit = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, body, t.frame(), page],
+        )
+        .expect("table");
+        assert_eq!(hit.region.y, t.y);
+        assert_eq!(hit.region.x, t.x - ELEMENT_PADDING);
+        assert_eq!(hit.row, row);
     }
 }
