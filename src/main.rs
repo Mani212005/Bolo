@@ -38,72 +38,6 @@ fn default_config_path() -> PathBuf {
     userdata::config_dir().join("config.toml")
 }
 
-/// `bolo shot-preview FRAME X Y [--scale S] [--element X,Y,W,H]... [--high]
-/// [--out DIR]`: runs the capture pipeline on a saved display frame, without
-/// a display. X, Y and the element frames are logical points on that display
-/// (top-left 0,0); `--scale` is pixels per point (default 2). Writes
-/// `context-1.png` and `context-1-screen.png` to DIR (default .) and prints
-/// what it did as JSON.
-fn shot_preview(args: &[String]) -> anyhow::Result<()> {
-    use vision::shot::{Budget, Rect};
-    let usage = "usage: bolo shot-preview FRAME X Y [--scale S] [--element X,Y,W,H]... [--high] [--out DIR]";
-    let (Some(frame_path), Some(x), Some(y)) = (args.first(), args.get(1), args.get(2)) else {
-        anyhow::bail!(usage);
-    };
-    let pointer: (f64, f64) = (x.parse().context(usage)?, y.parse().context(usage)?);
-    let mut scale = 2.0f64;
-    let mut elements = Vec::new();
-    let mut budget = Budget::STANDARD;
-    let mut out = PathBuf::from(".");
-    let mut rest = args[3..].iter();
-    while let Some(flag) = rest.next() {
-        match flag.as_str() {
-            "--scale" => scale = rest.next().context(usage)?.parse().context(usage)?,
-            "--element" => {
-                let v: Vec<f64> = rest
-                    .next()
-                    .context(usage)?
-                    .split(',')
-                    .map(str::parse)
-                    .collect::<Result<_, _>>()
-                    .context(usage)?;
-                anyhow::ensure!(v.len() == 4, usage);
-                elements.push(Rect::new(v[0], v[1], v[2], v[3]));
-            }
-            "--high" => budget = Budget::HIGH,
-            "--out" => out = PathBuf::from(rest.next().context(usage)?),
-            _ => anyhow::bail!(usage),
-        }
-    }
-    anyhow::ensure!(scale > 0.0, usage);
-    let frame = image::open(frame_path)
-        .with_context(|| format!("reading {frame_path}"))?
-        .to_rgb8();
-    let display = Rect::new(
-        0.0,
-        0.0,
-        frame.width() as f64 / scale,
-        frame.height() as f64 / scale,
-    );
-    let region = vision::shot::choose_region(display, pointer, &elements);
-    let shot = vision::shot::render_pointed(&frame, display, pointer, &elements, budget);
-    let captured = vision::save_shot(&shot, &out.join("context-1.png"))?;
-    let (w, h) = shot.crop.dimensions();
-    println!(
-        "{}",
-        serde_json::json!({
-            "region": {
-                "source": format!("{:?}", region.source).to_lowercase(),
-                "x": region.rect.x, "y": region.rect.y, "w": region.rect.w, "h": region.rect.h,
-            },
-            "crop": { "path": captured.image, "width": w, "height": h, "tokens": Budget::tokens_for(w, h) },
-            "context": captured.context,
-            "region_fraction": captured.region_fraction,
-        })
-    );
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     // GROQ_API_KEY and the Jev keys come from the environment; fall back to ~/.env.
@@ -208,12 +142,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&pieces)?);
             return Ok(());
         }
-        Some("shot-preview") => return shot_preview(&args[2..]),
         Some("record") => {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  capture       While dictating, screenshot what you point at (Linux: select the area)\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n  shot-preview  Crop a saved display frame the way a capture would: FRAME X Y [--scale S] [--element X,Y,W,H]... [--high] [--out DIR]\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  capture       While dictating, screenshot what you point at (Linux: select the area)\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
         None => return start_bolo(&config_path),

@@ -98,8 +98,8 @@ pub fn save_shot(shot: &shot::Shot, output_path: &Path) -> Result<Captured> {
 }
 
 /// The images to hand the agent, in order: each crop, followed by its
-/// context image when `policy` wants it for this dictation. A crop whose
-/// capture has not finished (absent from `captures`) is sent alone.
+/// context image when `policy` wants it for this dictation. Only completed
+/// captures are delivered.
 pub fn delivered_images(
     crops: &[PathBuf],
     captures: &[Captured],
@@ -108,16 +108,13 @@ pub fn delivered_images(
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for crop in crops {
-        out.push(crop.clone());
         let done = captures.iter().find(|c| &c.image == crop);
-        if let Some(Captured {
-            context: Some(context),
-            region_fraction,
-            ..
-        }) = done
-        {
-            if shot::wants_context(policy, *region_fraction, transcript) {
-                out.push(context.clone());
+        if let Some(captured) = done {
+            out.push(crop.clone());
+            if let Some(context) = &captured.context {
+                if shot::wants_context(policy, captured.region_fraction, transcript) {
+                    out.push(context.clone());
+                }
             }
         }
     }
@@ -350,15 +347,14 @@ mod tests {
                 region_fraction: 0.6,
             },
         ];
-        // crop3 is still being captured: sent alone.
+        // crop3 is still being captured: it is not delivered.
         let crops = vec![crop1.clone(), crop2.clone(), crop3.clone()];
         assert_eq!(
             delivered_images(&crops, &captures, ContextPolicy::Auto, "fix this"),
             vec![
                 crop1.clone(),
                 context_image_path(&crop1),
-                crop2.clone(),
-                crop3.clone()
+                crop2.clone()
             ]
         );
         assert_eq!(
@@ -372,13 +368,12 @@ mod tests {
                 crop1.clone(),
                 context_image_path(&crop1),
                 crop2.clone(),
-                context_image_path(&crop2),
-                crop3.clone()
+                context_image_path(&crop2)
             ]
         );
         assert_eq!(
             delivered_images(&crops, &captures, ContextPolicy::Never, "this page"),
-            crops
+            vec![crop1.clone(), crop2.clone()]
         );
     }
 
