@@ -12,7 +12,8 @@
 //! When that band is so tall that the budget would shrink it below one output
 //! pixel per point, the header is kept on top of a few rows around the pointed
 //! one and the rows between them are left out. When the header is scrolled
-//! out of view, only the rows around the pointed one are kept.
+//! out of view, only the rows around the pointed one are kept, unless the
+//! first visible row is a header pinned on screen.
 //! Whether a parent is a table is read from the pixels, because the
 //! accessibility frames carry no row/column structure: a table repeats one
 //! row pitch and keeps blank gutters between its columns, which running text,
@@ -119,7 +120,16 @@ pub fn table_region(
             (row.y - LEADING_ROWS * row.h).max(visible.y),
             row,
         );
-        if visible.y > table.y + FRAME_SLACK {
+        let body = ancestors[first];
+        let header_h = if visible.y <= table.y + FRAME_SLACK {
+            if body.y > table.y + FRAME_SLACK {
+                body.y - table.y
+            } else {
+                row.h
+            }
+        } else if has_sticky_header(frame, display, scale, visible, row.h) {
+            row.h
+        } else {
             // The header is scrolled out of view: the top of what is visible
             // is some other row, so only the rows around the pointed one say
             // anything.
@@ -128,14 +138,8 @@ pub fn table_region(
                 header: None,
                 row: *row,
             });
-        }
-        let whole = band(display, visible, visible.y, row);
-        let body = ancestors[first];
-        let header_h = if body.y > table.y + FRAME_SLACK {
-            body.y - table.y
-        } else {
-            row.h
         };
+        let whole = band(display, visible, visible.y, row);
         let header = Rect::new(whole.x, visible.y, whole.w, header_h);
         if stays_legible(whole, scale, budget) || around.y <= header.y + header.h {
             return Some(TableHit {
@@ -151,6 +155,27 @@ pub fn table_region(
         });
     }
     None
+}
+
+/// Whether the first row of the `visible` part of a table scrolled past its
+/// header is a header kept on screen (a sticky header): its background
+/// differs from both rows below it, which body rows, striped or not, do not.
+fn has_sticky_header(
+    frame: &RgbImage,
+    display: Rect,
+    scale: f64,
+    visible: Rect,
+    pitch: f64,
+) -> bool {
+    let background = |k: f64| {
+        let band = Rect::new(visible.x, visible.y + k * pitch, visible.w, pitch);
+        background_key(
+            frame,
+            band.to_pixels((display.x, display.y), scale, frame.dimensions()),
+        )
+    };
+    let top = background(0.0);
+    top != background(1.0) && top != background(2.0)
 }
 
 /// A wide, short element under the pointer that [`super::shot::choose_region`]
@@ -227,6 +252,30 @@ pub fn looks_like_table(frame: &RgbImage, area: PxRect, pitch: f64, scale: f64) 
     ink.repeats_at(pitch) && ink.gutters((MIN_GUTTER_PT * scale).ceil() as usize) >= MIN_GUTTERS
 }
 
+/// A colour at 4 bits a channel.
+fn colour_key(p: &[u8; 3]) -> usize {
+    ((p[0] >> 4) as usize) << 8 | ((p[1] >> 4) as usize) << 4 | (p[2] >> 4) as usize
+}
+
+/// The key with the most votes; the lowest key wins a tie, so the result
+/// does not depend on order.
+fn most_votes(votes: &[u32]) -> usize {
+    (0..votes.len())
+        .max_by_key(|&k| (votes[k], votes.len() - k))
+        .unwrap_or(0)
+}
+
+/// The most common colour of `area`, as a [`colour_key`].
+fn background_key(frame: &RgbImage, area: PxRect) -> usize {
+    let mut votes = vec![0u32; 4096];
+    for y in area.y..area.y + area.h {
+        for x in area.x..area.x + area.w {
+            votes[colour_key(&frame.get_pixel(x, y).0)] += 1;
+        }
+    }
+    most_votes(&votes)
+}
+
 /// How much ink each scan line and each column of an area holds.
 struct Ink {
     per_line: Vec<u32>,
@@ -242,21 +291,17 @@ impl Ink {
         // a channel, so stripes, rules and tinted headers are not ink.
         let mut votes = vec![0u32; 4096];
         let mut first = vec![[0u8; 3]; 4096];
-        let key = |p: &[u8; 3]| {
-            ((p[0] >> 4) as usize) << 8 | ((p[1] >> 4) as usize) << 4 | (p[2] >> 4) as usize
-        };
         for (y, line_ink) in per_line.iter_mut().enumerate() {
             votes.iter_mut().for_each(|v| *v = 0);
             for x in 0..w {
                 let p = frame.get_pixel(area.x + x as u32, area.y + y as u32).0;
-                let k = key(&p);
+                let k = colour_key(&p);
                 if votes[k] == 0 {
                     first[k] = p;
                 }
                 votes[k] += 1;
             }
-            // Lowest key wins a tie, so the result does not depend on hashing.
-            let mode = (0..4096).max_by_key(|&k| (votes[k], 4096 - k)).unwrap_or(0);
+            let mode = most_votes(&votes);
             let bg = first[mode];
             for (x, column_ink) in per_column.iter_mut().enumerate() {
                 let p = frame.get_pixel(area.x + x as u32, area.y + y as u32).0;
@@ -657,6 +702,56 @@ mod tests {
         );
         assert_eq!(hit.region.x, t.x - ELEMENT_PADDING);
         assert!(hit.region.contains(pointer_on(row)));
+    }
+
+    #[test]
+    fn a_sticky_header_over_a_scrolled_table_is_kept() {
+        let mut t = Table::new(40);
+        t.y = -300.0;
+        let mut img = t.draw(2.0);
+        // The header stays pinned at the top of the view as rows scroll under it.
+        fill(&mut img, t.x, 0.0, t.w, t.pitch, 2.0, HEADER);
+        for (c, cx) in COLUMNS.iter().enumerate() {
+            word(&mut img, t.x + cx, 0.0, 0, c, 2.0);
+        }
+        let row = t.row(20);
+        let hit = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("table");
+        // The band runs from the pinned header down past the pointed row.
+        assert_eq!(hit.header, None);
+        assert_eq!(hit.region.y, 0.0);
+        assert_eq!(
+            hit.region.y + hit.region.h,
+            row.y + 2.0 * row.h + ELEMENT_PADDING
+        );
+        assert!(hit.region.contains(pointer_on(row)));
+    }
+
+    #[test]
+    fn striped_rows_at_the_top_of_a_scrolled_table_are_not_a_header() {
+        let mut t = Table::new(40);
+        t.y = -312.0;
+        t.zebra = true;
+        let img = t.draw(2.0);
+        let row = t.row(20);
+        let hit = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("table");
+        assert_eq!(hit.header, None);
+        assert_eq!(hit.region.y, row.y - LEADING_ROWS * row.h);
     }
 
     #[test]
