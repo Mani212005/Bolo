@@ -1101,6 +1101,8 @@ fn finalize(
 #[derive(Debug, PartialEq, Eq)]
 enum CaptureStart {
     Started,
+    /// The recording session has already ended.
+    NotRecording,
     /// No recording session to save into.
     NoSession,
     /// One capture at a time: a second tap while the Linux screenshot
@@ -1118,6 +1120,9 @@ fn start_capture(
 ) -> CaptureStart {
     let img_path = {
         let mut s = shared.lock().unwrap();
+        if s.phase != Phase::Recording {
+            return CaptureStart::NotRecording;
+        }
         let Some(session_dir) = s.vision_session_dir.clone() else {
             return CaptureStart::NoSession;
         };
@@ -1325,6 +1330,7 @@ fn handle_client(
             } else {
                 match start_capture(shared, cfg, None) {
                     CaptureStart::Started => "ok capturing".to_string(),
+                    CaptureStart::NotRecording => "err not recording".to_string(),
                     CaptureStart::Busy => "busy capturing".to_string(),
                     CaptureStart::NoSession => "err no capture session".to_string(),
                 }
@@ -1629,6 +1635,20 @@ mod tests {
             "busy capturing"
         );
         assert!(shared.lock().unwrap().captured_context_images.is_empty());
+    }
+
+    #[test]
+    fn capture_start_rejects_a_finalized_recording_session() {
+        let (shared, _hub, cfg) = daemon_state();
+        shared.lock().unwrap().vision_session_dir =
+            Some(std::env::temp_dir().join("bolo-capture-finalized-test"));
+        assert_eq!(
+            start_capture(&shared, &cfg, None),
+            CaptureStart::NotRecording
+        );
+        let state = shared.lock().unwrap();
+        assert!(!state.capture_in_flight);
+        assert!(state.captured_context_images.is_empty());
     }
 
     #[test]
