@@ -438,9 +438,9 @@ pub fn locate(haystack: &RgbImage, needle: &RgbImage) -> Option<PxRect> {
             .sum()
     };
     let allowed_misses = probes.len() / 20; // 95% must match
-                                            // Fewest misses wins, then the smallest total difference; an exact
-                                            // match ends the search.
+                                            // Fewest misses wins, then the smallest total difference.
     let mut best: Option<(usize, u64, u32, u32)> = None;
+    let mut best_count = 0usize;
     for y in 0..=(hh - nh) {
         for x in 0..=(hw - nw) {
             let limit = best.map_or(allowed_misses, |(m, ..)| m);
@@ -456,15 +456,29 @@ pub fn locate(haystack: &RgbImage, needle: &RgbImage) -> Option<PxRect> {
                     }
                 }
             }
-            if misses <= limit && best.is_none_or(|(m, t, ..)| (misses, total) < (m, t)) {
-                best = Some((misses, total, x, y));
-                if total == 0 {
-                    return Some(PxRect { x, y, w: nw, h: nh });
+            if misses <= limit {
+                let score = (misses, total);
+                match best.map(|(m, t, ..)| (m, t).cmp(&score)) {
+                    None | Some(std::cmp::Ordering::Greater) => {
+                        best = Some((misses, total, x, y));
+                        best_count = 1;
+                    }
+                    Some(std::cmp::Ordering::Equal) => {
+                        best_count += 1;
+                        if misses == 0 && total == 0 {
+                            return None;
+                        }
+                    }
+                    Some(std::cmp::Ordering::Less) => {}
                 }
             }
         }
     }
-    best.map(|(.., x, y)| PxRect { x, y, w: nw, h: nh })
+    if best_count == 1 {
+        best.map(|(.., x, y)| PxRect { x, y, w: nw, h: nh })
+    } else {
+        None
+    }
 }
 
 /// When to send the full-screen context image next to the crop.
@@ -839,6 +853,15 @@ mod tests {
             crop.put_pixel(201, y, Rgb([0, 0, 0]));
         }
         assert_eq!(locate(&frame, &crop), Some(region));
+    }
+
+    #[test]
+    fn locate_rejects_repeated_identical_regions() {
+        let needle = fixture_frame(40, 30);
+        let mut frame = RgbImage::from_pixel(130, 50, Rgb([11, 19, 27]));
+        imageops::replace(&mut frame, &needle, 10, 10);
+        imageops::replace(&mut frame, &needle, 75, 10);
+        assert_eq!(locate(&frame, &needle), None);
     }
 
     #[test]

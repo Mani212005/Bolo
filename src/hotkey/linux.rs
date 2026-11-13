@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// On Linux the dictation hotkeys are GNOME custom keybindings that run the
 /// `bolo` CLI (`bolo toggle`, ...). The daemon itself only watches for the
@@ -24,13 +25,17 @@ impl HotkeyListener for LinuxHotkeyListener {
             .map(|text| keyboard_event_devices(&text))
             .unwrap_or_default();
         let callback = std::sync::Arc::new(callback);
+        let tap = Arc::new(Mutex::new(ControlTap::default()));
         let mut watching = 0;
-        for device in devices {
+        for (device_id, device) in devices.into_iter().enumerate() {
             match std::fs::File::open(&device) {
                 Ok(file) => {
                     watching += 1;
                     let callback = std::sync::Arc::clone(&callback);
-                    std::thread::spawn(move || watch_keyboard(file, &device, &*callback));
+                    let tap = Arc::clone(&tap);
+                    std::thread::spawn(move || {
+                        watch_keyboard(file, &device, device_id, tap, &*callback)
+                    });
                 }
                 Err(e) => eprintln!("[linux-hotkey] cannot read {}: {e}", device.display()),
             }
@@ -51,9 +56,10 @@ impl HotkeyListener for LinuxHotkeyListener {
 fn watch_keyboard(
     mut file: std::fs::File,
     device: &std::path::Path,
+    device_id: usize,
+    tap: Arc<Mutex<ControlTap>>,
     callback: &(dyn Fn(&str) + Send + Sync),
 ) {
-    let mut tap = ControlTap::default();
     let mut buf = [0u8; INPUT_EVENT_SIZE * 64];
     loop {
         let n = match file.read(&mut buf) {
@@ -66,7 +72,8 @@ fn watch_keyboard(
         };
         for raw in buf[..n].chunks_exact(INPUT_EVENT_SIZE) {
             if let Some(event) = KeyEvent::parse(raw) {
-                if tap.feed(event) {
+                let triggered = tap.lock().unwrap().feed(device_id, event);
+                if triggered {
                     callback("capture");
                 }
             }
@@ -124,34 +131,44 @@ impl KeyEvent {
 /// Recognises Control pressed and released on its own, quickly.
 #[derive(Debug, Default)]
 struct ControlTap {
-    pressed_at: Option<u64>,
-    held: HashSet<u16>,
+    pressed_at: Option<(usize, u16, u64)>,
+    held: HashSet<(usize, u16)>,
 }
 
 impl ControlTap {
-    fn feed(&mut self, event: KeyEvent) -> bool {
+    fn feed(&mut self, device_id: usize, event: KeyEvent) -> bool {
         let is_ctrl = event.code == KEY_LEFTCTRL || event.code == KEY_RIGHTCTRL;
         match (is_ctrl, event.value) {
             (true, 1) => {
-                self.pressed_at = self.held.is_empty().then_some(event.time_ms);
-                self.held.insert(event.code);
+                self.pressed_at =
+                    self.held
+                        .is_empty()
+                        .then_some((device_id, event.code, event.time_ms));
+                self.held.insert((device_id, event.code));
                 false
             }
             (true, 0) => {
-                self.held.remove(&event.code);
-                self.pressed_at
-                    .take()
-                    .filter(|_| self.held.is_empty())
-                    .is_some_and(|t| event.time_ms.saturating_sub(t) <= TAP_MAX_MS)
+                self.held.remove(&(device_id, event.code));
+                if self
+                    .pressed_at
+                    .is_some_and(|(source, code, _)| source == device_id && code == event.code)
+                {
+                    self.pressed_at
+                        .take()
+                        .filter(|_| self.held.is_empty())
+                        .is_some_and(|(_, _, t)| event.time_ms.saturating_sub(t) <= TAP_MAX_MS)
+                } else {
+                    false
+                }
             }
             (true, _) => false,
             (false, 1) => {
                 self.pressed_at = None;
-                self.held.insert(event.code);
+                self.held.insert((device_id, event.code));
                 false
             }
             (false, 0) => {
-                self.held.remove(&event.code);
+                self.held.remove(&(device_id, event.code));
                 false
             }
             (false, _) => false,
@@ -212,7 +229,15 @@ mod tests {
 
     fn taps(events: &[KeyEvent]) -> usize {
         let mut tap = ControlTap::default();
-        events.iter().filter(|e| tap.feed(**e)).count()
+        events.iter().filter(|e| tap.feed(0, **e)).count()
+    }
+
+    fn sourced_taps(events: &[(usize, KeyEvent)]) -> usize {
+        let mut tap = ControlTap::default();
+        events
+            .iter()
+            .filter(|(source, event)| tap.feed(*source, *event))
+            .count()
     }
 
     #[test]
@@ -269,6 +294,28 @@ mod tests {
                 key(KEY_RIGHTCTRL, 1, 20),
                 key(KEY_RIGHTCTRL, 0, 60),
                 key(KEY_LEFTCTRL, 0, 90),
+            ]),
+            0
+        );
+    }
+
+    #[test]
+    fn keys_held_on_another_keyboard_block_control_taps() {
+        assert_eq!(
+            sourced_taps(&[
+                (0, key(KEY_SPACE, 1, 0)),
+                (1, key(KEY_LEFTCTRL, 1, 20)),
+                (1, key(KEY_LEFTCTRL, 0, 60)),
+                (0, key(KEY_SPACE, 0, 90)),
+            ]),
+            0
+        );
+        assert_eq!(
+            sourced_taps(&[
+                (0, key(KEY_LEFTCTRL, 1, 0)),
+                (1, key(KEY_RIGHTCTRL, 1, 20)),
+                (1, key(KEY_RIGHTCTRL, 0, 60)),
+                (0, key(KEY_LEFTCTRL, 0, 90)),
             ]),
             0
         );
