@@ -696,8 +696,7 @@ mod tests {
         for start in (0..=(count - 12)).rev() {
             let first = samples[start].point;
             if (first.0 - last.0).hypot(first.1 - last.1) < 160.0 {
-                if let Some(gesture) =
-                    reference_evaluate(&samples[start..], minimum_angle_degrees)
+                if let Some(gesture) = reference_evaluate(&samples[start..], minimum_angle_degrees)
                 {
                     return Some(gesture);
                 }
@@ -706,10 +705,7 @@ mod tests {
         None
     }
 
-    fn reference_evaluate(
-        samples: &[Sample],
-        minimum_angle_degrees: f64,
-    ) -> Option<CircleGesture> {
+    fn reference_evaluate(samples: &[Sample], minimum_angle_degrees: f64) -> Option<CircleGesture> {
         let first = samples.first()?.point;
         let last = samples.last()?.point;
 

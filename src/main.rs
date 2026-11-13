@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(
             cmd @ ("toggle" | "pause" | "insert-last" | "enhance" | "status" | "quick-splice"
-            | "copy-splice"),
+            | "copy-splice" | "capture"),
         ) => return client(cmd),
         Some("exit" | "quit" | "stop") => {
             // Gracefully shut down the daemon if running, then say goodbye.
@@ -146,7 +146,7 @@ fn main() -> anyhow::Result<()> {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  capture       While dictating, screenshot what you point at (Linux: select the area)\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
         None => return start_bolo(&config_path),

@@ -51,7 +51,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **Real-Time Jev Semantic Formatting & Smart Code**: Automatically classifies code vs prose and tags programming languages (```` ```rust ````, ```` ```python ````) and layers lists/paragraphs using the sub-400ms Jev decision engine with heuristic fallback.
 - **Custom Vocabulary Biasing**: Add technical terms, proper nouns, and acronyms for accurate phonetic transcription.
 - **Audio File Drag and Drop**: Drop any audio file directly into the dashboard for immediate speech-to-text transcription.
-- **Circle-to-Capture Screen Context**: Hover pointer in a circle (hover only, do not click or press) during dictation to capture and attach screenshots of relevant UI or code.
+- **Point-to-Capture Screen Context**: While dictating, point at what you mean and Bolo attaches a screenshot of just that part, the way you would crop one for an agent. On macOS hold `Control` and move the pointer in a circle over it (hover only, do not click); Bolo crops the UI element under the pointer, or a 640x400 area around it, from the display it is on. On Linux tap `Control` on its own (or run `bolo capture`) and select the area in the screenshot dialog. See [Screenshots](#screenshots).
 - **Browser Web Demo & Launch Page**: Try Bolo online via the hosted launch page and interactive speech playground (`demo/`).
 
 ---
@@ -65,6 +65,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 | `Option + P` (`⌥P`) | `Alt + P` | **Pause / Resume**: Temporarily freezes ongoing voice recording |
 | `Option + I` (`⌥I`) | `Alt + I` | **Re-Type Last**: Types the most recent transcription at cursor position |
 | `Option + C` (`⌥C`) | `Alt + C` | **Copy Selection & Splice**: Copies selected text from frontmost app and splices |
+| `Control` + circle the pointer | Tap `Control` alone | **Capture Screen Context** (while dictating): screenshots what you point at |
 
 ---
 
@@ -145,8 +146,10 @@ Bolo configuration files live in `~/.config/bolo/`:
   max_utterance_ms = 1800000  # 30-minute maximum recording cap
 
   [vision]
-  enabled = true              # hover pointer in a circle to capture screen context
-  min_angle_degrees = 315.0   # minimum circle arc angle threshold
+  enabled = true              # point-to-capture screen context while dictating
+  min_angle_degrees = 315.0   # minimum circle arc angle threshold (macOS)
+  resolution = "standard"     # "standard" (1568 px) or "high" (2576 px, about 3x the image tokens)
+  context = "auto"            # full-screen context image: "auto", "always" or "never"
 
   [pill]
   style = "small"             # macOS recording pill: "small", "large" or "hidden"
@@ -168,6 +171,18 @@ Bolo configuration files live in `~/.config/bolo/`:
 - **`~/.env`**: Optional `GROQ_API_KEY=gsk_...` and `TYPESAFE_API_KEY=...` (or `OPENROUTER_API_KEY=sk-or-...`) for cloud transcription, LLaMA enhancement, and Jev formatting decisions.
 
 ---
+
+## Screenshots
+
+A full-screen capture is several times larger than a vision model's image budget, so the model shrinks it and small text blurs. Bolo sends what a person would crop instead:
+
+- **The part you point at.** macOS: the accessibility element under the pointer (a dialog, a panel, a list) with 16 pt of padding, or a 640x400 pt area around the pointer when the element is tiny or fills most of the screen. It is cropped from the display under the pointer at that display's native pixels. Linux: the area you select.
+- **No ring over the content.** A 3 px `#00BFFF` frame is added around the crop as new pixels, so it never hides text.
+- **Sized for the model.** The crop stays at native resolution up to Claude's standard budget (1568 px long edge, 1568 image tokens; at 2x the default area fits with no resampling) and is downscaled with Lanczos3 only beyond it. `resolution = "high"` raises the budget to 2576 px / 4784 tokens. Saved as lossless RGB PNG without metadata.
+- **Context when it helps.** A 768 px full-screen image with the region outlined (`context-N-screen.png`) follows the crop when the crop covers under 35% of the display or the dictation talks about the screen, page, app, window or layout (`context = "auto"`).
+- **Where they go.** Each dictation's images and `context.md` are kept in `~/.local/share/bolo/sessions/<session>/` for 7 days. macOS pastes them into GUI apps, or as quoted paths into terminals. On Linux, when you capture a screenshot, its quoted paths are added to the end of your dictated text in whatever app has focus. Claude Code and other CLI agents attach them as images; in other apps, the paths appear as text.
+
+On Linux, GNOME on Wayland does not let apps read the pointer position, so Bolo cannot know what you point at: tapping `Control` opens the system screenshot dialog to select the area (choose *Selection*). Bolo first takes a silent full-display capture to locate the selected area and, when the context policy allows, provide its context image; the first time, GNOME may ask whether Bolo may take screenshots. Tapping `Control` is read from the keyboard device, which needs your user in the `input` group; without it, bind `bolo capture` to a key in *Settings > Keyboard > Custom Shortcuts*. Keyboards connected after Bolo starts need a Bolo restart for Control-tap detection; the configured `bolo capture` shortcut works regardless.
 
 ## Dictating into terminal agents
 

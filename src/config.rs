@@ -234,10 +234,14 @@ impl Default for VocabConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VisionConfig {
-    /// Enable hover-only pointer-guided visual screen context capture.
+    /// Enable pointer-guided screen context capture.
     pub enabled: bool,
     /// Minimum circle angle in degrees (default: 315).
     pub min_angle_degrees: f64,
+    /// Pixel budget of the cropped screenshot (default: standard).
+    pub resolution: ScreenshotResolution,
+    /// When to send the small full-screen context image (default: auto).
+    pub context: crate::vision::shot::ContextPolicy,
 }
 
 impl Default for VisionConfig {
@@ -245,6 +249,28 @@ impl Default for VisionConfig {
         Self {
             enabled: true,
             min_angle_degrees: 315.0,
+            resolution: ScreenshotResolution::Standard,
+            context: crate::vision::shot::ContextPolicy::Auto,
+        }
+    }
+}
+
+/// How many pixels a screenshot may keep before Bolo downscales it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotResolution {
+    /// 1568 px long edge, 1568 visual tokens (Claude's standard tier).
+    #[default]
+    Standard,
+    /// 2576 px long edge, 4784 visual tokens (Claude's high-resolution tier).
+    High,
+}
+
+impl ScreenshotResolution {
+    pub fn budget(self) -> crate::vision::shot::Budget {
+        match self {
+            Self::Standard => crate::vision::shot::Budget::STANDARD,
+            Self::High => crate::vision::shot::Budget::HIGH,
         }
     }
 }
@@ -560,6 +586,25 @@ mod tests {
         // The rest of [inject] keeps its defaults.
         assert!(cfg.restore_clipboard);
         assert_eq!(cfg.restore_delay_ms, 300);
+    }
+
+    #[test]
+    fn vision_screenshot_defaults_and_overrides() {
+        use crate::vision::shot::{Budget, ContextPolicy};
+        let parse = |s: &str| toml::from_str::<VisionConfig>(s).unwrap();
+        let cfg = parse("");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.resolution, ScreenshotResolution::Standard);
+        assert_eq!(cfg.resolution.budget(), Budget::STANDARD);
+        assert_eq!(cfg.context, ContextPolicy::Auto);
+        let cfg = parse("resolution = \"high\"\ncontext = \"never\"\n");
+        assert_eq!(cfg.resolution.budget(), Budget::HIGH);
+        assert_eq!(cfg.context, ContextPolicy::Never);
+        assert!(toml::from_str::<VisionConfig>("resolution = \"huge\"").is_err());
+        // The shipped config.toml spells the defaults out.
+        let shipped: Config = toml::from_str(include_str!("../config.toml")).unwrap();
+        assert_eq!(shipped.vision.resolution, ScreenshotResolution::Standard);
+        assert_eq!(shipped.vision.context, ContextPolicy::Auto);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 struct Injectors {
@@ -108,6 +108,10 @@ pub(crate) struct Shared {
     pub(crate) vision_session_dir: Option<PathBuf>,
     /// Chronological context images captured during session
     pub(crate) captured_context_images: Vec<PathBuf>,
+    /// The finished captures among them, with their context images.
+    pub(crate) captures: Vec<crate::vision::Captured>,
+    /// A capture is running (on Linux, its screenshot dialog may be open).
+    pub(crate) capture_in_flight: bool,
     /// Broadcasts phase changes, levels and outcomes to subscribers.
     pub(crate) events: EventHub,
 }
@@ -192,10 +196,15 @@ fn notify_state(cfg: &Config, hub: &EventHub, body: &str) {
 
 fn notify_listening(cfg: &Config, hub: &EventHub) {
     if cfg.vision.enabled {
+        let capture_hint = if cfg!(target_os = "linux") {
+            "tap Ctrl to capture 📸"
+        } else {
+            "hold Ctrl and circle to capture 📸"
+        };
         notify_state(
             cfg,
             hub,
-            "Listening… (hover in a circle to capture 📸 · Ctrl+Space stop)",
+            &format!("Listening… ({capture_hint} · Ctrl+Space stop)"),
         );
     } else {
         notify_state(
@@ -267,7 +276,7 @@ fn read_clipboard() -> Option<String> {
             }
         }
         if let Ok(out) = std::process::Command::new("xclip")
-            .args(&["-selection", "clipboard", "-o"])
+            .args(["-selection", "clipboard", "-o"])
             .output()
         {
             if out.status.success() {
@@ -304,7 +313,7 @@ fn copy_selection() {
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("xdotool")
-            .args(&["key", "--clearmodifiers", "ctrl+c"])
+            .args(["key", "--clearmodifiers", "ctrl+c"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
@@ -387,6 +396,8 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         vision_detector: None,
         vision_session_dir: None,
         captured_context_images: Vec::new(),
+        captures: Vec::new(),
+        capture_in_flight: false,
         events: events.clone(),
     }));
     let (start_tx, start_rx) = crossbeam_channel::unbounded::<()>();
@@ -524,7 +535,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let shared_hotkey = Arc::clone(&shared);
         let vision_enabled = cfg.vision.enabled;
         if let Err(e) = listener.start(Box::new(move |cmd| {
-            if cmd.starts_with("mouse ") {
+            if cmd.starts_with("mouse ") || cmd == "capture" {
                 if !vision_enabled {
                     return;
                 }
@@ -738,7 +749,11 @@ async fn inject_text(
 
     #[cfg(target_os = "linux")]
     {
-        let _ = images;
+        // Wayland does not say which app is in front, so screenshots go as
+        // quoted paths after the text; Claude Code and other CLI agents
+        // attach a pasted image path as an image.
+        let with_images = crate::inject::append_image_paths(text, images);
+        let text = with_images.as_str();
         match cfg.inject.method {
             InjectMethod::Paste => {
                 let restore_clipboard = cfg.inject.restore_clipboard;
@@ -793,6 +808,52 @@ async fn inject_text(
             }
         }
     }
+}
+
+/// How long a finished dictation waits for a running capture, such as a
+/// Linux screenshot dialog the user has not confirmed yet.
+const CAPTURE_WAIT: Duration = Duration::from_secs(30);
+
+/// Waits until no capture is running, at most `limit`.
+fn wait_for_capture(shared: &Arc<Mutex<Shared>>, limit: Duration) {
+    let started = Instant::now();
+    let mut logged = false;
+    while shared.lock().unwrap().capture_in_flight && started.elapsed() < limit {
+        if !logged {
+            eprintln!("[vision] waiting for the screen capture to finish");
+            logged = true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if started.elapsed() >= limit {
+        cancel_capture(shared);
+    }
+}
+
+fn cancel_capture(shared: &Arc<Mutex<Shared>>) {
+    let mut s = shared.lock().unwrap();
+    if !s.capture_in_flight {
+        return;
+    }
+    s.capture_in_flight = false;
+    let finished: Vec<PathBuf> = s
+        .captures
+        .iter()
+        .map(|capture| capture.image.clone())
+        .collect();
+    s.captured_context_images
+        .retain(|path| finished.iter().any(|done| done == path));
+}
+
+/// The screenshots this dictation hands the agent: each crop, plus its
+/// full-screen context image when `[vision] context` wants it for `text`.
+fn delivered_images(s: &Shared, cfg: &Config, text: &str) -> Vec<PathBuf> {
+    crate::vision::delivered_images(
+        &s.captured_context_images,
+        &s.captures,
+        cfg.vision.context,
+        text,
+    )
 }
 
 /// Formats a finished dictation: local checks first, then at most one Jev
@@ -946,7 +1007,8 @@ fn finalize(
         );
         println!("[result]  {text}");
 
-        let images = shared.lock().unwrap().captured_context_images.clone();
+        wait_for_capture(shared, CAPTURE_WAIT);
+        let images = delivered_images(&shared.lock().unwrap(), cfg, &text);
 
         let t_inject = Instant::now();
         let injected = inject_text(&text, injectors, cfg, &images).await?;
@@ -982,7 +1044,7 @@ fn finalize(
                 _ => "On clipboard - paste with Ctrl+V",
             };
             notify_result(cfg, &format!("{head}\n{text}"));
-            let images_for_history = shared.lock().unwrap().captured_context_images.clone();
+            let images_for_history = delivered_images(&shared.lock().unwrap(), cfg, text);
             crate::userdata::append_history(
                 "dictation",
                 text,
@@ -1002,6 +1064,11 @@ fn finalize(
         }
     }
 
+    let transcript_text = match &outcome {
+        Ok(Some((_, text, _, _))) => text.as_str(),
+        _ => "",
+    };
+
     let (vision_session_dir, captured_images, session_duration_s) = {
         let mut s = shared.lock().unwrap();
         let duration = s
@@ -1009,14 +1076,12 @@ fn finalize(
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(0.0);
         let dir = s.vision_session_dir.take();
-        let images = std::mem::take(&mut s.captured_context_images);
+        let images = delivered_images(&s, cfg, transcript_text);
+        s.captured_context_images.clear();
+        s.captures.clear();
+        s.capture_in_flight = false;
         s.vision_detector = None;
         (dir, images, duration)
-    };
-
-    let transcript_text = match &outcome {
-        Ok(Some((_, text, _, _))) => text.as_str(),
-        _ => "",
     };
 
     let has_transcript = !transcript_text.trim().is_empty();
@@ -1049,6 +1114,98 @@ fn finalize(
     s.events.publish(closing);
     s.set_phase(Phase::Idle);
     s.clip_snapshot = None;
+}
+
+/// What a capture request did.
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureStart {
+    Started,
+    /// The recording session has already ended.
+    NotRecording,
+    /// No recording session to save into.
+    NoSession,
+    /// One capture at a time: a second tap while the Linux screenshot
+    /// dialog is open must not stack another dialog.
+    Busy,
+}
+
+/// Captures what the user points at (`pointer`, or the current pointer)
+/// into the recording session, on its own thread because the Linux portal
+/// waits for the user to select the area.
+fn start_capture(
+    shared: &Arc<Mutex<Shared>>,
+    cfg: &Config,
+    pointer: Option<(f64, f64)>,
+) -> CaptureStart {
+    let (session_dir, img_path) = {
+        let mut s = shared.lock().unwrap();
+        if s.phase != Phase::Recording {
+            return CaptureStart::NotRecording;
+        }
+        let Some(session_dir) = s.vision_session_dir.clone() else {
+            return CaptureStart::NoSession;
+        };
+        if s.capture_in_flight {
+            return CaptureStart::Busy;
+        }
+        s.capture_in_flight = true;
+        let count = s.captured_context_images.len() + 1;
+        let img_path = session_dir.join(format!("context-{count}.png"));
+        s.captured_context_images.push(img_path.clone());
+        (session_dir, img_path)
+    };
+    let shared = Arc::clone(shared);
+    let cfg = cfg.clone();
+    std::thread::spawn(move || {
+        let budget = cfg.vision.resolution.budget();
+        let result = crate::vision::capture_screen(pointer, &img_path, budget, cfg.vision.context);
+        if finish_capture(&shared, &session_dir, &img_path, result) {
+            notify(&cfg, "Screen context captured 📸");
+        }
+    });
+    CaptureStart::Started
+}
+
+fn finish_capture(
+    shared: &Arc<Mutex<Shared>>,
+    session_dir: &std::path::Path,
+    img_path: &std::path::Path,
+    result: anyhow::Result<crate::vision::Captured>,
+) -> bool {
+    let mut s = shared.lock().unwrap();
+    let same_session = s.vision_session_dir.as_deref() == Some(session_dir);
+    let still_pending = s
+        .captured_context_images
+        .iter()
+        .any(|path| path == img_path);
+    if !same_session || !still_pending {
+        drop(s);
+        discard_capture_files(img_path);
+        if !same_session {
+            let _ = std::fs::remove_dir(session_dir);
+        }
+        return false;
+    }
+    s.capture_in_flight = false;
+    match result {
+        Ok(captured) => {
+            eprintln!("[vision] captured context image: {}", img_path.display());
+            s.captures.push(captured);
+            true
+        }
+        Err(e) => {
+            s.captured_context_images.retain(|p| p != img_path);
+            eprintln!("[vision] screen capture failed: {e:#}");
+            drop(s);
+            discard_capture_files(img_path);
+            false
+        }
+    }
+}
+
+fn discard_capture_files(img_path: &std::path::Path) {
+    let _ = std::fs::remove_file(img_path);
+    let _ = std::fs::remove_file(crate::vision::context_image_path(img_path));
 }
 
 /// What a toggle did.
@@ -1085,17 +1242,25 @@ pub(crate) fn toggle(
                     .map(|d| d.as_millis())
                     .unwrap_or(0);
                 let session_dir = crate::userdata::sessions_dir().join(format!("session_{now_ms}"));
-                if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                    eprintln!(
-                        "[vision] failed to create session dir {}: {e:#}",
-                        session_dir.display()
-                    );
-                }
-                s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
-                    cfg.vision.min_angle_degrees,
-                ));
-                s.vision_session_dir = Some(session_dir);
+                s.vision_session_dir =
+                    match crate::userdata::create_private_session_dir(&session_dir) {
+                        Ok(()) => {
+                            s.vision_detector = Some(crate::vision::CircleGestureDetector::new(
+                                cfg.vision.min_angle_degrees,
+                            ));
+                            Some(session_dir)
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[vision] failed to create session dir {}: {e:#}",
+                                session_dir.display()
+                            );
+                            s.vision_detector = None;
+                            None
+                        }
+                    };
                 s.captured_context_images.clear();
+                s.captures.clear();
             }
             drop(s);
             start_tx.send(()).context("audio thread gone")?;
@@ -1197,36 +1362,29 @@ fn handle_client(
                             .and_then(|detector| detector.add((x, y), now_secs));
 
                         if let Some(gesture) = detected {
-                            let count = s.captured_context_images.len() + 1;
-                            if let Some(session_dir) = s.vision_session_dir.clone() {
-                                let img_path = session_dir.join(format!("context-{count}.png"));
-                                s.captured_context_images.push(img_path.clone());
-                                let shared_clone = Arc::clone(shared);
-                                let cfg_clone = cfg.clone();
-                                drop(s);
-                                std::thread::spawn(move || {
-                                    match crate::vision::capture_screen(gesture, &img_path) {
-                                        Ok(()) => {
-                                            eprintln!(
-                                                "[vision] captured context image: {}",
-                                                img_path.display()
-                                            );
-                                            notify(&cfg_clone, "Screen context captured 📸");
-                                        }
-                                        Err(e) => {
-                                            let mut s = shared_clone.lock().unwrap();
-                                            s.captured_context_images.retain(|p| p != &img_path);
-                                            eprintln!("[vision] gesture recognized but screen capture failed: {e:#}");
-                                        }
-                                    }
-                                });
-                                return Ok(());
-                            }
+                            drop(s);
+                            start_capture(shared, cfg, Some(gesture.center));
+                            return Ok(());
                         }
                     }
                 }
             }
             "ok".to_string()
+        }
+        "capture" => {
+            let recording = shared.lock().unwrap().phase == Phase::Recording;
+            if !cfg.vision.enabled {
+                "err screen capture is off ([vision] enabled = false)".to_string()
+            } else if !recording {
+                "err not recording".to_string()
+            } else {
+                match start_capture(shared, cfg, None) {
+                    CaptureStart::Started => "ok capturing".to_string(),
+                    CaptureStart::NotRecording => "err not recording".to_string(),
+                    CaptureStart::Busy => "busy capturing".to_string(),
+                    CaptureStart::NoSession => "err no capture session".to_string(),
+                }
+            }
         }
         "pause" => {
             let mut s = shared.lock().unwrap();
@@ -1494,6 +1652,97 @@ mod tests {
             json!({ "type": "phase", "phase": "recording" })
         );
         assert!(start_rx.try_recv().is_ok(), "audio thread was not started");
+    }
+
+    #[test]
+    fn capture_needs_vision_and_a_recording_session() {
+        let (shared, _hub, mut cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        assert_eq!(
+            command("capture", &shared, &start_tx, &pipeline_tx, &cfg),
+            "err screen capture is off ([vision] enabled = false)"
+        );
+        cfg.vision.enabled = true;
+        assert_eq!(
+            command("capture", &shared, &start_tx, &pipeline_tx, &cfg),
+            "err not recording"
+        );
+        shared.lock().unwrap().set_phase(Phase::Recording);
+        assert_eq!(
+            command("capture", &shared, &start_tx, &pipeline_tx, &cfg),
+            "err no capture session"
+        );
+        // A second request while one is running is refused, and nothing
+        // is queued for it.
+        {
+            let mut s = shared.lock().unwrap();
+            s.vision_session_dir = Some(std::env::temp_dir().join("bolo-capture-busy-test"));
+            s.capture_in_flight = true;
+        }
+        assert_eq!(
+            command("capture", &shared, &start_tx, &pipeline_tx, &cfg),
+            "busy capturing"
+        );
+        assert!(shared.lock().unwrap().captured_context_images.is_empty());
+    }
+
+    #[test]
+    fn capture_start_rejects_a_finalized_recording_session() {
+        let (shared, _hub, cfg) = daemon_state();
+        shared.lock().unwrap().vision_session_dir =
+            Some(std::env::temp_dir().join("bolo-capture-finalized-test"));
+        assert_eq!(
+            start_capture(&shared, &cfg, None),
+            CaptureStart::NotRecording
+        );
+        let state = shared.lock().unwrap();
+        assert!(!state.capture_in_flight);
+        assert!(state.captured_context_images.is_empty());
+    }
+
+    #[test]
+    fn timed_out_capture_is_discarded_after_finalization() {
+        let (shared, _hub, _cfg) = daemon_state();
+        let temp_dir =
+            std::env::temp_dir().join(format!("bolo_late_capture_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let old_session = temp_dir.join("session_old");
+        let new_session = temp_dir.join("session_new");
+        std::fs::create_dir_all(&old_session).unwrap();
+        std::fs::create_dir_all(&new_session).unwrap();
+        let image = old_session.join("context-1.png");
+        let context = crate::vision::context_image_path(&image);
+        {
+            let mut state = shared.lock().unwrap();
+            state.vision_session_dir = Some(old_session.clone());
+            state.capture_in_flight = true;
+            state.captured_context_images.push(image.clone());
+        }
+        cancel_capture(&shared);
+        {
+            let mut state = shared.lock().unwrap();
+            assert!(!state.capture_in_flight);
+            assert!(state.captured_context_images.is_empty());
+            state.vision_session_dir = Some(new_session);
+        }
+        std::fs::write(&image, b"late crop").unwrap();
+        std::fs::write(&context, b"late context").unwrap();
+        let captured = crate::vision::Captured {
+            image: image.clone(),
+            context: Some(context.clone()),
+            region_fraction: 0.2,
+        };
+        assert!(!finish_capture(&shared, &old_session, &image, Ok(captured)));
+        assert!(!image.exists());
+        assert!(!context.exists());
+        let state = shared.lock().unwrap();
+        assert!(state.captured_context_images.is_empty());
+        assert!(state.captures.is_empty());
+        assert!(!state.capture_in_flight);
+        drop(state);
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

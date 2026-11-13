@@ -1,311 +1,261 @@
-use crate::vision::gesture::CircleGesture;
-use anyhow::{anyhow, Result};
-use std::path::Path;
+//! macOS screen capture: the region the user points at, cropped from the
+//! native-resolution frame of the display under the pointer.
 
-/// Captures display screenshot under cursor gesture on macOS,
-/// and draws a highlight indicator around the target gesture area.
-pub fn capture_screen(gesture: CircleGesture, output_path: &Path) -> Result<()> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp_dir = std::env::temp_dir();
+use super::shot::{self, Budget, Rect, Shot};
+use anyhow::Result;
+
+/// Captures the region at `pointer` (global logical points; `None` means the
+/// current pointer position).
+///
+/// The region is the accessibility element under the pointer when it is a
+/// sensible size, otherwise a 640x400 box around the pointer
+/// ([`shot::choose_region`]). Only the display containing the pointer is
+/// captured, and its scale comes from the captured pixels, so secondary and
+/// non-Retina displays crop correctly.
+pub fn capture_shot(pointer: Option<(f64, f64)>, budget: Budget) -> Result<Shot> {
+    let pointer = match pointer {
+        Some(p) => p,
+        None => ffi::pointer_location()
+            .ok_or_else(|| anyhow::anyhow!("could not read the pointer position"))?,
+    };
+    let display = ffi::display_bounds_at(pointer)
+        .ok_or_else(|| anyhow::anyhow!("no display under the pointer"))?;
+    let elements = ffi::element_frames_at(pointer);
+    let frame = capture_rect(display)?;
+    Ok(shot::render_pointed(
+        &frame, display, pointer, &elements, budget,
+    ))
+}
+
+/// `screencapture` of one display's rectangle, at the display's native
+/// pixels, without the cursor or the shutter sound.
+fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let raw_capture_path = temp_dir.join(format!("bolo_raw_{now_nanos}.png"));
-
-    // screencapture -x captures display silently without shutter sound
+    use std::os::unix::fs::DirBuilderExt;
+    let raw_dir = std::env::temp_dir().join(format!("bolo_raw_{now_nanos}"));
+    std::fs::DirBuilder::new().mode(0o700).create(&raw_dir)?;
+    let raw = raw_dir.join("capture.png");
     let status = std::process::Command::new("screencapture")
         .arg("-x")
-        .arg(&raw_capture_path)
+        .arg(format!(
+            "-R{},{},{},{}",
+            rect.x.round(),
+            rect.y.round(),
+            rect.w.round(),
+            rect.h.round()
+        ))
+        .arg(&raw)
         .status();
-
-    match status {
-        Ok(s) if s.success() && raw_capture_path.exists() => {}
+    let decoded = match status {
+        Ok(s) if s.success() && raw.exists() => image::open(&raw).map(|img| img.to_rgb8()),
         _ => {
-            let _ = std::fs::remove_file(&raw_capture_path);
-            return Err(anyhow!("screencapture failed or permission denied"));
+            let _ = std::fs::remove_dir_all(&raw_dir);
+            return Err(anyhow::anyhow!(
+                "screencapture failed or screen recording permission denied"
+            ));
         }
-    }
-
-    // Try applying highlight ring around gesture center; fallback to unhighlighted image on error
-    if let Err(e) = apply_circle_highlight(&raw_capture_path, output_path, gesture) {
-        eprintln!("[vision] highlight rendering failed ({e:#}), saving unhighlighted capture");
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if std::fs::rename(&raw_capture_path, output_path).is_err() {
-            std::fs::copy(&raw_capture_path, output_path)?;
-            let _ = std::fs::remove_file(&raw_capture_path);
-        }
-    } else {
-        let _ = std::fs::remove_file(&raw_capture_path);
-    }
-
-    Ok(())
+    };
+    let _ = std::fs::remove_dir_all(&raw_dir);
+    Ok(decoded?)
 }
 
-fn apply_circle_highlight(
-    input_path: &Path,
-    output_path: &Path,
-    gesture: CircleGesture,
-) -> Result<()> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
+mod ffi {
+    use super::Rect;
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_void};
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type AXUIElementRef = *const c_void;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
     }
-    // macOS CoreGraphics FFI for rendering highlight overlay onto captured screenshot PNG
-    #[cfg(target_os = "macos")]
-    {
-        use std::ffi::CString;
-        use std::os::raw::c_void;
 
-        type CFURLRef = *const c_void;
-        type CGImageSourceRef = *const c_void;
-        type CGImageRef = *const c_void;
-        type CGContextRef = *const c_void;
-        type CGImageDestinationRef = *const c_void;
-        type CGColorSpaceRef = *const c_void;
-        type CFStringRef = *const c_void;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
 
-        #[link(name = "CoreGraphics", kind = "framework")]
-        extern "C" {}
-        #[link(name = "ImageIO", kind = "framework")]
-        extern "C" {}
-        #[link(name = "CoreFoundation", kind = "framework")]
-        extern "C" {
-            fn CGMainDisplayID() -> u32;
-            fn CGDisplayBounds(display: u32) -> CGRect;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
 
-            fn CFURLCreateWithFileSystemPath(
-                allocator: *const c_void,
-                filePath: CFStringRef,
-                pathStyle: isize,
-                isDirectory: bool,
-            ) -> CFURLRef;
-            fn CFStringCreateWithCString(
-                allocator: *const c_void,
-                cStr: *const i8,
-                encoding: u32,
-            ) -> CFStringRef;
-            fn CFRelease(cf: *const c_void);
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_AX_VALUE_CG_POINT_TYPE: u32 = 1;
+    const K_AX_VALUE_CG_SIZE_TYPE: u32 = 2;
+    const K_AX_ERROR_SUCCESS: i32 = 0;
+    /// Hit element plus parents; deeper than this is window chrome.
+    const MAX_ANCESTORS: usize = 8;
 
-            fn CGImageSourceCreateWithURL(
-                url: CFURLRef,
-                options: *const c_void,
-            ) -> CGImageSourceRef;
-            fn CGImageSourceCreateImageAtIndex(
-                source: CGImageSourceRef,
-                index: usize,
-                options: *const c_void,
-            ) -> CGImageRef;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGGetDisplaysWithPoint(
+            point: CGPoint,
+            max_displays: u32,
+            displays: *mut u32,
+            matching_display_count: *mut u32,
+        ) -> i32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+        fn CGEventCreate(source: *const c_void) -> *const c_void;
+        fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+    }
 
-            fn CGImageGetWidth(image: CGImageRef) -> usize;
-            fn CGImageGetHeight(image: CGImageRef) -> usize;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
 
-            fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
-            fn CGBitmapContextCreate(
-                data: *mut c_void,
-                width: usize,
-                height: usize,
-                bitsPerComponent: usize,
-                bytesPerRow: usize,
-                space: CGColorSpaceRef,
-                bitmapInfo: u32,
-            ) -> CGContextRef;
-            fn CGContextDrawImage(c: CGContextRef, rect: CGRect, image: CGImageRef);
-            fn CGContextSetRGBStrokeColor(
-                c: CGContextRef,
-                red: f64,
-                green: f64,
-                blue: f64,
-                alpha: f64,
-            );
-            fn CGContextSetLineWidth(c: CGContextRef, width: f64);
-            fn CGContextStrokeEllipseInRect(c: CGContextRef, rect: CGRect);
-            fn CGBitmapContextCreateImage(c: CGContextRef) -> CGImageRef;
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+        fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout_seconds: f32) -> i32;
+        fn AXUIElementCopyElementAtPosition(
+            application: AXUIElementRef,
+            x: f32,
+            y: f32,
+            element: *mut AXUIElementRef,
+        ) -> i32;
+        fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> i32;
+        fn AXValueGetValue(value: CFTypeRef, the_type: u32, value_ptr: *mut c_void) -> bool;
+    }
 
-            fn CGImageDestinationCreateWithURL(
-                url: CFURLRef,
-                type_: CFStringRef,
-                count: usize,
-                options: *const c_void,
-            ) -> CGImageDestinationRef;
-            fn CGImageDestinationAddImage(
-                idst: CGImageDestinationRef,
-                image: CGImageRef,
-                properties: *const c_void,
-            );
-            fn CGImageDestinationFinalize(idst: CGImageDestinationRef) -> bool;
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct CGPoint {
-            x: f64,
-            y: f64,
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct CGSize {
-            width: f64,
-            height: f64,
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct CGRect {
-            origin: CGPoint,
-            size: CGSize,
-        }
-
-        let in_str = CString::new(input_path.to_str().unwrap_or_default())?;
-        let out_str = CString::new(output_path.to_str().unwrap_or_default())?;
-        let png_str = CString::new("public.png")?;
-
+    /// The current pointer position in global logical points.
+    pub fn pointer_location() -> Option<(f64, f64)> {
         unsafe {
-            let k_cf_string_encoding_utf8 = 0x08000100;
-            let cf_in_path = CFStringCreateWithCString(
-                std::ptr::null(),
-                in_str.as_ptr(),
-                k_cf_string_encoding_utf8,
-            );
-            let url_in = CFURLCreateWithFileSystemPath(std::ptr::null(), cf_in_path, 0, false);
-            CFRelease(cf_in_path);
-
-            if url_in.is_null() {
-                return Err(anyhow!("failed creating input URL"));
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                return None;
             }
-
-            let source = CGImageSourceCreateWithURL(url_in, std::ptr::null());
-            CFRelease(url_in);
-            if source.is_null() {
-                return Err(anyhow!("failed loading image source"));
-            }
-
-            let image = CGImageSourceCreateImageAtIndex(source, 0, std::ptr::null());
-            CFRelease(source);
-            if image.is_null() {
-                return Err(anyhow!("failed creating image"));
-            }
-
-            let width = CGImageGetWidth(image);
-            let height = CGImageGetHeight(image);
-            let color_space = CGColorSpaceCreateDeviceRGB();
-            let k_cg_image_alpha_premultiplied_last = 1;
-
-            let context = CGBitmapContextCreate(
-                std::ptr::null_mut(),
-                width,
-                height,
-                8,
-                width * 4,
-                color_space,
-                k_cg_image_alpha_premultiplied_last,
-            );
-            CFRelease(color_space);
-
-            if context.is_null() {
-                CFRelease(image);
-                return Err(anyhow!("failed creating bitmap context"));
-            }
-
-            let rect = CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize {
-                    width: width as f64,
-                    height: height as f64,
-                },
-            };
-            CGContextDrawImage(context, rect, image);
-            CFRelease(image);
-
-            // Compute scaling factor from logical display points to physical captured image pixels
-            let display_bounds = CGDisplayBounds(CGMainDisplayID());
-            let mut scale_x = if display_bounds.size.width > 0.0 {
-                (width as f64) / display_bounds.size.width
-            } else {
-                1.0
-            };
-            let mut scale_y = if display_bounds.size.height > 0.0 {
-                (height as f64) / display_bounds.size.height
-            } else {
-                1.0
-            };
-            if scale_x <= 0.0 || scale_x.is_nan() {
-                scale_x = 1.0;
-            }
-            if scale_y <= 0.0 || scale_y.is_nan() {
-                scale_y = 1.0;
-            }
-
-            // Draw cyan highlight ring around gesture location, scaled to physical pixels
-            let cx_rel = gesture.center.0 - display_bounds.origin.x;
-            let cy_rel = gesture.center.1 - display_bounds.origin.y;
-            let cx = cx_rel * scale_x;
-            let cy = cy_rel * scale_y;
-            let r = gesture.radius.max(24.0) * scale_x;
-            let highlight_rect = CGRect {
-                origin: CGPoint {
-                    x: cx - r,
-                    y: (height as f64) - cy - r,
-                },
-                size: CGSize {
-                    width: r * 2.0,
-                    height: r * 2.0,
-                },
-            };
-
-            CGContextSetRGBStrokeColor(context, 0.0, 0.75, 1.0, 0.9); // Cyan-blue stroke
-            CGContextSetLineWidth(context, (r * 0.08).clamp(3.0 * scale_x, 8.0 * scale_x));
-            CGContextStrokeEllipseInRect(context, highlight_rect);
-
-            let marked_image = CGBitmapContextCreateImage(context);
-            CFRelease(context);
-
-            if marked_image.is_null() {
-                return Err(anyhow!("failed producing marked image"));
-            }
-
-            let cf_out_path = CFStringCreateWithCString(
-                std::ptr::null(),
-                out_str.as_ptr(),
-                k_cf_string_encoding_utf8,
-            );
-            let url_out = CFURLCreateWithFileSystemPath(std::ptr::null(), cf_out_path, 0, false);
-            CFRelease(cf_out_path);
-
-            let type_png = CFStringCreateWithCString(
-                std::ptr::null(),
-                png_str.as_ptr(),
-                k_cf_string_encoding_utf8,
-            );
-            let dest = CGImageDestinationCreateWithURL(url_out, type_png, 1, std::ptr::null());
-            CFRelease(url_out);
-            CFRelease(type_png);
-
-            if dest.is_null() {
-                CFRelease(marked_image);
-                return Err(anyhow!("failed creating image destination"));
-            }
-
-            CGImageDestinationAddImage(dest, marked_image, std::ptr::null());
-            let ok = CGImageDestinationFinalize(dest);
-            CFRelease(dest);
-            CFRelease(marked_image);
-
-            if !ok {
-                return Err(anyhow!("failed finalizing PNG output"));
-            }
-
-            Ok(())
+            let p = CGEventGetLocation(event);
+            CFRelease(event);
+            Some((p.x, p.y))
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        std::fs::rename(input_path, output_path)?;
-        Ok(())
+    /// Logical bounds of the display containing `p`.
+    pub fn display_bounds_at(p: (f64, f64)) -> Option<Rect> {
+        unsafe {
+            let mut display = 0u32;
+            let mut count = 0u32;
+            let err =
+                CGGetDisplaysWithPoint(CGPoint { x: p.0, y: p.1 }, 1, &mut display, &mut count);
+            if err != 0 || count == 0 {
+                return None;
+            }
+            let b = CGDisplayBounds(display);
+            Some(Rect::new(
+                b.origin.x,
+                b.origin.y,
+                b.size.width,
+                b.size.height,
+            ))
+        }
+    }
+
+    struct CfString(CFStringRef);
+
+    impl CfString {
+        fn new(s: &str) -> Option<Self> {
+            let c = CString::new(s).ok()?;
+            let r = unsafe {
+                CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+            };
+            (!r.is_null()).then_some(Self(r))
+        }
+    }
+
+    impl Drop for CfString {
+        fn drop(&mut self) {
+            unsafe { CFRelease(self.0) }
+        }
+    }
+
+    /// Copies an attribute; the caller releases the result.
+    unsafe fn copy_attribute(element: AXUIElementRef, name: &CfString) -> Option<CFTypeRef> {
+        let mut value: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, name.0, &mut value);
+        (err == K_AX_ERROR_SUCCESS && !value.is_null()).then_some(value)
+    }
+
+    unsafe fn frame_of(element: AXUIElementRef, pos: &CfString, size: &CfString) -> Option<Rect> {
+        let pos_value = copy_attribute(element, pos)?;
+        let mut origin = CGPoint::default();
+        let ok_pos = AXValueGetValue(
+            pos_value,
+            K_AX_VALUE_CG_POINT_TYPE,
+            &mut origin as *mut CGPoint as *mut c_void,
+        );
+        CFRelease(pos_value);
+        let size_value = copy_attribute(element, size)?;
+        let mut extent = CGSize::default();
+        let ok_size = AXValueGetValue(
+            size_value,
+            K_AX_VALUE_CG_SIZE_TYPE,
+            &mut extent as *mut CGSize as *mut c_void,
+        );
+        CFRelease(size_value);
+        (ok_pos && ok_size).then(|| Rect::new(origin.x, origin.y, extent.width, extent.height))
+    }
+
+    /// Frames of the accessibility element under `p` and its parents,
+    /// innermost first. Empty without the Accessibility permission or when
+    /// the app exposes nothing there.
+    pub fn element_frames_at(p: (f64, f64)) -> Vec<Rect> {
+        let mut frames = Vec::new();
+        let (Some(pos), Some(size), Some(parent)) = (
+            CfString::new("AXPosition"),
+            CfString::new("AXSize"),
+            CfString::new("AXParent"),
+        ) else {
+            return frames;
+        };
+        unsafe {
+            let system = AXUIElementCreateSystemWide();
+            if system.is_null() {
+                return frames;
+            }
+            AXUIElementSetMessagingTimeout(system, 0.25);
+            let mut element: AXUIElementRef = std::ptr::null();
+            let err =
+                AXUIElementCopyElementAtPosition(system, p.0 as f32, p.1 as f32, &mut element);
+            CFRelease(system);
+            if err != K_AX_ERROR_SUCCESS || element.is_null() {
+                return frames;
+            }
+            for _ in 0..MAX_ANCESTORS {
+                if let Some(frame) = frame_of(element, &pos, &size) {
+                    frames.push(frame);
+                }
+                let next = copy_attribute(element, &parent);
+                CFRelease(element);
+                match next {
+                    Some(next) => element = next,
+                    None => return frames,
+                }
+            }
+            CFRelease(element);
+        }
+        frames
     }
 }

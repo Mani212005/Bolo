@@ -2,7 +2,7 @@
 //! a real UI exists. Read fresh on every use so edits apply without a
 //! daemon restart.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn config_dir() -> PathBuf {
     // HOME-based, not XDG_CONFIG_HOME: snap-spawned shells pollute XDG vars.
@@ -28,12 +28,40 @@ pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
+pub fn create_private_session_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
 pub fn save_recording_wav(id: &str, wav_bytes: &[u8]) -> std::io::Result<PathBuf> {
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.wav"));
     std::fs::write(&path, wav_bytes)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn private_session_directory_has_private_mode() {
+        let path =
+            std::env::temp_dir().join(format!("bolo-private-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        create_private_session_dir(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }
 
 pub fn read_recording_wav(id: &str) -> Option<Vec<u8>> {
@@ -315,7 +343,7 @@ pub fn read_user_vocabulary_terms() -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod vocabulary_tests {
     use super::*;
 
     #[test]

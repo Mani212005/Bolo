@@ -99,7 +99,7 @@ tell application "System Events" to get {name of frontApp, bundle identifier of 
     {
         // 1. Try hyprctl for Hyprland
         if let Ok(output) = std::process::Command::new("hyprctl")
-            .args(&["activewindow", "-j"])
+            .args(["activewindow", "-j"])
             .output()
         {
             if output.status.success() {
@@ -124,7 +124,7 @@ tell application "System Events" to get {name of frontApp, bundle identifier of 
 
         // 2. Try swaymsg for Sway
         if let Ok(output) = std::process::Command::new("swaymsg")
-            .args(&["-t", "get_tree"])
+            .args(["-t", "get_tree"])
             .output()
         {
             if output.status.success() {
@@ -162,7 +162,7 @@ tell application "System Events" to get {name of frontApp, bundle identifier of 
 
         // 3. Fallback: xdotool for X11 / XWayland
         if let Ok(output) = std::process::Command::new("xdotool")
-            .args(&["getactivewindow", "getwindowclassname"])
+            .args(["getactivewindow", "getwindowclassname"])
             .output()
         {
             if output.status.success() {
