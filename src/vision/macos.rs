@@ -34,7 +34,10 @@ fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let raw = std::env::temp_dir().join(format!("bolo_raw_{now_nanos}.png"));
+    use std::os::unix::fs::DirBuilderExt;
+    let raw_dir = std::env::temp_dir().join(format!("bolo_raw_{now_nanos}"));
+    std::fs::DirBuilder::new().mode(0o700).create(&raw_dir)?;
+    let raw = raw_dir.join("capture.png");
     let status = std::process::Command::new("screencapture")
         .arg("-x")
         .arg(format!(
@@ -49,13 +52,13 @@ fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
     let decoded = match status {
         Ok(s) if s.success() && raw.exists() => image::open(&raw).map(|img| img.to_rgb8()),
         _ => {
-            let _ = std::fs::remove_file(&raw);
+            let _ = std::fs::remove_dir_all(&raw_dir);
             return Err(anyhow::anyhow!(
                 "screencapture failed or screen recording permission denied"
             ));
         }
     };
-    let _ = std::fs::remove_file(&raw);
+    let _ = std::fs::remove_dir_all(&raw_dir);
     Ok(decoded?)
 }
 

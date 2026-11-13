@@ -1,5 +1,6 @@
 use super::HotkeyListener;
 use anyhow::Result;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -120,11 +121,11 @@ impl KeyEvent {
     }
 }
 
-/// Recognises Control pressed and released on its own, quickly. Any other
-/// key in between (Ctrl+Space, Ctrl+C) or a long hold is not a tap.
+/// Recognises Control pressed and released on its own, quickly.
 #[derive(Debug, Default)]
 struct ControlTap {
     pressed_at: Option<u64>,
+    held: HashSet<u16>,
 }
 
 impl ControlTap {
@@ -132,16 +133,25 @@ impl ControlTap {
         let is_ctrl = event.code == KEY_LEFTCTRL || event.code == KEY_RIGHTCTRL;
         match (is_ctrl, event.value) {
             (true, 1) => {
-                self.pressed_at = Some(event.time_ms);
+                self.pressed_at = self.held.is_empty().then_some(event.time_ms);
+                self.held.insert(event.code);
                 false
             }
-            (true, 0) => self
-                .pressed_at
-                .take()
-                .is_some_and(|t| event.time_ms.saturating_sub(t) <= TAP_MAX_MS),
+            (true, 0) => {
+                self.held.remove(&event.code);
+                self.pressed_at
+                    .take()
+                    .filter(|_| self.held.is_empty())
+                    .is_some_and(|t| event.time_ms.saturating_sub(t) <= TAP_MAX_MS)
+            }
             (true, _) => false,
             (false, 1) => {
                 self.pressed_at = None;
+                self.held.insert(event.code);
+                false
+            }
+            (false, 0) => {
+                self.held.remove(&event.code);
                 false
             }
             (false, _) => false,
@@ -240,6 +250,28 @@ mod tests {
         );
         // A release with no press seen (daemon started mid-press).
         assert_eq!(taps(&[key(KEY_LEFTCTRL, 0, 10)]), 0);
+    }
+
+    #[test]
+    fn control_tap_is_rejected_when_another_key_is_held() {
+        assert_eq!(
+            taps(&[
+                key(KEY_SPACE, 1, 0),
+                key(KEY_LEFTCTRL, 1, 20),
+                key(KEY_LEFTCTRL, 0, 60),
+                key(KEY_SPACE, 0, 90),
+            ]),
+            0
+        );
+        assert_eq!(
+            taps(&[
+                key(KEY_LEFTCTRL, 1, 0),
+                key(KEY_RIGHTCTRL, 1, 20),
+                key(KEY_RIGHTCTRL, 0, 60),
+                key(KEY_LEFTCTRL, 0, 90),
+            ]),
+            0
+        );
     }
 
     #[test]
