@@ -9,6 +9,10 @@
 //! When the pointer box would be used and the pointed element is a short row
 //! of a table, the region is the table's full width (first column included)
 //! from the header down to the pointed row and one row after it instead.
+//! When that band is so tall that the budget would shrink it below one output
+//! pixel per point, the header is kept on top of a few rows around the pointed
+//! one and the rows between them are left out. When the header is scrolled
+//! out of view, only the rows around the pointed one are kept.
 //! Whether a parent is a table is read from the pixels, because the
 //! accessibility frames carry no row/column structure: a table repeats one
 //! row pitch and keeps blank gutters between its columns, which running text,
@@ -16,7 +20,9 @@
 //!
 //! Everything here is pure and display-free so it is unit tested on fixtures.
 
-use super::shot::{PxRect, Rect, CONTEXT_FRACTION, ELEMENT_PADDING, MIN_ELEMENT};
+use super::shot::{
+    Budget, PxRect, Rect, BORDER_PX, CONTEXT_FRACTION, ELEMENT_PADDING, MIN_ELEMENT,
+};
 use image::RgbImage;
 
 /// A row is at least this many times wider than tall.
@@ -28,6 +34,11 @@ pub const MIN_TABLE_ROWS: f64 = 4.0;
 pub const MIN_ROW_WIDTH_SHARE: f64 = 0.6;
 /// Rows after the pointed one that stay in the region, in row heights.
 pub const TRAILING_ROWS: f64 = 1.0;
+/// Rows before the pointed one kept when the rows above them are left out.
+pub const LEADING_ROWS: f64 = 2.0;
+/// The pointed row keeps at least this many output pixels per point; a
+/// taller band leaves out the rows between the header and the pointed row.
+pub const MIN_ROW_SCALE: f64 = 1.0;
 /// The share of the display a table crop is reported as covering at most,
 /// just under [`CONTEXT_FRACTION`], so the context image is kept.
 pub const CONTEXT_SHARE: f64 = CONTEXT_FRACTION - 0.01;
@@ -51,19 +62,24 @@ const BLANK_COLUMN_SHARE: f64 = 0.01;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TableHit {
     pub region: Rect,
+    /// The table header, kept above `region` when the rows between them are
+    /// left out.
+    pub header: Option<Rect>,
     /// The pointed row, in points, for the mark that says which row it is.
     pub row: Rect,
 }
 
 /// The region for the table row under `pointer`, or `None` when the pointer
 /// is not on a table row. `elements` are the accessibility frames under the
-/// pointer, innermost first; `scale` is frame pixels per point.
+/// pointer, innermost first; `scale` is frame pixels per point; `budget` is
+/// the image budget the crop is sized for.
 pub fn table_region(
     frame: &RgbImage,
     display: Rect,
     scale: f64,
     pointer: (f64, f64),
     elements: &[Rect],
+    budget: Budget,
 ) -> Option<TableHit> {
     for (i, row) in elements.iter().enumerate() {
         if !is_short_row(row, pointer) {
@@ -78,23 +94,59 @@ pub fn table_region(
         // The row's group (a body without the header) is no wider than the
         // table around it: climb to the widest frame with the same columns,
         // which is the one that holds the header.
-        let mut table = ancestors[first];
-        for outer in &ancestors[first + 1..] {
-            if !same_columns(outer, &table) {
-                break;
-            }
-            table = *outer;
+        let mut t = first;
+        while t + 1 < ancestors.len() && same_columns(&ancestors[t + 1], &ancestors[t]) {
+            t += 1;
         }
-        let table = &table;
-        let Some(visible) = intersect(*table, display) else {
+        let table = ancestors[t];
+        // The frames around the table (scroll area, web area, window) bound
+        // what of it is on screen.
+        let Some(visible) = ancestors[t + 1..]
+            .iter()
+            .filter(|outer| outer.contains(pointer))
+            .try_fold(table, |v, outer| intersect(v, *outer))
+            .and_then(|v| intersect(v, display))
+        else {
             continue;
         };
         let px = visible.to_pixels((display.x, display.y), scale, frame.dimensions());
         if !looks_like_table(frame, px, row.h * scale, scale) {
             continue;
         }
+        let around = band(
+            display,
+            visible,
+            (row.y - LEADING_ROWS * row.h).max(visible.y),
+            row,
+        );
+        if visible.y > table.y + FRAME_SLACK {
+            // The header is scrolled out of view: the top of what is visible
+            // is some other row, so only the rows around the pointed one say
+            // anything.
+            return Some(TableHit {
+                region: around,
+                header: None,
+                row: *row,
+            });
+        }
+        let whole = band(display, visible, visible.y, row);
+        let body = ancestors[first];
+        let header_h = if body.y > table.y + FRAME_SLACK {
+            body.y - table.y
+        } else {
+            row.h
+        };
+        let header = Rect::new(whole.x, visible.y, whole.w, header_h);
+        if stays_legible(whole, scale, budget) || around.y <= header.y + header.h {
+            return Some(TableHit {
+                region: whole,
+                header: None,
+                row: *row,
+            });
+        }
         return Some(TableHit {
-            region: expand(display, visible, row),
+            region: around,
+            header: Some(header),
             row: *row,
         });
     }
@@ -138,13 +190,10 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
-/// Full table width from the header (the top of the table) to one row below
-/// the pointed row, padded at the sides and bottom and shifted inside the
-/// display like any region.
-fn expand(display: Rect, table: Rect, row: &Rect) -> Rect {
-    // The header is the top edge: padding above it would cut through the
-    // page title or the text around the table.
-    let top = table.y;
+/// Full table width from `top` to one row below the pointed row, padded at
+/// the sides and bottom and shifted inside the display like any region. No
+/// padding above: it would cut through the page title or the row above.
+fn band(display: Rect, table: Rect, top: f64, row: &Rect) -> Rect {
     let bottom = (row.y + row.h + TRAILING_ROWS * row.h).min(table.y + table.h) + ELEMENT_PADDING;
     let height = (bottom - top).max(MIN_ELEMENT.1);
     Rect::new(
@@ -154,6 +203,16 @@ fn expand(display: Rect, table: Rect, row: &Rect) -> Rect {
         height,
     )
     .shifted_inside(display)
+}
+
+/// Whether `region`, framed and fitted to `budget`, keeps at least
+/// [`MIN_ROW_SCALE`] output pixels per point.
+fn stays_legible(region: Rect, scale: f64, budget: Budget) -> bool {
+    let frame = 2 * BORDER_PX;
+    let w = (region.w * scale).round() as u32;
+    let h = (region.h * scale).round() as u32;
+    let fitted = budget.fit(w + frame, h + frame).0.saturating_sub(frame);
+    fitted as f64 >= MIN_ROW_SCALE * region.w
 }
 
 /// Whether the pixels of `area` look like a table whose rows are `pitch` px
@@ -262,7 +321,10 @@ impl Ink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vision::shot::{choose_region, choose_region_in_frame, RegionSource};
+    use crate::vision::shot::{
+        choose_region, choose_region_in_frame, render_pointed, RegionSource, BORDER_COLOR,
+        ELISION_PX,
+    };
     use image::Rgb;
 
     const WHITE: Rgb<u8> = Rgb([255, 255, 255]);
@@ -343,8 +405,12 @@ mod tests {
         }
 
         fn draw(&self, s: f64) -> RgbImage {
+            self.draw_on(DISPLAY, s)
+        }
+
+        fn draw_on(&self, display: Rect, s: f64) -> RgbImage {
             let mut img =
-                RgbImage::from_pixel((DISPLAY.w * s) as u32, (DISPLAY.h * s) as u32, WHITE);
+                RgbImage::from_pixel((display.w * s) as u32, (display.h * s) as u32, WHITE);
             fill(&mut img, self.x, self.y, self.w, self.pitch, s, HEADER);
             for r in 0..=self.rows {
                 let y = self.y + self.pitch * r as f64;
@@ -468,9 +534,16 @@ mod tests {
         let img = t.draw(2.0);
         let row = t.row(15);
         let elements = [row, t.frame(), Rect::new(0.0, 24.0, 800.0, 576.0)];
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &elements)
-            .expect("table")
-            .region;
+        let r = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &elements,
+            Budget::STANDARD,
+        )
+        .expect("table")
+        .region;
         // Full table width plus padding.
         assert_eq!(r.x, t.x - ELEMENT_PADDING);
         assert_eq!(r.w, t.w + 2.0 * ELEMENT_PADDING);
@@ -485,9 +558,16 @@ mod tests {
         let t = Table::new(8);
         let img = t.draw(2.0);
         let row = t.row(7); // the last row
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()])
-            .expect("table")
-            .region;
+        let r = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("table")
+        .region;
         let table = t.frame();
         assert_eq!(r.y + r.h, table.y + table.h + ELEMENT_PADDING);
     }
@@ -497,9 +577,16 @@ mod tests {
         let t = Table::new(20);
         let img = t.draw(2.0);
         let header = Rect::new(t.x, t.y, t.w, t.pitch);
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(header), &[header, t.frame()])
-            .expect("table")
-            .region;
+        let r = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(header),
+            &[header, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("table")
+        .region;
         assert!(r.h >= MIN_ELEMENT.1);
         assert!(r.contains(pointer_on(header)));
     }
@@ -518,6 +605,7 @@ mod tests {
             2.0,
             pointer_on(cell),
             &[cell, row, t.frame()],
+            Budget::STANDARD,
         )
         .expect("table")
         .region;
@@ -531,24 +619,211 @@ mod tests {
         t.w = 792.0;
         let img = t.draw(2.0);
         let row = t.row(3);
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, t.frame()])
-            .expect("table")
-            .region;
+        let r = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("table")
+        .region;
         assert!(r.x >= 0.0 && r.x + r.w <= DISPLAY.w + 1e-9);
         assert!(r.y >= 0.0 && r.y + r.h <= DISPLAY.h + 1e-9);
     }
 
     #[test]
-    fn a_table_scrolled_above_the_display_is_cut_to_what_is_visible() {
+    fn a_table_scrolled_above_the_display_keeps_the_rows_around_the_pointer() {
         let mut t = Table::new(40);
         t.y = -300.0;
         let img = t.draw(2.0);
         let row = t.row(20);
-        let table = t.frame();
-        let r = table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, table]);
-        // Only the visible part of the table is inspected; it still repeats.
-        let r = r.expect("visible rows form a table").region;
-        assert!(r.y >= 0.0 && r.contains(pointer_on(row)));
+        let hit = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        )
+        .expect("visible rows form a table");
+        // Not a band from the display top: the header is not on screen.
+        assert_eq!(hit.header, None);
+        assert_eq!(hit.region.y, row.y - LEADING_ROWS * row.h);
+        assert_eq!(
+            hit.region.y + hit.region.h,
+            row.y + 2.0 * row.h + ELEMENT_PADDING
+        );
+        assert_eq!(hit.region.x, t.x - ELEMENT_PADDING);
+        assert!(hit.region.contains(pointer_on(row)));
+    }
+
+    #[test]
+    fn a_table_scrolled_under_its_scroll_area_is_cut_to_the_scroll_area() {
+        let mut t = Table::new(40);
+        t.y = 40.0;
+        let img = t.draw(2.0);
+        let scroll = Rect::new(0.0, 100.0, 800.0, 500.0);
+        let window = Rect::new(0.0, 24.0, 800.0, 576.0);
+        // Near the top of the scroll area: rows above it are hidden.
+        let row = t.row(3);
+        let hit = table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, t.frame(), scroll, window],
+            Budget::STANDARD,
+        )
+        .expect("table");
+        assert_eq!(hit.header, None);
+        assert_eq!(hit.region.y, scroll.y);
+        assert!(hit.region.contains(pointer_on(row)));
+        assert!(hit.region.h < 6.0 * row.h + ELEMENT_PADDING);
+    }
+
+    /// A 1920x1080 pt display at 1x: wide enough that a tall table band has
+    /// to be shrunk to fit the budget.
+    const WIDE: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
+
+    fn wide_table(rows: usize) -> Table {
+        let mut t = Table::new(rows);
+        t.x = 40.0;
+        t.y = 40.0;
+        t.w = 1500.0;
+        t
+    }
+
+    /// Every ink pixel of `row` (frame pixels, 1x) is the same in `crop`,
+    /// whose top-left inside its frame is the frame pixel `origin`.
+    fn assert_row_glyphs_unchanged(
+        frame: &RgbImage,
+        crop: &RgbImage,
+        origin: (i64, i64),
+        row: Rect,
+    ) {
+        let b = crate::vision::shot::BORDER_PX as i64;
+        let mut ink = 0;
+        for y in row.y as u32..(row.y + row.h) as u32 {
+            for x in row.x as u32..(row.x + row.w) as u32 {
+                if *frame.get_pixel(x, y) != INK {
+                    continue;
+                }
+                ink += 1;
+                let (cx, cy) = (x as i64 - origin.0 + b, y as i64 - origin.1 + b);
+                assert_eq!(
+                    *crop.get_pixel(cx as u32, cy as u32),
+                    INK,
+                    "glyph pixel ({x},{y}) of the pointed row was painted over"
+                );
+            }
+        }
+        assert!(ink > 0, "the row has text");
+    }
+
+    #[test]
+    fn a_tall_band_keeps_the_header_over_the_rows_around_the_pointer_at_native_scale() {
+        let t = wide_table(40);
+        let img = t.draw_on(WIDE, 1.0);
+        let row = t.row(35);
+        let elements = [row, t.frame()];
+        let region = choose_region_in_frame(
+            &img,
+            WIDE,
+            1.0,
+            pointer_on(row),
+            &elements,
+            Budget::STANDARD,
+        );
+        assert_eq!(region.source, RegionSource::Table);
+        let header = region.header.expect("the header is kept");
+        assert_eq!(header.y, t.y);
+        assert_eq!(header.h, t.pitch);
+        assert_eq!(region.rect.y, row.y - LEADING_ROWS * row.h);
+        assert_eq!(region.rect.w, header.w);
+
+        let shot = render_pointed(&img, WIDE, pointer_on(row), &elements, Budget::STANDARD);
+        let b = crate::vision::shot::BORDER_PX;
+        // The pointed row is at no less than one output pixel per point.
+        assert!((shot.crop.width() - 2 * b) as f64 >= region.rect.w);
+        // The header sits on top, pixel for pixel.
+        let (x0, hy) = (region.rect.x as u32, header.y as u32);
+        for y in 0..header.h as u32 {
+            for x in 0..region.rect.w as u32 {
+                assert_eq!(
+                    shot.crop.get_pixel(b + x, b + y),
+                    img.get_pixel(x0 + x, hy + y)
+                );
+            }
+        }
+        // A dashed band of new pixels below it stands for the rows left out.
+        let gap = b + header.h as u32;
+        assert_eq!(*shot.crop.get_pixel(b, gap), BORDER_COLOR);
+        assert_eq!(*shot.crop.get_pixel(b + 12, gap + ELISION_PX - 1), WHITE);
+        // Then the rows around the pointed one, its text untouched.
+        let origin = (
+            region.rect.x as i64,
+            region.rect.y as i64 - (header.h as u32 + ELISION_PX) as i64,
+        );
+        assert_row_glyphs_unchanged(&img, &shot.crop, origin, row);
+        // The row is still marked, on its boundary lines.
+        let top = (row.y as i64 - origin.1) as u32 + b;
+        assert_eq!(*shot.crop.get_pixel(b + 200, top), BORDER_COLOR);
+    }
+
+    #[test]
+    fn a_short_table_on_the_same_display_keeps_the_contiguous_band() {
+        let t = wide_table(30);
+        let img = t.draw_on(WIDE, 1.0);
+        let row = t.row(6);
+        let region = choose_region_in_frame(
+            &img,
+            WIDE,
+            1.0,
+            pointer_on(row),
+            &[row, t.frame()],
+            Budget::STANDARD,
+        );
+        assert_eq!(region.source, RegionSource::Table);
+        assert_eq!(region.header, None);
+        assert_eq!(region.rect.y, t.y);
+        assert_eq!(
+            region.rect.y + region.rect.h,
+            row.y + 2.0 * row.h + ELEMENT_PADDING
+        );
+    }
+
+    #[test]
+    fn the_row_mark_leaves_the_glyphs_of_the_row_unchanged() {
+        let t = Table::new(20);
+        let img = t.draw(1.0);
+        let row = t.row(8);
+        let elements = [row, t.frame()];
+        let region = choose_region_in_frame(
+            &img,
+            DISPLAY,
+            1.0,
+            pointer_on(row),
+            &elements,
+            Budget::STANDARD,
+        );
+        assert_eq!(region.header, None);
+        let shot = render_pointed(&img, DISPLAY, pointer_on(row), &elements, Budget::STANDARD);
+        let origin = (region.rect.x as i64, region.rect.y as i64);
+        assert_row_glyphs_unchanged(&img, &shot.crop, origin, row);
+        // The box is on the row's top boundary and in the margin beside it.
+        let b = crate::vision::shot::BORDER_PX as i64;
+        let top = (row.y as i64 - origin.1 + b) as u32;
+        let left = (row.x as i64 - origin.0 + b) as u32;
+        assert_eq!(*shot.crop.get_pixel(left + 100, top), BORDER_COLOR);
+        assert_eq!(*shot.crop.get_pixel(left - 1, top + 12), BORDER_COLOR);
+        assert_ne!(*shot.crop.get_pixel(left + 1, top + 12), BORDER_COLOR);
     }
 
     #[test]
@@ -562,20 +837,53 @@ mod tests {
             DISPLAY,
             2.0,
             (row.x + 5.0, row.y - 40.0),
-            &[row, t.frame()]
+            &[row, t.frame()],
+            Budget::STANDARD,
         )
         .is_none());
         // Not wide: a 150x24 box.
         let small = Rect::new(row.x, row.y, 150.0, row.h);
-        assert!(table_region(&img, DISPLAY, 2.0, pointer_on(small), &[small, t.frame()]).is_none());
+        assert!(table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(small),
+            &[small, t.frame()],
+            Budget::STANDARD
+        )
+        .is_none());
         // No parent.
-        assert!(table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row]).is_none());
+        assert!(table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row],
+            Budget::STANDARD
+        )
+        .is_none());
         // A parent shorter than 4 rows.
         let short = Rect::new(t.x, row.y - 10.0, t.w, 3.0 * t.pitch);
-        assert!(table_region(&img, DISPLAY, 2.0, pointer_on(row), &[row, short]).is_none());
+        assert!(table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, short],
+            Budget::STANDARD
+        )
+        .is_none());
         // Tall rows are ordinary elements: choose_region handles them.
         let tall = Rect::new(t.x, 300.0, t.w, 70.0);
-        assert!(table_region(&img, DISPLAY, 2.0, pointer_on(tall), &[tall, t.frame()]).is_none());
+        assert!(table_region(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(tall),
+            &[tall, t.frame()],
+            Budget::STANDARD
+        )
+        .is_none());
     }
 
     #[test]
@@ -585,12 +893,26 @@ mod tests {
         let page = Rect::new(60.0, 100.0, 680.0, 480.0);
         let (img, _) = paragraph(2.0);
         let line = Rect::new(100.0, 120.0 + 20.0 * 5.0, 600.0, 20.0);
-        let r = choose_region_in_frame(&img, DISPLAY, 2.0, pointer_on(line), &[line, page]);
+        let r = choose_region_in_frame(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(line),
+            &[line, page],
+            Budget::STANDARD,
+        );
         assert_eq!(r.source, RegionSource::Pointer);
 
         let (img, _) = chat(2.0);
         let message = Rect::new(100.0, 160.0, 600.0, 30.0);
-        let r = choose_region_in_frame(&img, DISPLAY, 2.0, pointer_on(message), &[message, page]);
+        let r = choose_region_in_frame(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(message),
+            &[message, page],
+            Budget::STANDARD,
+        );
         assert_eq!(r.source, RegionSource::Pointer);
     }
 
@@ -606,12 +928,19 @@ mod tests {
             2.0,
             pointer_on(row),
             &[row, t.frame(), window],
+            Budget::STANDARD,
         );
         assert_eq!(r.source, RegionSource::Table);
         // A card that already qualifies as an element wins over the table.
         let card = Rect::new(t.x, row.y - 100.0, t.w, 240.0);
-        let r =
-            choose_region_in_frame(&img, DISPLAY, 2.0, pointer_on(row), &[row, card, t.frame()]);
+        let r = choose_region_in_frame(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &[row, card, t.frame()],
+            Budget::STANDARD,
+        );
         assert_eq!(r.source, RegionSource::Element);
         assert_eq!(
             r,
@@ -621,7 +950,6 @@ mod tests {
 
     #[test]
     fn the_table_crop_is_one_downscaled_band_that_fits_the_budget() {
-        use crate::vision::shot::{render_pointed, Budget};
         let mut t = Table::new(20);
         t.x = 0.0;
         t.w = 790.0;
@@ -660,7 +988,6 @@ mod tests {
 
     #[test]
     fn the_pointed_row_is_boxed_on_the_crop_and_banded_on_the_context_image() {
-        use crate::vision::shot::{render_pointed, Budget, BORDER_COLOR};
         let mut t = Table::new(20);
         t.x = 0.0;
         t.w = 790.0;
@@ -668,7 +995,14 @@ mod tests {
         let row = t.row(12);
         let elements = [row, t.frame()];
         let shot = render_pointed(&img, DISPLAY, pointer_on(row), &elements, Budget::STANDARD);
-        let region = choose_region_in_frame(&img, DISPLAY, 2.0, pointer_on(row), &elements);
+        let region = choose_region_in_frame(
+            &img,
+            DISPLAY,
+            2.0,
+            pointer_on(row),
+            &elements,
+            Budget::STANDARD,
+        );
         // Rows of the crop where the row sits: its top and bottom edges.
         let inner_h = shot.crop.height() as f64 - 6.0;
         let sy = inner_h / (region.rect.h * 2.0);
@@ -707,7 +1041,6 @@ mod tests {
 
     #[test]
     fn crops_that_are_not_table_rows_are_not_marked() {
-        use crate::vision::shot::{render_pointed, Budget};
         let t = Table::new(20);
         let img = t.draw(2.0);
         let row = t.row(12);
@@ -737,6 +1070,7 @@ mod tests {
             2.0,
             pointer_on(row),
             &[row, body, t.frame(), page],
+            Budget::STANDARD,
         )
         .expect("table");
         assert_eq!(hit.region.y, t.y);
