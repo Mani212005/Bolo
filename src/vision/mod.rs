@@ -4,6 +4,8 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod shot;
+#[cfg(any(target_os = "macos", test))]
+pub mod table;
 
 pub use gesture::CircleGestureDetector;
 

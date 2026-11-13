@@ -7,7 +7,8 @@
 //!
 //! 1. Pick the region the user points at: the UI element under the pointer
 //!    (with padding) when the platform can name one, otherwise a 640x400
-//!    logical box around the pointer ([`choose_region`]).
+//!    logical box around the pointer ([`choose_region`]). A table row gets
+//!    its table's header and columns too ([`choose_region_in_frame`]).
 //! 2. Crop it from the native-resolution frame of the display under the
 //!    pointer, and downscale only when it exceeds the model budget
 //!    ([`Budget`]), with Lanczos3. Never upscale.
@@ -24,6 +25,9 @@ use anyhow::{Context, Result};
 use image::imageops::{self, FilterType};
 use image::{Rgb, RgbImage};
 use std::path::Path;
+
+#[cfg(any(target_os = "macos", test))]
+use super::table;
 
 /// Claude bills and encodes images on a 28x28 px grid.
 pub const VISUAL_TOKEN_PX: u32 = 28;
@@ -135,6 +139,9 @@ pub enum RegionSource {
     Element,
     /// The default box around the pointer.
     Pointer,
+    /// A table row under the pointer, with its header and first column
+    /// ([`table::table_region`]).
+    Table,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -175,6 +182,29 @@ pub fn choose_region(display: Rect, pointer: (f64, f64), elements: &[Rect]) -> R
         rect: Rect::centered(pointer, DEFAULT_BOX.0, DEFAULT_BOX.1).shifted_inside(display),
         source: RegionSource::Pointer,
     }
+}
+
+/// [`choose_region`], except that a table row, which would otherwise get the
+/// pointer box, gets the table's header and first column with it
+/// ([`table::table_region`]). `scale` is frame pixels per point.
+#[cfg(any(target_os = "macos", test))]
+pub fn choose_region_in_frame(
+    frame: &RgbImage,
+    display: Rect,
+    scale: f64,
+    pointer: (f64, f64),
+    elements: &[Rect],
+) -> Region {
+    let region = choose_region(display, pointer, elements);
+    if region.source == RegionSource::Pointer {
+        if let Some(rect) = table::table_region(frame, display, scale, pointer, elements) {
+            return Region {
+                rect,
+                source: RegionSource::Table,
+            };
+        }
+    }
+    region
 }
 
 /// A vision model's image budget: the long edge and the 28 px visual tokens
@@ -292,12 +322,12 @@ pub fn render_pointed(
     elements: &[Rect],
     budget: Budget,
 ) -> Shot {
-    let region = choose_region(display, pointer, elements);
     let scale = if display.w > 0.0 {
         frame.width() as f64 / display.w
     } else {
         1.0
     };
+    let region = choose_region_in_frame(frame, display, scale, pointer, elements);
     let px = region
         .rect
         .to_pixels((display.x, display.y), scale, frame.dimensions());
@@ -305,7 +335,15 @@ pub fn render_pointed(
         "[vision] region {:?} {:.0}x{:.0} pt at ({:.0},{:.0}) scale={scale:.2} -> {}x{} px",
         region.source, region.rect.w, region.rect.h, region.rect.x, region.rect.y, px.w, px.h
     );
-    render_region(frame, px, budget)
+    let mut shot = render_region(frame, px, budget);
+    if region.source == RegionSource::Table {
+        // A table crop is wide because tables are, not because it already
+        // shows the screen: the title, filters and caption around the table
+        // still earn the context image, so it counts as just under the
+        // share that would drop it.
+        shot.region_fraction = shot.region_fraction.min(table::CONTEXT_SHARE);
+    }
+    shot
 }
 
 /// Adds a [`BORDER_PX`] frame around the image. The frame is new canvas, so
