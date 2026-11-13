@@ -355,8 +355,14 @@ pub fn encode_png(img: &RgbImage, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file =
-        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
     let encoder = PngEncoder::new_with_quality(
         std::io::BufWriter::new(file),
         CompressionType::Default,
@@ -792,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn png_is_lossless_rgb_without_metadata() {
+    fn png_is_lossless_rgb_without_metadata_and_private_mode() {
         let dir = std::env::temp_dir().join(format!("bolo_shot_png_{}", std::process::id()));
         let path = dir.join("nested").join("crop.png");
         let img = fixture_frame(97, 41);
@@ -807,6 +813,11 @@ mod tests {
         }
         let back = image::open(&path).unwrap().to_rgb8();
         assert_eq!(back, img);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
