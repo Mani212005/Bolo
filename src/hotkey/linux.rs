@@ -354,6 +354,7 @@ mod tests {
                 key(KEY_LEFTCTRL, 1, 0),
                 key(KEY_SPACE, 1, 30),
                 key(KEY_LEFTCTRL, 0, 60),
+                key(KEY_SPACE, 0, 90),
                 key(KEY_LEFTCTRL, 1, 1000),
                 key(KEY_LEFTCTRL, 0, 1100),
             ]),

@@ -29,14 +29,18 @@ use std::path::Path;
 pub const VISUAL_TOKEN_PX: u32 = 28;
 /// The pointer box when no element is known, in logical points. At 2x it is
 /// 1280x800 px, which fits the standard budget with no resampling.
+#[cfg(any(target_os = "macos", test))]
 pub const DEFAULT_BOX: (f64, f64) = (640.0, 400.0);
 /// Space kept around an accessibility element, in logical points.
+#[cfg(any(target_os = "macos", test))]
 pub const ELEMENT_PADDING: f64 = 16.0;
 /// Below this padded size an element (one word, one icon) carries too little
 /// context on its own, so its parent is tried instead.
+#[cfg(any(target_os = "macos", test))]
 pub const MIN_ELEMENT: (f64, f64) = (240.0, 80.0);
 /// An element covering more than this share of the display is a window or a
 /// whole editor, not something pointed at; the pointer box is used instead.
+#[cfg(any(target_os = "macos", test))]
 pub const MAX_ELEMENT_FRACTION: f64 = 0.5;
 /// Width of the frame drawn around the crop, in output pixels.
 pub const BORDER_PX: u32 = 3;
@@ -48,6 +52,7 @@ pub const CONTEXT_LONG_EDGE: u32 = 768;
 pub const CONTEXT_FRACTION: f64 = 0.35;
 
 /// A rectangle in logical points (macOS global display coordinates).
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -56,6 +61,7 @@ pub struct Rect {
     pub h: f64,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Rect {
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Self { x, y, w, h }
@@ -122,6 +128,7 @@ pub struct PxRect {
 }
 
 /// Where the region came from, for logs and tests.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionSource {
     /// The accessibility element under the pointer, padded.
@@ -130,6 +137,7 @@ pub enum RegionSource {
     Pointer,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Region {
     pub rect: Rect,
@@ -143,6 +151,7 @@ pub struct Region {
 /// enough to carry context and small enough to still be "the thing pointed
 /// at" wins, padded by [`ELEMENT_PADDING`]. Otherwise a [`DEFAULT_BOX`]
 /// around the pointer. The result is shifted inside the display, not shrunk.
+#[cfg(any(target_os = "macos", test))]
 pub fn choose_region(display: Rect, pointer: (f64, f64), elements: &[Rect]) -> Region {
     let max_area = display.area() * MAX_ELEMENT_FRACTION;
     for element in elements {
@@ -267,6 +276,7 @@ pub fn render(
 }
 
 /// Crops `region` from `frame` and renders it.
+#[cfg(any(target_os = "macos", test))]
 pub fn render_region(frame: &RgbImage, region: PxRect, budget: Budget) -> Shot {
     let crop = imageops::crop_imm(frame, region.x, region.y, region.w, region.h).to_image();
     render(&crop, Some(frame), Some(region), budget)
@@ -274,6 +284,7 @@ pub fn render_region(frame: &RgbImage, region: PxRect, budget: Budget) -> Shot {
 
 /// Builds the shot from one display's `frame`, given the display's logical
 /// bounds and the accessibility frames under the pointer (innermost first).
+#[cfg(any(target_os = "macos", test))]
 pub fn render_pointed(
     frame: &RgbImage,
     display: Rect,
