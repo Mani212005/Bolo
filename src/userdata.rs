@@ -343,7 +343,7 @@ pub fn read_user_vocabulary_terms() -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod vocabulary_tests {
     use super::*;
 
     #[test]

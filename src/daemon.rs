@@ -1170,7 +1170,7 @@ fn finish_capture(
     shared: &Arc<Mutex<Shared>>,
     session_dir: &std::path::Path,
     img_path: &std::path::Path,
-    result: Result<crate::vision::Captured>,
+    result: anyhow::Result<crate::vision::Captured>,
 ) -> bool {
     let mut s = shared.lock().unwrap();
     let same_session = s.vision_session_dir.as_deref() == Some(session_dir);
