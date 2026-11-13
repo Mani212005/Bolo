@@ -44,6 +44,7 @@ pub fn capture_screen(
     pointer: Option<(f64, f64)>,
     output_path: &Path,
     budget: shot::Budget,
+    context_policy: shot::ContextPolicy,
 ) -> Result<Captured> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -51,17 +52,17 @@ pub fn capture_screen(
     #[cfg(target_os = "macos")]
     {
         let shot = macos::capture_shot(pointer, budget)?;
-        save_shot(&shot, output_path)
+        save_shot(&shot, output_path, context_policy)
     }
     #[cfg(target_os = "linux")]
     {
         let _ = pointer;
         let shot = linux::capture_shot(budget)?;
-        save_shot(&shot, output_path)
+        save_shot(&shot, output_path, context_policy)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (pointer, output_path, budget);
+        let _ = (pointer, output_path, budget, context_policy);
         Err(anyhow::anyhow!(
             "Screen capture not supported on this operating system"
         ))
@@ -70,15 +71,20 @@ pub fn capture_screen(
 
 /// Writes the shot's images: the crop to `output_path`, the context image to
 /// [`context_image_path`].
-pub fn save_shot(shot: &shot::Shot, output_path: &Path) -> Result<Captured> {
+pub fn save_shot(
+    shot: &shot::Shot,
+    output_path: &Path,
+    context_policy: shot::ContextPolicy,
+) -> Result<Captured> {
     shot::encode_png(&shot.crop, output_path)?;
-    let context = match &shot.context {
-        Some(img) => {
+    let context = match (&shot.context, context_policy) {
+        (_, shot::ContextPolicy::Never) => None,
+        (Some(img), _) => {
             let path = context_image_path(output_path);
             shot::encode_png(img, &path)?;
             Some(path)
         }
-        None => None,
+        (None, _) => None,
     };
     let (w, h) = shot.crop.dimensions();
     eprintln!(
@@ -330,6 +336,23 @@ mod tests {
     }
 
     #[test]
+    fn never_context_policy_does_not_save_the_context_image() {
+        let temp_dir = make_test_temp_dir("never_context");
+        let crop_path = temp_dir.join("context-1.png");
+        let context_path = context_image_path(&crop_path);
+        let shot = shot::Shot {
+            crop: image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])),
+            context: Some(image::RgbImage::from_pixel(16, 16, image::Rgb([4, 5, 6]))),
+            region_fraction: 0.25,
+        };
+        let captured = save_shot(&shot, &crop_path, shot::ContextPolicy::Never).unwrap();
+        assert!(crop_path.exists());
+        assert!(!context_path.exists());
+        assert_eq!(captured.context, None);
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn test_delivered_images_add_context_only_when_wanted() {
         use shot::ContextPolicy;
         let crop1 = PathBuf::from("/s/context-1.png");
@@ -351,11 +374,7 @@ mod tests {
         let crops = vec![crop1.clone(), crop2.clone(), crop3.clone()];
         assert_eq!(
             delivered_images(&crops, &captures, ContextPolicy::Auto, "fix this"),
-            vec![
-                crop1.clone(),
-                context_image_path(&crop1),
-                crop2.clone()
-            ]
+            vec![crop1.clone(), context_image_path(&crop1), crop2.clone()]
         );
         assert_eq!(
             delivered_images(
@@ -428,7 +447,7 @@ mod tests {
         let px = region.rect.to_pixels((0.0, 0.0), 2.0, frame.dimensions());
         let rendered = shot::render_region(&frame, px, shot::Budget::STANDARD);
         let img_path = session_dir.join("context-1.png");
-        let captured = save_shot(&rendered, &img_path)?;
+        let captured = save_shot(&rendered, &img_path, shot::ContextPolicy::Auto)?;
         assert!(img_path.exists());
         assert_eq!(
             image::open(&img_path)?.to_rgb8().dimensions(),

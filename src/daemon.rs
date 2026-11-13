@@ -825,6 +825,24 @@ fn wait_for_capture(shared: &Arc<Mutex<Shared>>, limit: Duration) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    if started.elapsed() >= limit {
+        cancel_capture(shared);
+    }
+}
+
+fn cancel_capture(shared: &Arc<Mutex<Shared>>) {
+    let mut s = shared.lock().unwrap();
+    if !s.capture_in_flight {
+        return;
+    }
+    s.capture_in_flight = false;
+    let finished: Vec<PathBuf> = s
+        .captures
+        .iter()
+        .map(|capture| capture.image.clone())
+        .collect();
+    s.captured_context_images
+        .retain(|path| finished.iter().any(|done| done == path));
 }
 
 /// The screenshots this dictation hands the agent: each crop, plus its
@@ -1061,6 +1079,7 @@ fn finalize(
         let images = delivered_images(&s, cfg, transcript_text);
         s.captured_context_images.clear();
         s.captures.clear();
+        s.capture_in_flight = false;
         s.vision_detector = None;
         (dir, images, duration)
     };
@@ -1118,7 +1137,7 @@ fn start_capture(
     cfg: &Config,
     pointer: Option<(f64, f64)>,
 ) -> CaptureStart {
-    let img_path = {
+    let (session_dir, img_path) = {
         let mut s = shared.lock().unwrap();
         if s.phase != Phase::Recording {
             return CaptureStart::NotRecording;
@@ -1133,29 +1152,60 @@ fn start_capture(
         let count = s.captured_context_images.len() + 1;
         let img_path = session_dir.join(format!("context-{count}.png"));
         s.captured_context_images.push(img_path.clone());
-        img_path
+        (session_dir, img_path)
     };
     let shared = Arc::clone(shared);
     let cfg = cfg.clone();
     std::thread::spawn(move || {
         let budget = cfg.vision.resolution.budget();
-        let result = crate::vision::capture_screen(pointer, &img_path, budget);
-        let mut s = shared.lock().unwrap();
-        s.capture_in_flight = false;
-        match result {
-            Ok(captured) => {
-                eprintln!("[vision] captured context image: {}", img_path.display());
-                s.captures.push(captured);
-                drop(s);
-                notify(&cfg, "Screen context captured 📸");
-            }
-            Err(e) => {
-                s.captured_context_images.retain(|p| p != &img_path);
-                eprintln!("[vision] screen capture failed: {e:#}");
-            }
+        let result = crate::vision::capture_screen(pointer, &img_path, budget, cfg.vision.context);
+        if finish_capture(&shared, &session_dir, &img_path, result) {
+            notify(&cfg, "Screen context captured 📸");
         }
     });
     CaptureStart::Started
+}
+
+fn finish_capture(
+    shared: &Arc<Mutex<Shared>>,
+    session_dir: &std::path::Path,
+    img_path: &std::path::Path,
+    result: Result<crate::vision::Captured>,
+) -> bool {
+    let mut s = shared.lock().unwrap();
+    let same_session = s.vision_session_dir.as_deref() == Some(session_dir);
+    let still_pending = s
+        .captured_context_images
+        .iter()
+        .any(|path| path == img_path);
+    if !same_session || !still_pending {
+        drop(s);
+        discard_capture_files(img_path);
+        if !same_session {
+            let _ = std::fs::remove_dir(session_dir);
+        }
+        return false;
+    }
+    s.capture_in_flight = false;
+    match result {
+        Ok(captured) => {
+            eprintln!("[vision] captured context image: {}", img_path.display());
+            s.captures.push(captured);
+            true
+        }
+        Err(e) => {
+            s.captured_context_images.retain(|p| p != img_path);
+            eprintln!("[vision] screen capture failed: {e:#}");
+            drop(s);
+            discard_capture_files(img_path);
+            false
+        }
+    }
+}
+
+fn discard_capture_files(img_path: &std::path::Path) {
+    let _ = std::fs::remove_file(img_path);
+    let _ = std::fs::remove_file(crate::vision::context_image_path(img_path));
 }
 
 /// What a toggle did.
@@ -1649,6 +1699,50 @@ mod tests {
         let state = shared.lock().unwrap();
         assert!(!state.capture_in_flight);
         assert!(state.captured_context_images.is_empty());
+    }
+
+    #[test]
+    fn timed_out_capture_is_discarded_after_finalization() {
+        let (shared, _hub, _cfg) = daemon_state();
+        let temp_dir =
+            std::env::temp_dir().join(format!("bolo_late_capture_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let old_session = temp_dir.join("session_old");
+        let new_session = temp_dir.join("session_new");
+        std::fs::create_dir_all(&old_session).unwrap();
+        std::fs::create_dir_all(&new_session).unwrap();
+        let image = old_session.join("context-1.png");
+        let context = crate::vision::context_image_path(&image);
+        {
+            let mut state = shared.lock().unwrap();
+            state.vision_session_dir = Some(old_session.clone());
+            state.capture_in_flight = true;
+            state.captured_context_images.push(image.clone());
+        }
+        cancel_capture(&shared);
+        {
+            let mut state = shared.lock().unwrap();
+            assert!(!state.capture_in_flight);
+            assert!(state.captured_context_images.is_empty());
+            state.vision_session_dir = Some(new_session);
+        }
+        std::fs::write(&image, b"late crop").unwrap();
+        std::fs::write(&context, b"late context").unwrap();
+        let captured = crate::vision::Captured {
+            image: image.clone(),
+            context: Some(context.clone()),
+            region_fraction: 0.2,
+        };
+        assert!(!finish_capture(&shared, &old_session, &image, Ok(captured)));
+        assert!(!image.exists());
+        assert!(!context.exists());
+        let state = shared.lock().unwrap();
+        assert!(state.captured_context_images.is_empty());
+        assert!(state.captures.is_empty());
+        assert!(!state.capture_in_flight);
+        drop(state);
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

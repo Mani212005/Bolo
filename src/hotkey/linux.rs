@@ -63,11 +63,11 @@ fn watch_keyboard(
     let mut buf = [0u8; INPUT_EVENT_SIZE * 64];
     loop {
         let n = match file.read(&mut buf) {
-            Ok(0) => return,
+            Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[linux-hotkey] stopped reading {}: {e}", device.display());
-                return;
+                break;
             }
         };
         for raw in buf[..n].chunks_exact(INPUT_EVENT_SIZE) {
@@ -79,6 +79,7 @@ fn watch_keyboard(
             }
         }
     }
+    tap.lock().unwrap().clear_device(device_id);
 }
 
 /// `struct input_event`: a `timeval` (two native longs), then u16 type,
@@ -136,6 +137,16 @@ struct ControlTap {
 }
 
 impl ControlTap {
+    fn clear_device(&mut self, device_id: usize) {
+        self.held.retain(|(source, _)| *source != device_id);
+        if self
+            .pressed_at
+            .is_some_and(|(source, _, _)| source == device_id)
+        {
+            self.pressed_at = None;
+        }
+    }
+
     fn feed(&mut self, device_id: usize, event: KeyEvent) -> bool {
         let is_ctrl = event.code == KEY_LEFTCTRL || event.code == KEY_RIGHTCTRL;
         match (is_ctrl, event.value) {
@@ -319,6 +330,21 @@ mod tests {
             ]),
             0
         );
+    }
+
+    #[test]
+    fn disconnected_keyboard_releases_its_held_keys() {
+        let tap = Arc::new(Mutex::new(ControlTap::default()));
+        assert!(!tap.lock().unwrap().feed(0, key(KEY_LEFTCTRL, 1, 0)));
+        watch_keyboard(
+            std::fs::File::open("/dev/null").unwrap(),
+            std::path::Path::new("/dev/null"),
+            0,
+            Arc::clone(&tap),
+            &|_| {},
+        );
+        assert!(!tap.lock().unwrap().feed(1, key(KEY_RIGHTCTRL, 1, 100)));
+        assert!(tap.lock().unwrap().feed(1, key(KEY_RIGHTCTRL, 0, 180)));
     }
 
     #[test]
