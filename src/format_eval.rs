@@ -457,6 +457,65 @@ mod tests {
     }
 
     #[test]
+    fn long_answers_to_nine_questions_keep_every_item_whole() {
+        for case in list_cases().iter().filter(|c| c.name.starts_with('L')) {
+            let plan = list_plan(case);
+            let answers = plan.parse_answers(&ideal_answers(case));
+            let out = plan.render(Some(&answers), CodeStyle::Fenced);
+            let items: Vec<&str> = out
+                .lines()
+                .filter(|l| {
+                    l.split_once(". ")
+                        .is_some_and(|(n, _)| n.parse::<u32>().is_ok())
+                })
+                .collect();
+            assert_eq!(items.len(), 9, "{}:\n{out}", case.name);
+            for (i, item) in items.iter().enumerate() {
+                let body = item.split_once(". ").unwrap().1;
+                assert_eq!(item.split_once(". ").unwrap().0, (i + 1).to_string());
+                let first = body.split_whitespace().next().unwrap().to_lowercase();
+                // No stray slot noun, enumerator or half sentence in front.
+                assert!(
+                    !["thing", "point", "question", "number", "is", "and", "so", "okay"]
+                        .contains(&first.as_str()),
+                    "{}: item {} starts with {first:?}",
+                    case.name,
+                    i + 1
+                );
+                assert!(
+                    !body.to_lowercase().contains("thing is"),
+                    "{}: {body}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prose_full_of_ordinals_stays_as_spoken_even_if_every_sentence_is_called_an_item() {
+        for case in list_cases().iter().filter(|c| c.name.starts_with("N12")) {
+            let plan = list_plan(case);
+            let n = plan.jev_request(None, "m").unwrap()["state"]["pieces"][0]["sentences"]
+                .as_object()
+                .unwrap()
+                .len();
+            let mut answers = serde_json::Map::new();
+            answers.insert("list_0".into(), json!({"type": "noul", "noul": 0.99}));
+            for k in 1..=n {
+                answers.insert(
+                    format!("role_0_S{k}"),
+                    json!({"type": "choice", "choice": "item", "confidence": 0.99}),
+                );
+            }
+            let out = plan.render(
+                Some(&plan.parse_answers(&Value::Object(answers))),
+                CodeStyle::Fenced,
+            );
+            assert!(!score(case, &out).changed, "{out}");
+        }
+    }
+
+    #[test]
     fn non_lists_are_never_changed() {
         for case in list_cases().iter().filter(|c| !c.list) {
             let plan = list_plan(case);

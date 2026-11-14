@@ -13,8 +13,9 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// Longest dictation (in sentences) sent to Jev as a list candidate, so one
-/// long monologue never makes a huge request.
-pub const MAX_SENTENCES: usize = 24;
+/// long monologue never makes a huge request. A dictation that answers nine
+/// questions aloud runs to a few dozen sentences, so this is generous.
+pub const MAX_SENTENCES: usize = 60;
 /// Minimum Choice confidence for Jev's "item" role on at least one sentence.
 const ITEM_CONFIDENCE: f64 = 0.6;
 
@@ -93,12 +94,14 @@ static LIST_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 /// "Number one", "step one", "point one": counting out loud.
-static COUNTER_START: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:number|step|point|item)\s+(?:one|1)\b").unwrap());
+static COUNTER_START: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:number|step|point|item|question|issue)\s+(?:number\s+)?(?:one|1)\b")
+        .unwrap()
+});
 /// Words that enumerate; two different ones make a list likely enough to ask.
 static ENUMERATOR_WORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(first|second|third|fourth|fifth)(?:ly)?\b|\b(finally|lastly)\b|\b(number\s+(?:one|two|three))\b|\b(one\s+is)\b|\b(the\s+other\s+one)\b",
+        r"(?i)\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)(?:ly)?\b|\b(finally|lastly)\b|\b(number\s+(?:one|two|three))\b|\b(one\s+is)\b|\b(the\s+other\s+one)\b",
     )
     .unwrap()
 });
@@ -182,35 +185,55 @@ const AFTER_BARE_ORDINAL: &[&str] = &[
     "we're", "you'll", "you'd", "we'd", "i'd", "so",
 ];
 
+/// Joining and filler words that may stand in front of an enumerator ("and
+/// the second thing", "okay so number five", "haan, third"); they are
+/// dropped with it.
+const LEAD: &str =
+    r"(?:(?:and|then|so|okay|ok|yeah|yes|well|now|alright|right|haan|accha|achha|toh)\b\s*,?\s*)*";
+/// Nouns that go in front of a count: "point five", "question number four".
+const COUNTER_NOUNS: &str = "step|point|item|question|issue";
+
 static ORDINAL_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^(?:and\s+)?(?P<the>the\s+)?(?P<ord>{})(?P<ly>ly)?(?:\s+(?P<noun>{SLOT_NOUNS}))?(?P<verb>\s+(?:is|being|was|would\s+be|will\s+be))?(?P<punct>\s*[,:])?\s+",
+        r"(?i)^{LEAD}(?P<the>the\s+)?(?P<ord>{})(?P<ly>ly)?(?:\s+(?P<noun>{SLOT_NOUNS})(?P<nverb>\s*,\s+(?:is|being|was|would\s+be|will\s+be))?)?(?P<verb>\s+(?:is|being|was|would\s+be|will\s+be))?(?P<punct>\s*[,:])?\s+",
         ORDINALS.join("|")
     ))
     .unwrap()
 });
 static LAST_MARKER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^(?:and\s+)?(?:(?P<always>finally|lastly|last\s+but\s+not\s+least)|last(?:\s+(?:one|thing|point|item|step))?)(?P<verb>\s+(?:is|being))?(?P<punct>\s*[,:])?\s+",
-    )
+    Regex::new(&format!(
+        r"(?i)^{LEAD}(?:(?P<always>finally|lastly|last\s+but\s+not\s+least)|last(?:\s+(?:one|thing|point|item|step))?)(?P<verb>\s+(?:is|being))?(?P<punct>\s*[,:])?\s+"
+    ))
     .unwrap()
 });
 static COUNTER_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^(?:and\s+)?(?:number|step|point|item)\s+(?P<n>{}|\d+)(?:\s+(?:is|being))?\s*[,:]?\s+",
+        r"(?i)^{LEAD}(?:(?:{COUNTER_NOUNS})\s+(?:number\s+)?|number\s+)(?P<n>{}|\d+)(?P<verb>\s+(?:is|being))?\s*(?P<punct>[,:])?\s+",
         NUMBERS.join("|")
     ))
     .unwrap()
 });
 static CARDINAL_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^(?:and\s+)?(?P<n>{})(?P<verb>\s+(?:is|being))?(?P<punct>\s*[,:])?\s+",
+        r"(?i)^{LEAD}(?P<n>{})(?P<verb>\s+(?:is|being))?(?P<punct>\s*[,:])?\s+",
         NUMBERS.join("|")
     ))
     .unwrap()
 });
 static OTHER_MARKER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:and\s+)?the\s+other\s+(?:one\s+)?(?:is|being)\s*,?\s+").unwrap()
+    Regex::new(&format!(
+        r"(?i)^{LEAD}the\s+other\s+(?:one\s+)?(?:is|being)\s*,?\s+"
+    ))
+    .unwrap()
+});
+/// An ordinal that opens a sentence or clause, whether or not it was
+/// recognised as a marker: what is left over after a layout.
+static STRAY_ORDINAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)^{LEAD}(?:the\s+)?(?:{})(?:[\s,:.;!?]|$)",
+        ORDINALS[1..].join("|")
+    ))
+    .unwrap()
 });
 static SEQUENCE_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -231,16 +254,23 @@ fn number_value(word: &str) -> Option<u32> {
 /// The enumerator at the very start of `s`, as (length, count). `expected`
 /// is the next number in the speaker's count; a bare cardinal ("two is")
 /// only counts when it is that number.
-fn marker_at(s: &str, expected: u32, allow_sequence: bool) -> Option<(usize, Count)> {
+///
+/// With `mid` the position is in the middle of a clause (no comma or "and"
+/// before it), so only the unmistakable shapes count: an ordinal or
+/// a counter followed by "is" or a comma or colon ("the third thing is",
+/// "point number five is", "point five,").
+fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<(usize, Count)> {
     if let Some(c) = ORDINAL_MARKER.captures(s) {
         let next_word = s[c.get(0).unwrap().end()..]
             .split_whitespace()
             .next()
             .unwrap_or("")
             .to_lowercase();
-        let has_verb = c.name("verb").is_some();
+        let has_verb = c.name("verb").is_some() || c.name("nverb").is_some();
         let has_punct = c.name("punct").is_some();
-        let valid = if c.name("the").is_some() {
+        let valid = if mid {
+            has_verb || has_punct
+        } else if c.name("the").is_some() {
             c.name("noun").is_some() || has_verb
         } else if c.name("ly").is_some() || has_verb || has_punct {
             true
@@ -254,9 +284,15 @@ fn marker_at(s: &str, expected: u32, allow_sequence: bool) -> Option<(usize, Cou
         }
     }
     if let Some(c) = COUNTER_MARKER.captures(s) {
-        if let Some(n) = number_value(c.name("n").unwrap().as_str()) {
-            return Some((c.get(0).unwrap().end(), Count::Nth(n)));
+        let shaped = c.name("verb").is_some() || c.name("punct").is_some();
+        if shaped || !mid {
+            if let Some(n) = number_value(c.name("n").unwrap().as_str()) {
+                return Some((c.get(0).unwrap().end(), Count::Nth(n)));
+            }
         }
+    }
+    if mid {
+        return None;
     }
     if let Some(m) = OTHER_MARKER.find(s) {
         return Some((m.end(), Count::Other));
@@ -305,6 +341,19 @@ fn clause_starts(s: &str) -> Vec<usize> {
     out
 }
 
+/// Byte offsets of every word of `s` after the first.
+fn word_starts(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut prev_space = false;
+    for (i, c) in s.char_indices() {
+        if !c.is_whitespace() && prev_space {
+            out.push(i);
+        }
+        prev_space = c.is_whitespace();
+    }
+    out
+}
+
 /// A piece of a sentence: the enumerator that opens it (if any) and the
 /// speaker's words after it.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,7 +372,7 @@ fn scan_sentence<'a>(
 ) -> Vec<Segment<'a>> {
     let s = sentence.trim();
     let mut cuts: Vec<(usize, usize, Count)> = Vec::new();
-    let opening = marker_at(s, *expected, allow_sequence);
+    let opening = marker_at(s, *expected, allow_sequence, false);
     let mut next = *expected;
     if let Some((len, count)) = opening {
         cuts.push((0, len, count));
@@ -331,11 +380,15 @@ fn scan_sentence<'a>(
     }
     let mut inner: Vec<(usize, usize, Count)> = Vec::new();
     let mut counted_so_far = opening.is_some_and(|(_, c)| c.counted());
-    for start in clause_starts(s) {
-        if cuts.first().is_some_and(|(_, end, _)| start < *end) {
+    let clauses = clause_starts(s);
+    let mut covered = cuts.first().map_or(0, |(_, end, _)| *end);
+    for start in word_starts(s) {
+        if start < covered {
             continue;
         }
-        let Some((len, count)) = marker_at(&s[start..], next, false) else {
+        // Whisper often leaves out the comma: "... and so the third thing".
+        let mid = !clauses.contains(&start);
+        let Some((len, count)) = marker_at(&s[start..], next, false, mid) else {
             continue;
         };
         let fits = match count {
@@ -346,6 +399,7 @@ fn scan_sentence<'a>(
         };
         if fits {
             inner.push((start, start + len, count));
+            covered = start + len;
             next = advance(next, count);
             counted_so_far = true;
         }
@@ -398,7 +452,7 @@ fn holds_enumeration(sentence: &str) -> bool {
 /// True when the sentence opens with an enumerator, for keeping a spoken
 /// enumeration in one paragraph.
 pub fn opens_with_enumerator(sentence: &str) -> bool {
-    marker_at(sentence.trim(), 1, true).is_some()
+    marker_at(sentence.trim(), 1, true, false).is_some()
 }
 
 // ---------------------------------------------------------------- layout
@@ -510,6 +564,11 @@ pub fn layout(segments: &[(&str, Role)]) -> Option<Layout> {
         .iter()
         .flatten()
         .any(|seg| seg.marker.is_some_and(Count::counted));
+    // A count that skips a number means an enumerator was missed somewhere,
+    // and the items would be wrong.
+    if counted && !counts_in_order(&scanned) {
+        return None;
+    }
 
     let mut seen_item = false;
     let mut scanned = scanned.into_iter();
@@ -555,6 +614,12 @@ pub fn layout(segments: &[(&str, Role)]) -> Option<Layout> {
     if items.len() < 2 || items.iter().any(String::is_empty) {
         return None;
     }
+    // An ordinal still opening a sentence inside an item is an enumerator
+    // the scan did not understand. Better the dictation as spoken than
+    // items with the speaker's next point folded into them.
+    if counted && items.iter().any(|item| holds_stray_ordinal(item)) {
+        return None;
+    }
     let mut lead = lead.join(" ");
     if let Some(stripped) = lead.strip_suffix(',') {
         lead = format!("{stripped}:");
@@ -567,6 +632,38 @@ pub fn layout(segments: &[(&str, Role)]) -> Option<Layout> {
     };
     let original: Vec<&str> = segments.iter().map(|(s, _)| *s).collect();
     keeps_words(&original.join(" "), &layout).then_some(layout)
+}
+
+/// True when the counted enumerators run 1, 2, 3 ... (or 2, 3 ... when the
+/// first item has no marker) without skipping a number.
+fn counts_in_order(scanned: &[Vec<Segment>]) -> bool {
+    let mut last: Option<u32> = None;
+    for marker in scanned.iter().flatten().filter_map(|seg| seg.marker) {
+        let n = match marker {
+            Count::Nth(n) => n,
+            Count::Other => last.map_or(2, |l| l + 1),
+            Count::Last | Count::Sequence => continue,
+        };
+        let in_order = match last {
+            Some(l) => n == l + 1,
+            None => n <= 2,
+        };
+        if !in_order {
+            return false;
+        }
+        last = Some(n);
+    }
+    true
+}
+
+/// True when a sentence or clause inside `item` opens with "second", "the
+/// third", "and then fourth" and the like.
+fn holds_stray_ordinal(item: &str) -> bool {
+    static SENTENCE_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.!?]\s+").unwrap());
+    let mut starts = vec![0];
+    starts.extend(clause_starts(item));
+    starts.extend(SENTENCE_END.find_iter(item).map(|m| m.end()));
+    starts.iter().any(|&i| STRAY_ORDINAL.is_match(&item[i..]))
 }
 
 /// Tidies one item: no joining comma or "and" at its end, no closing period
@@ -651,6 +748,19 @@ fn strippable(word: &str) -> bool {
         "step",
         "point",
         "item",
+        "okay",
+        "ok",
+        "so",
+        "yeah",
+        "yes",
+        "well",
+        "now",
+        "alright",
+        "right",
+        "haan",
+        "accha",
+        "achha",
+        "toh",
     ];
     let ordinal = ORDINALS
         .iter()
@@ -739,6 +849,32 @@ mod tests {
                 Some("the spacing is uneven."),
             ),
             ("First I opened the app", Some("I opened the app")),
+            // Counters with a noun and "number", and filler words ahead of
+            // the enumerator.
+            ("Point number five is the pill.", Some("the pill.")),
+            (
+                "Question number four, the languages.",
+                Some("the languages."),
+            ),
+            (
+                "Number five the onboarding emails",
+                Some("the onboarding emails"),
+            ),
+            ("Okay so the second thing is the trial.", Some("the trial.")),
+            (
+                "And then the third thing is onboarding.",
+                Some("onboarding."),
+            ),
+            ("Alright, so sixth is retention.", Some("retention.")),
+            ("Haan, third, the pill.", Some("the pill.")),
+            (
+                "The second thing, is the free trial.",
+                Some("the free trial."),
+            ),
+            (
+                "The eighth question is about the budget.",
+                Some("about the budget."),
+            ),
             ("Then book the flights.", Some("book the flights.")),
             // Pointing at an object, not counting.
             ("The first image is red", None),
@@ -748,7 +884,7 @@ mod tests {
             ("Next week we ship", None),
         ];
         for (sentence, want) in cases {
-            let got = marker_at(sentence, 1, true).map(|(len, _)| &sentence[len..]);
+            let got = marker_at(sentence, 1, true, false).map(|(len, _)| &sentence[len..]);
             assert_eq!(got, want, "{sentence}");
         }
     }
@@ -792,6 +928,147 @@ mod tests {
     }
 
     #[test]
+    fn an_enumerator_without_a_comma_still_splits_the_item() {
+        let mut expected = 1;
+        let segs = scan_sentence(
+            "The first thing is the trial and then the second thing is onboarding okay the third point is the pill.",
+            &mut expected,
+            true,
+        );
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.trim()).collect();
+        assert_eq!(texts, ["the trial", "onboarding", "the pill."]);
+        // Without the slot noun or "is" a bare ordinal mid-clause is prose.
+        let mut expected = 2;
+        assert_eq!(
+            scan_sentence(
+                "We tried it once and so second I mean it works.",
+                &mut expected,
+                true
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_mid_clause_counter_needs_is_or_punctuation() {
+        for text in [
+            "First, at that point two people left.",
+            "First, after step two we shipped it.",
+            "First, save the phone number two times.",
+            "First, on question two the room agreed.",
+        ] {
+            let mut expected = 1;
+            assert_eq!(scan_sentence(text, &mut expected, true).len(), 1, "{text}");
+        }
+        for text in [
+            "First, install it today point number two is the pill.",
+            "First, install it today point two, the pill.",
+            "First, install it today point two: the pill.",
+        ] {
+            let mut expected = 1;
+            let segs = scan_sentence(text, &mut expected, true);
+            let texts: Vec<&str> = segs.iter().map(|s| s.text.trim()).collect();
+            assert_eq!(texts, ["install it today", "the pill."], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_mid_clause_ordinal_needs_is_or_punctuation() {
+        for text in [
+            "First, pick the second option from the menu.",
+            "First, pick the second one from the list.",
+            "First, open the second step in the wizard.",
+            "First, read the second part twice.",
+        ] {
+            let mut expected = 1;
+            assert_eq!(scan_sentence(text, &mut expected, true).len(), 1, "{text}");
+        }
+        for text in [
+            "First, install it today the second thing is the pill.",
+            "First, install it and then the second thing is the pill.",
+            "First, install it today the second thing: the pill.",
+        ] {
+            let mut expected = 1;
+            let segs = scan_sentence(text, &mut expected, true);
+            assert_eq!(segs.len(), 2, "{text}");
+            assert_eq!(segs[1].text.trim(), "the pill.", "{text}");
+        }
+    }
+
+    #[test]
+    fn a_comma_before_is_belongs_to_the_slot_noun_only() {
+        let mut expected = 1;
+        let segs = scan_sentence("The second thing, is the free trial.", &mut expected, true);
+        assert_eq!(segs[0].text.trim(), "the free trial.");
+
+        let mut expected = 2;
+        let segs = scan_sentence("Second, is the app slow?", &mut expected, true);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text.trim(), "is the app slow?");
+    }
+
+    #[test]
+    fn nine_long_answers_stay_whole_and_numbered() {
+        let sentences = s(&[
+            "I will answer in order.",
+            "The first thing is the pricing, and one plan is enough. Yeah so flat price.",
+            "The second thing is the trial.",
+            "Fourteen days. Okay.",
+            "The third thing is onboarding, nothing else.",
+            "The fourth point is the languages, theek hai.",
+            "Point number five is the pill.",
+            "Small by default.",
+            "Sixth is retention. A weekly counter.",
+            "Okay so the seventh thing is privacy and the eighth question is about the budget.",
+            "And number nine is the launch.",
+            "That is all.",
+        ]);
+        let r = roles(&[
+            LeadIn, Item, Item, Item, Item, Item, Item, Item, Item, Item, Item, After,
+        ]);
+        let layout = layout_from_roles(&sentences, &r).unwrap();
+        assert!(layout.counted);
+        assert_eq!(
+            layout.items,
+            [
+                "The pricing, and one plan is enough. Yeah so flat price.",
+                "The trial. Fourteen days. Okay.",
+                "Onboarding, nothing else",
+                "The languages, theek hai",
+                "The pill. Small by default.",
+                "Retention. A weekly counter.",
+                "Privacy",
+                "About the budget",
+                "The launch",
+            ]
+        );
+        assert_eq!(layout.tail, "That is all.");
+    }
+
+    #[test]
+    fn a_skipped_or_misplaced_count_leaves_the_dictation_as_spoken() {
+        // "Second" is missing: items would be numbered wrong.
+        let sentences = s(&["Firstly, the export fails.", "Thirdly, the app is slow."]);
+        assert!(layout_from_roles(&sentences, &roles(&[Item, Item])).is_none());
+        // An ordinal that still opens a sentence inside an item.
+        let sentences = s(&[
+            "First, the export fails.",
+            "Second, the app is slow.",
+            "The third image was blurry.",
+        ]);
+        assert!(layout_from_roles(&sentences, &roles(&[Item, Item, Item])).is_none());
+        // Prose that merely contains ordinals, whatever roles Jev gave.
+        let sentences = s(&[
+            "The first time I tried it the app crashed.",
+            "The second time it opened but the microphone did not work.",
+            "Sixth, I tried Hindi and it mostly worked.",
+            "The seventh test was in a cafe.",
+        ]);
+        assert!(layout_from_roles(&sentences, &roles(&[Item, Item, Item, Item])).is_none());
+    }
+
+    #[test]
     fn roles_lay_out_lead_items_and_tail() {
         let sentences = s(&[
             "Okay, a couple of things here.",
@@ -816,6 +1093,24 @@ mod tests {
         assert_eq!(
             layout.render(Style::Numbered, str::to_string),
             "Okay, a couple of things here.\n\n1. The voiceover is not working\n2. I cannot drag clips\n3. Undo does not work\n\nFix these and tell me when done."
+        );
+    }
+
+    #[test]
+    fn a_hyphenated_ordinal_is_not_a_stray_enumerator() {
+        let sentences = s(&[
+            "First, the setup.",
+            "Second, third-party integrations are slow.",
+            "Third, second-guessing the pricing, and the second-hand market.",
+        ]);
+        let layout = layout_from_roles(&sentences, &roles(&[Item, Item, Item])).unwrap();
+        assert_eq!(
+            layout.items,
+            [
+                "The setup",
+                "third-party integrations are slow",
+                "second-guessing the pricing, and the second-hand market"
+            ]
         );
     }
 
@@ -930,6 +1225,11 @@ mod tests {
         assert!(!gate("Give me just a list of names."));
         assert!(!gate("Firstly I want to say this build is fast."));
         assert!(!gate("Thanks a lot, that works perfectly now."));
+        // A long answer to numbered questions has dozens of sentences.
+        let rambling = "That is a long answer with a few words in it. ".repeat(20);
+        assert!(gate(&format!(
+            "The first thing is the price. {rambling}The second thing is the trial. {rambling}Point number three is the pill."
+        )));
         let long = "This is one sentence. ".repeat(MAX_SENTENCES + 1) + "A couple of things.";
         assert!(!gate(&long));
     }
