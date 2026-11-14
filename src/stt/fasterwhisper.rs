@@ -192,6 +192,7 @@ impl SttProvider for FasterWhisperStt {
             text,
             raw_json,
             latency_ms,
+            skipped_audio: false,
         })
     }
 }

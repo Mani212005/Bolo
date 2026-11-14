@@ -403,9 +403,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(!sup.running());
         sup.shutdown();
-        // And the public entry points stay quiet without a helper on PATH.
+        // And the public entry points stay quiet. Hidden, so an installed
+        // bolo-pill on PATH is never launched against the real daemon.
         stop();
-        spawn_supervisor(&EventHub::default());
+        spawn_supervisor(&EventHub::spawn(pill(PillStyle::Hidden)));
         stop();
     }
 }

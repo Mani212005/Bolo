@@ -326,8 +326,11 @@ pub(crate) fn route(
         let runtime = tokio::runtime::Runtime::new()?;
         let stt = Arc::clone(stt);
         let wav_vec = body_bytes.to_vec();
-        let transcript = runtime.block_on(async move { stt.transcribe(wav_vec).await })?;
-        let text = transcript.text.trim().to_string();
+        let transcript =
+            runtime.block_on(async move { crate::stt::transcribe_speech(&*stt, wav_vec).await })?;
+        let text = transcript
+            .map(|t| t.text.trim().to_string())
+            .unwrap_or_default();
         if !text.is_empty() {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -629,6 +632,7 @@ mod tests {
                 text: "test".to_string(),
                 raw_json: "{}".to_string(),
                 latency_ms: 0,
+                skipped_audio: false,
             })
         }
     }

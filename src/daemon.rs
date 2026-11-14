@@ -142,7 +142,8 @@ pub(crate) enum PipelineMsg {
 /// user copied during a pause.
 enum Piece {
     Spoken {
-        handle: tokio::task::JoinHandle<anyhow::Result<crate::stt::Transcript>>,
+        /// `None`: no words even after the retry.
+        handle: tokio::task::JoinHandle<anyhow::Result<Option<crate::stt::Transcript>>>,
         audio_id: String,
         duration_s: f64,
     },
@@ -605,7 +606,9 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                             );
                             let stt = Arc::clone(&stt);
                             pieces.push(Piece::Spoken {
-                                handle: runtime.spawn(async move { stt.transcribe(wav).await }),
+                                handle: runtime.spawn(async move {
+                                    crate::stt::transcribe_speech(&*stt, wav).await
+                                }),
                                 audio_id,
                                 duration_s,
                             });
@@ -913,12 +916,24 @@ async fn format_dictation(
 /// How the text went in, final text, last audio id and total audio seconds.
 type Transcribed = (Injected, String, Option<String>, f64);
 
+/// How a dictation ended.
+enum Ending {
+    /// Nothing was said: no speech to transcribe.
+    Silence,
+    /// Speech was recorded, but its transcription had no words, not even on
+    /// the retry (a lone "," for example). Nothing is pasted; the audio stays
+    /// in the recordings folder.
+    NotCaught,
+    Delivered(Transcribed),
+}
+
 /// The event that closes a dictation. `capped` marks a session that hit the
 /// max-length limit; its text was still transcribed and pasted.
-fn finalize_outcome(result: &anyhow::Result<Option<Transcribed>>, capped: bool) -> Event {
+fn finalize_outcome(result: &anyhow::Result<Ending>, capped: bool) -> Event {
     match result {
-        Ok(None) => outcome_event("no-speech", "", None),
-        Ok(Some((injected, text, _, _))) => {
+        Ok(Ending::Silence) => outcome_event("no-speech", "", None),
+        Ok(Ending::NotCaught) => outcome_event("not-caught", "", None),
+        Ok(Ending::Delivered((injected, text, _, _))) => {
             let chars = Some(text.chars().count());
             if let Some(reason) = injected.interrupted {
                 outcome_event("paste-interrupted", reason, chars)
@@ -947,25 +962,31 @@ fn finalize(
     }
     // notify-rust's blocking show() cannot run inside block_on (it spins up
     // its own runtime), so the async block only returns what to say.
-    let outcome: anyhow::Result<Option<Transcribed>> = runtime.block_on(async {
+    let outcome: anyhow::Result<Ending> = runtime.block_on(async {
         let mut resolved_pieces: Vec<crate::vocab::TranscriptPiece> = Vec::new();
         let mut last_audio_id: Option<String> = None;
         let mut total_duration_s = 0.0;
+        let mut not_caught = false;
         for piece in pieces.drain(..) {
             match piece {
                 Piece::Spoken {
                     handle,
                     audio_id,
                     duration_s,
-                } => {
-                    let transcript = handle.await.context("transcription task panicked")??;
-                    let text = transcript.text.trim().to_string();
-                    if !text.is_empty() {
+                } => match handle.await.context("transcription task panicked")?? {
+                    Some(transcript) => {
+                        let text = transcript.text.trim().to_string();
                         resolved_pieces.extend(split_voice_clipboard_triggers(&text));
                         last_audio_id = Some(audio_id);
                         total_duration_s += duration_s;
                     }
-                }
+                    None => {
+                        eprintln!(
+                            "[skip]    no words heard in audio_id={audio_id} (recording kept)"
+                        );
+                        not_caught = true;
+                    }
+                },
                 Piece::Inserted(text) => {
                     let trimmed = text.trim().to_string();
                     if !trimmed.is_empty() {
@@ -975,7 +996,11 @@ fn finalize(
             }
         }
         if resolved_pieces.is_empty() {
-            return Ok(None);
+            return Ok(if not_caught {
+                Ending::NotCaught
+            } else {
+                Ending::Silence
+            });
         }
 
         let active_app = crate::vocab::detect_frontmost_app();
@@ -1029,15 +1054,21 @@ fn finalize(
             t_inject.elapsed().as_millis(),
             t_end.elapsed().as_millis()
         );
-        Ok(Some((injected, text, last_audio_id, total_duration_s)))
+        Ok(Ending::Delivered((
+            injected,
+            text,
+            last_audio_id,
+            total_duration_s,
+        )))
     });
     let closing = finalize_outcome(&outcome, capped);
     match &outcome {
-        Ok(None) => {
+        Ok(Ending::Silence) => {
             eprintln!("[skip] no speech detected");
             notify(cfg, "No speech detected");
         }
-        Ok(Some((injected, text, audio_id, duration_s))) => {
+        Ok(Ending::NotCaught) => notify(cfg, "Did not catch that, try again"),
+        Ok(Ending::Delivered((injected, text, audio_id, duration_s))) => {
             let head = match injected.method {
                 "paste" => "Pasted + on clipboard",
                 "portal" => "Typed + copied - Ctrl+V pastes it elsewhere",
@@ -1065,7 +1096,7 @@ fn finalize(
     }
 
     let transcript_text = match &outcome {
-        Ok(Some((_, text, _, _))) => text.as_str(),
+        Ok(Ending::Delivered((_, text, _, _))) => text.as_str(),
         _ => "",
     };
 
@@ -1873,6 +1904,41 @@ mod tests {
     }
 
     #[test]
+    fn a_comma_only_transcript_is_never_pasted() {
+        let (shared, hub, cfg) = daemon_state();
+        shared.lock().unwrap().set_phase(Phase::Processing);
+        let events = subscribe(&hub);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut injectors = Injectors::new(&cfg);
+        // Whisper heard 25s of speech as ",", and the retry as " , - ".
+        let stt = Arc::new(crate::stt::tests::ScriptedStt::new(vec![
+            crate::stt::tests::transcript(","),
+            crate::stt::tests::transcript(" , - "),
+        ]));
+        let task_stt = Arc::clone(&stt);
+        let mut pieces = vec![Piece::Spoken {
+            handle: runtime
+                .spawn(async move { crate::stt::transcribe_speech(&*task_stt, Vec::new()).await }),
+            audio_id: "rec_test".to_string(),
+            duration_s: 25.0,
+        }];
+
+        finalize(&runtime, &mut pieces, &mut injectors, &cfg, &shared, false);
+
+        assert_eq!(
+            *stt.calls.lock().unwrap(),
+            vec!["transcribe", "retranscribe"]
+        );
+        // Ends before anything is injected: no "done" outcome, no last text.
+        assert_eq!(
+            next(&events),
+            json!({ "type": "outcome", "kind": "not-caught", "detail": "" })
+        );
+        assert_eq!(next(&events), json!({ "type": "phase", "phase": "idle" }));
+        assert_eq!(shared.lock().unwrap().last_text, None);
+    }
+
+    #[test]
     fn failed_sessions_report_why_then_go_idle() {
         let (shared, hub, _cfg) = daemon_state();
         shared.lock().unwrap().set_phase(Phase::Recording);
@@ -1889,8 +1955,8 @@ mod tests {
 
     #[test]
     fn finalize_outcome_names_what_happened() {
-        let done = |method, interrupted| -> anyhow::Result<Option<Transcribed>> {
-            Ok(Some((
+        let done = |method, interrupted| -> anyhow::Result<Ending> {
+            Ok(Ending::Delivered((
                 Injected {
                     method,
                     interrupted,
@@ -1932,8 +1998,12 @@ mod tests {
             ("max-length", "pasted", Some(5))
         );
         assert_eq!(
-            kind_detail(finalize_outcome(&Ok(None), false)),
+            kind_detail(finalize_outcome(&Ok(Ending::Silence), false)),
             ("no-speech", "", None)
+        );
+        assert_eq!(
+            kind_detail(finalize_outcome(&Ok(Ending::NotCaught), false)),
+            ("not-caught", "", None)
         );
         assert_eq!(
             kind_detail(finalize_outcome(&Err(anyhow::anyhow!("boom")), false)),

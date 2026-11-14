@@ -84,6 +84,7 @@ impl GroqStt {
             text,
             raw_json: body,
             latency_ms,
+            skipped_audio: false,
         })
     }
 }
