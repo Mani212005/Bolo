@@ -7,7 +7,8 @@
 //!
 //! 1. Pick the region the user points at: the UI element under the pointer
 //!    (with padding) when the platform can name one, otherwise a 640x400
-//!    logical box around the pointer ([`choose_region`]).
+//!    logical box around the pointer ([`choose_region`]). A table row gets
+//!    its table's header and columns too ([`choose_region_in_frame`]).
 //! 2. Crop it from the native-resolution frame of the display under the
 //!    pointer, and downscale only when it exceeds the model budget
 //!    ([`Budget`]), with Lanczos3. Never upscale.
@@ -24,6 +25,9 @@ use anyhow::{Context, Result};
 use image::imageops::{self, FilterType};
 use image::{Rgb, RgbImage};
 use std::path::Path;
+
+#[cfg(any(target_os = "macos", test))]
+use super::table;
 
 /// Claude bills and encodes images on a 28x28 px grid.
 pub const VISUAL_TOKEN_PX: u32 = 28;
@@ -42,6 +46,19 @@ pub const MIN_ELEMENT: (f64, f64) = (240.0, 80.0);
 /// whole editor, not something pointed at; the pointer box is used instead.
 #[cfg(any(target_os = "macos", test))]
 pub const MAX_ELEMENT_FRACTION: f64 = 0.5;
+/// Width of the box drawn on the pointed row of a table crop, in output pixels.
+#[cfg(any(target_os = "macos", test))]
+pub const ROW_MARK_PX: i64 = 2;
+/// How strongly the pointed row is tinted on the context image.
+#[cfg(any(target_os = "macos", test))]
+pub const ROW_BAND_ALPHA: f64 = 0.55;
+/// Height of the dashed band that stands for the table rows left out between
+/// the header and the pointed row, in crop pixels.
+#[cfg(any(target_os = "macos", test))]
+pub const ELISION_PX: u32 = 8;
+/// Length of each dash in that band, in crop pixels.
+#[cfg(any(target_os = "macos", test))]
+const ELISION_DASH_PX: u32 = 12;
 /// Width of the frame drawn around the crop, in output pixels.
 pub const BORDER_PX: u32 = 3;
 /// `#00BFFF`, readable on both light and dark UI.
@@ -135,6 +152,9 @@ pub enum RegionSource {
     Element,
     /// The default box around the pointer.
     Pointer,
+    /// A table row under the pointer, with its header and first column
+    /// ([`table::table_region`]).
+    Table,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -142,6 +162,11 @@ pub enum RegionSource {
 pub struct Region {
     pub rect: Rect,
     pub source: RegionSource,
+    /// The pointed row of a [`RegionSource::Table`] region, to be marked.
+    pub mark: Option<Rect>,
+    /// A table header captured above `rect`, with the rows between them
+    /// left out.
+    pub header: Option<Rect>,
 }
 
 /// Picks the region to capture on `display` (logical points).
@@ -169,12 +194,43 @@ pub fn choose_region(display: Rect, pointer: (f64, f64), elements: &[Rect]) -> R
         return Region {
             rect: padded.shifted_inside(display),
             source: RegionSource::Element,
+            mark: None,
+            header: None,
         };
     }
     Region {
         rect: Rect::centered(pointer, DEFAULT_BOX.0, DEFAULT_BOX.1).shifted_inside(display),
         source: RegionSource::Pointer,
+        mark: None,
+        header: None,
     }
+}
+
+/// [`choose_region`], except that a table row, which would otherwise get the
+/// pointer box, gets the table's header and first column with it
+/// ([`table::table_region`]). `scale` is frame pixels per point; `budget`
+/// is the image budget the crop is sized for.
+#[cfg(any(target_os = "macos", test))]
+pub fn choose_region_in_frame(
+    frame: &RgbImage,
+    display: Rect,
+    scale: f64,
+    pointer: (f64, f64),
+    elements: &[Rect],
+    budget: Budget,
+) -> Region {
+    let region = choose_region(display, pointer, elements);
+    if region.source == RegionSource::Pointer {
+        if let Some(hit) = table::table_region(frame, display, scale, pointer, elements, budget) {
+            return Region {
+                rect: hit.region,
+                source: RegionSource::Table,
+                mark: Some(hit.row),
+                header: hit.header,
+            };
+        }
+    }
+    region
 }
 
 /// A vision model's image budget: the long edge and the 28 px visual tokens
@@ -292,20 +348,143 @@ pub fn render_pointed(
     elements: &[Rect],
     budget: Budget,
 ) -> Shot {
-    let region = choose_region(display, pointer, elements);
     let scale = if display.w > 0.0 {
         frame.width() as f64 / display.w
     } else {
         1.0
     };
-    let px = region
-        .rect
-        .to_pixels((display.x, display.y), scale, frame.dimensions());
+    let region = choose_region_in_frame(frame, display, scale, pointer, elements, budget);
+    let origin = (display.x, display.y);
+    let px = region.rect.to_pixels(origin, scale, frame.dimensions());
     eprintln!(
         "[vision] region {:?} {:.0}x{:.0} pt at ({:.0},{:.0}) scale={scale:.2} -> {}x{} px",
         region.source, region.rect.w, region.rect.h, region.rect.x, region.rect.y, px.w, px.h
     );
-    render_region(frame, px, budget)
+    let rows = imageops::crop_imm(frame, px.x, px.y, px.w, px.h).to_image();
+    // Where the crop's top-left pixel sits in the frame, for the part that
+    // holds `rect`.
+    let (crop, outline, top) = match region.header {
+        None => (rows, px, px.y as i64),
+        Some(header) => {
+            let hp = header.to_pixels(origin, scale, frame.dimensions());
+            let head = imageops::crop_imm(frame, px.x, hp.y, px.w, hp.h).to_image();
+            let outline = PxRect {
+                h: (px.y + px.h).saturating_sub(hp.y),
+                y: hp.y,
+                ..px
+            };
+            let top = px.y as i64 - (head.height() + ELISION_PX) as i64;
+            (stack_elided(&head, &rows), outline, top)
+        }
+    };
+    let mut shot = render(&crop, Some(frame), Some(outline), budget);
+    if let Some(row) = region.mark {
+        let row = row.to_pixels(origin, scale, frame.dimensions());
+        mark_row(
+            &mut shot,
+            frame.dimensions(),
+            crop.dimensions(),
+            (px.x as i64, top),
+            row,
+        );
+    }
+    if region.source == RegionSource::Table {
+        // A table crop is wide because tables are, not because it already
+        // shows the screen: the title, filters and caption around the table
+        // still earn the context image, so it counts as just under the
+        // share that would drop it.
+        shot.region_fraction = shot.region_fraction.min(table::CONTEXT_SHARE);
+    }
+    shot
+}
+
+/// `header` above `rows`, with an [`ELISION_PX`] dashed band of new pixels
+/// between them that says rows were left out there.
+#[cfg(any(target_os = "macos", test))]
+fn stack_elided(header: &RgbImage, rows: &RgbImage) -> RgbImage {
+    let w = rows.width();
+    let gap = header.height();
+    let mut out = RgbImage::from_pixel(w, gap + ELISION_PX + rows.height(), Rgb([255, 255, 255]));
+    imageops::replace(&mut out, header, 0, 0);
+    for y in gap..gap + ELISION_PX {
+        for x in (0..w).filter(|x| (x / ELISION_DASH_PX).is_multiple_of(2)) {
+            out.put_pixel(x, y, BORDER_COLOR);
+        }
+    }
+    imageops::replace(&mut out, rows, 0, (gap + ELISION_PX) as i64);
+    out
+}
+
+/// Marks the pointed `row` (frame pixels) of a table crop, which spans many
+/// rows, so the agent can tell which one was meant: a [`ROW_MARK_PX`] box on
+/// the crop, and a band over the row on the context image. `crop_size` is
+/// the crop before it was fitted and framed, and `origin` the frame pixel at
+/// its top-left. The box lies on the row's top and bottom boundary lines and
+/// in the margins beside it, never across its text.
+#[cfg(any(target_os = "macos", test))]
+fn mark_row(
+    shot: &mut Shot,
+    frame_size: (u32, u32),
+    crop_size: (u32, u32),
+    origin: (i64, i64),
+    row: PxRect,
+) {
+    let inner = (
+        shot.crop.width().saturating_sub(2 * BORDER_PX).max(1) as f64,
+        shot.crop.height().saturating_sub(2 * BORDER_PX).max(1) as f64,
+    );
+    let (sx, sy) = (
+        inner.0 / crop_size.0.max(1) as f64,
+        inner.1 / crop_size.1.max(1) as f64,
+    );
+    let to_crop =
+        |v: u32, o: i64, s: f64| BORDER_PX as i64 + ((v as i64 - o) as f64 * s).round() as i64;
+    let x0 = to_crop(row.x, origin.0, sx);
+    let y0 = to_crop(row.y, origin.1, sy);
+    let x1 = to_crop(row.x + row.w, origin.0, sx);
+    let y1 = to_crop(row.y + row.h, origin.1, sy);
+    draw_row_box(&mut shot.crop, x0, y0, x1, y1, ROW_MARK_PX);
+    if let Some(ctx) = shot.context.as_mut() {
+        let s = ctx.width() as f64 / frame_size.0.max(1) as f64;
+        let to_ctx = |v: u32| (v as f64 * s).round() as i64;
+        let (cx0, cy0) = (to_ctx(row.x), to_ctx(row.y));
+        let (cx1, cy1) = (to_ctx(row.x + row.w), to_ctx(row.y + row.h).max(cy0 + 2));
+        tint(ctx, cx0, cy0, cx1, cy1, ROW_BAND_ALPHA);
+    }
+}
+
+/// Strokes a `t` px box for the row `[x0, x1) x [y0, y1)`: its top and
+/// bottom strokes are centred on the row's boundary lines and its sides lie
+/// just outside the row, so the row's text is never covered. Clipped to the
+/// inside of the crop's frame.
+#[cfg(any(target_os = "macos", test))]
+fn draw_row_box(img: &mut RgbImage, x0: i64, y0: i64, x1: i64, y1: i64, t: i64) {
+    let b = BORDER_PX as i64;
+    let (w, h) = (img.width() as i64 - b, img.height() as i64 - b);
+    let (top, bottom) = (y0 - t / 2, y1 - t / 2);
+    for y in top.max(b)..(bottom + t).min(h) {
+        for x in (x0 - t).max(b)..(x1 + t).min(w) {
+            let on_line = y < top + t || y >= bottom;
+            let beside = x < x0 || x >= x1;
+            if on_line || beside {
+                img.put_pixel(x as u32, y as u32, BORDER_COLOR);
+            }
+        }
+    }
+}
+
+/// Blends [`BORDER_COLOR`] over the box `[x0, x1) x [y0, y1)` at `alpha`.
+#[cfg(any(target_os = "macos", test))]
+fn tint(img: &mut RgbImage, x0: i64, y0: i64, x1: i64, y1: i64, alpha: f64) {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    for y in y0.max(0)..y1.min(h) {
+        for x in x0.max(0)..x1.min(w) {
+            let p = img.get_pixel_mut(x as u32, y as u32);
+            for (c, b) in p.0.iter_mut().zip(BORDER_COLOR.0) {
+                *c = (*c as f64 * (1.0 - alpha) + b as f64 * alpha).round() as u8;
+            }
+        }
+    }
 }
 
 /// Adds a [`BORDER_PX`] frame around the image. The frame is new canvas, so

@@ -9,7 +9,8 @@ use anyhow::Result;
 ///
 /// The region is the accessibility element under the pointer when it is a
 /// sensible size, otherwise a 640x400 box around the pointer
-/// ([`shot::choose_region`]). Only the display containing the pointer is
+/// ([`shot::choose_region`]); a table row gets its table's header and
+/// columns instead ([`shot::choose_region_in_frame`]). Only the display containing the pointer is
 /// captured, and its scale comes from the captured pixels, so secondary and
 /// non-Retina displays crop correctly.
 pub fn capture_shot(pointer: Option<(f64, f64)>, budget: Budget) -> Result<Shot> {
