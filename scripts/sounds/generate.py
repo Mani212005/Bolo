@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthesises Bolo's three sound cues into assets/sounds/*.wav.
+"""Synthesises Bolo's two sound cues into assets/sounds/*.wav.
 
 Pure standard library (no numpy, no samples, no third-party audio), so the
 cues are original work and the output is bit-for-bit reproducible:
@@ -14,13 +14,11 @@ below and again by the unit tests in src/sound.rs:
     the playback path adds no silence of its own
   * every partial starts with a raised-cosine ramp and the tail fades with a
     raised cosine to exact zero, so there are no clicks or pops
-  * peak at most -6 dBFS before the user's volume setting is applied
-  * loudness matched: start and capture share one RMS target, stop sits 3 dB
-    under them on purpose (the "quiet matching end cue")
+  * peak at most -6 dBFS before the fixed playback gain is applied
+  * loudness matched: start and capture share one RMS target
 
 Voices:
   start    soft rising perfect fifth (E5 -> B5), marimba-like partials
-  stop     the same two notes falling (B5 -> E5), shorter and quieter
   capture  camera shutter: a soft "tick + thock" for the opening, a lower,
            quieter one for the closing, with a faint high glint on top; it
            shares no pitch material with the dictation cues so the two
@@ -38,7 +36,6 @@ OUT_DIR = Path(__file__).resolve().parents[2] / "assets" / "sounds"
 
 PEAK_LIMIT = 0.5          # -6 dBFS
 RMS_TARGET_DB = -22.0     # RMS of the active part of start and capture
-STOP_OFFSET_DB = -3.0     # stop is quieter by design
 ACTIVE_FLOOR = 0.02       # samples under 2% of peak do not count as "active"
 MIN_MS, MAX_MS = 80, 250
 
@@ -128,13 +125,6 @@ def cue_start():
     return finish(out, 232, 45)
 
 
-def cue_stop():
-    out = []
-    mix_into(out, tone(B5, 130, 45, WARM), 0, 0.9)
-    mix_into(out, tone(E5, 150, 60, WARM), 58, 1.0)
-    return finish(out, 190, 40)
-
-
 def cue_capture():
     rng = random.Random(20260514)
     out = []
@@ -150,7 +140,7 @@ def cue_capture():
     return finish(out, 150, 35)
 
 
-CUES = {"start": (cue_start, 0.0), "stop": (cue_stop, STOP_OFFSET_DB), "capture": (cue_capture, 0.0)}
+CUES = {"start": cue_start, "capture": cue_capture}
 
 
 def active_rms(samples):
@@ -164,9 +154,8 @@ def db(x):
 
 
 def render(name):
-    make, offset_db = CUES[name]
-    samples = make()
-    gain = 10 ** ((RMS_TARGET_DB + offset_db) / 20) / active_rms(samples)
+    samples = CUES[name]()
+    gain = 10 ** (RMS_TARGET_DB / 20) / active_rms(samples)
     samples = [s * gain for s in samples]
     return [max(-32768, min(32767, int(round(s * 32767)))) for s in samples]
 

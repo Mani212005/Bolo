@@ -128,32 +128,6 @@ fn main() -> anyhow::Result<()> {
             println!("[model] ready: {}", path.display());
             return Ok(());
         }
-        Some("sound-test") => {
-            // bolo sound-test [start|stop|capture] [--repeat N]  - play the cues and
-            // print how long each took from request to speaker.
-            let cfg = Config::load(&config_path)?;
-            let cue = match args.get(2).filter(|a| !a.starts_with("--")) {
-                Some(name) => Some(sound::parse_cue(name).with_context(|| {
-                    format!("unknown cue {name:?} (use {})", sound::cue_names())
-                })?),
-                None => None,
-            };
-            let repeat = args
-                .iter()
-                .position(|a| a == "--repeat")
-                .and_then(|i| args.get(i + 1))
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(1);
-            let mut daemon = cfg.daemon.clone();
-            daemon.sounds = true; // testing the cues: [daemon] sounds does not apply
-            sound::configure(&daemon);
-            let cues = cue.map_or(
-                vec![sound::Cue::Start, sound::Cue::Stop, sound::Cue::Capture],
-                |c| vec![c],
-            );
-            sound::self_test(&cues, repeat);
-            return Ok(());
-        }
         Some("eval-format") => {
             let cfg = Config::load(&config_path)?;
             let use_jev = args.iter().any(|a| a == "--jev");
@@ -174,7 +148,7 @@ fn main() -> anyhow::Result<()> {
             // Explicit interactive console recording mode continues below
         }
         Some("--help" | "-h" | "help") => {
-            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  capture       While dictating, screenshot what you point at (Linux: select the area)\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  sound-test    Play the start, stop and screenshot cues and print their latency\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
+            println!("Bolo - Local voice dictation for macOS & Linux\n\nUsage: bolo [COMMAND]\n\nCommands:\n  (none)        Start Bolo (daemon and recording pill; no window)\n  exit          Stop Bolo daemon and close UI\n  toggle        Toggle recording on/off via hotkey\n  capture       While dictating, screenshot what you point at (Linux: select the area)\n  pause         Pause/resume daemon\n  settings/ui   Open the settings & history dashboard\n  pill-style    Set the recording pill: small, large or hidden\n  pill-idle     Show or hide the idle handle: on or off\n  record        Interactive console microphone recording\n  status        Check background daemon status\n  events        Print the daemon's live event stream (phase, mic level, outcome) as JSON lines\n  transcribe    Transcribe a local WAV file\n  enhance       LLM-enhance clipboard content\n  eval-format   Score code detection on labeled cases (--jev compares Jev)\n  split-preview Read text on stdin, print the terminal paste pieces as a JSON array\n");
             return Ok(());
         }
         None => return start_bolo(&config_path),

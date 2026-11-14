@@ -9,9 +9,9 @@ dashboard API exactly as the hotkey, `bolo capture` and the settings page do:
   * `capture` takes a screenshot and plays the capture cue the moment the frame is
     grabbed (within MAX_MS of `trigger->frame_ms`), before the image is processed;
   * a failed capture (`screencapture` replaced by a stub that exits 1) plays nothing;
-  * `toggle` again plays the stop cue;
-  * `sounds = false` and `sound_volume` apply live, without a restart: nothing plays
-    when off, the level in the log follows the volume, and a bad volume is rejected.
+  * `toggle` again stops the recording silently (there is no stop cue);
+  * `sounds = false` applies live, without a restart: nothing plays while it is off, and
+    the cues are back after `sounds = true`.
 
 "Within MAX_MS" is the daemon's own measure: request until the first sample leaves the
 output device (queueing + the stream's buffer). The daemon records from the real
@@ -212,17 +212,13 @@ def scenario_normal(bolo):
             frame_ms = float(re.search(r"frame_ms=(\d+)", frame).group(1))
             check(cue_ms(line) - frame_ms < MAX_MS, "cue reached the speaker within 30 ms of the frame being grabbed")
 
-        # 3. Stop cue.
+        # 3. Stopping is silent.
         mark = len(d.lines())
         check(d.command("toggle") == "ok stopping", "toggle stops the recording")
-        line = d.wait_for(r"\[sound\] stop cue", mark)
-        check(line is not None, "stop cue played")
-        if line:
-            print("      " + line)
-            check(cue_ms(line) < MAX_MS + 30, f"stop cue reached the speaker in under {MAX_MS + 30:.0f} ms")
         check(wait_idle(d), "the session ended")
+        check(not any("[sound]" in l and "cue" in l for l in d.since(mark)), "stopping plays no cue")
 
-        # 4. Settings apply live.
+        # 4. Sounds on/off applies live.
         status, reply = d.post("/api/config", {"sounds": False})
         check(status == 200 and reply.get("needs_restart") is False, "sounds off saves without a restart")
         mark = len(d.lines())
@@ -232,22 +228,17 @@ def scenario_normal(bolo):
         wait_idle(d)
         check(not any("[sound]" in l and "cue" in l for l in d.since(mark)), "no cue plays while sounds are off")
 
-        status, reply = d.post("/api/config", {"sounds": True, "sound_volume": 0.3})
-        check(status == 200, "sounds back on with volume 0.3")
+        status, reply = d.post("/api/config", {"sounds": True})
+        check(status == 200 and reply.get("needs_restart") is False, "sounds back on without a restart")
         mark = len(d.lines())
         d.command("toggle")
         line = d.wait_for(r"\[sound\] start cue", mark)
-        check(line is not None and re.search(r"at -21 dB", line) is not None,
-              "the next cue follows the new volume (0.3 squared = -21 dB)")
+        check(line is not None, "the next start cue plays")
         if line:
             print("      " + line)
         time.sleep(1.0)
         d.command("toggle")
         wait_idle(d)
-
-        before = open(d.config_path).read()
-        status, _ = d.post("/api/config", {"sound_volume": 7})
-        check(status == 500 and open(d.config_path).read() == before, "a volume outside 0..1 is rejected and saves nothing")
     finally:
         d.quit()
 

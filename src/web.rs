@@ -352,13 +352,6 @@ pub(crate) fn route(
             None => None,
         };
         let pill_show_when_idle = changes["pill_show_when_idle"].as_bool();
-        let sound_volume = match changes.get("sound_volume") {
-            None | Some(Value::Null) => None,
-            Some(v) => match v.as_f64() {
-                Some(x) if (0.0..=1.0).contains(&x) => Some(x),
-                _ => anyhow::bail!("sound_volume must be a number from 0 to 1"),
-            },
-        };
         let mut doc = ConfigDoc::load(config_path)?;
         if let Some(v) = changes["provider"].as_str() {
             doc.set(&["stt", "provider"], v.into());
@@ -368,13 +361,6 @@ pub(crate) fn route(
         }
         if let Some(v) = changes["sounds"].as_bool() {
             doc.set(&["daemon", "sounds"], v.into());
-        }
-        if let Some(v) = sound_volume {
-            // Two decimals: the slider's steps, and a tidy config file.
-            doc.set(
-                &["daemon", "sound_volume"],
-                ((v * 100.0).round() / 100.0).into(),
-            );
         }
         if let Some(v) = changes["notifications"].as_bool() {
             doc.set(&["daemon", "notifications"], v.into());
@@ -440,25 +426,19 @@ pub(crate) fn route(
             let events = shared.lock().unwrap().events.clone();
             crate::pill::save_settings(config_path, &events, pill_style, pill_show_when_idle)?;
         }
-        // Sound settings apply at once, like the pill's.
-        if changes.get("sounds").is_some() || sound_volume.is_some() {
+        // Sounds on/off applies at once, like the pill's settings.
+        if changes.get("sounds").is_some() {
             if let Ok(saved) = Config::load(config_path) {
                 crate::sound::configure(&saved.daemon);
             }
         }
-        let only_live = changes.as_object().is_some_and(|keys| {
-            keys.keys()
-                .all(|k| k.starts_with("pill_") || k == "sounds" || k == "sound_volume")
-        });
+        let only_live = changes
+            .as_object()
+            .is_some_and(|keys| keys.keys().all(|k| k.starts_with("pill_") || k == "sounds"));
         eprintln!("[web] config saved");
         return Ok(WebResponse::Json(
             json!({ "ok": true, "needs_restart": !only_live }),
         ));
-    }
-    if method == "POST" && clean_path == "/api/sound-preview" {
-        // The volume slider's feedback: plays the start cue at the saved volume.
-        crate::sound::play(crate::sound::Cue::Start);
-        return Ok(WebResponse::Json(json!({ "ok": true })));
     }
     if method == "POST" && clean_path == "/api/restart" {
         // Reply first; the restart tears this process down.
@@ -611,7 +591,6 @@ fn state(config_path: &Path, shared: &Arc<Mutex<Shared>>) -> anyhow::Result<Valu
         "provider": doc.str_at(&["stt", "provider"], "groq"),
         "model": doc.str_at(&["stt", "whisper", "model"], "small.en"),
         "sounds": doc.bool_at(&["daemon", "sounds"], true),
-        "sound_volume": doc.float_at(&["daemon", "sound_volume"], crate::config::DEFAULT_SOUND_VOLUME as f64),
         "notifications": doc.bool_at(&["daemon", "notifications"], true),
         "auto_endpoint": doc.bool_at(&["vad", "auto_endpoint"], false),
         "method": doc.str_at(&["inject", "method"], "paste"),
@@ -950,27 +929,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sound_settings_save_apply_live_and_validate() {
+    fn test_sounds_setting_saves_and_applies_live() {
         let path = scratch_config("sounds");
         let shared = Arc::new(Mutex::new(Shared::default()));
 
-        // Sounds on/off and volume apply at once: no restart.
-        let reply = post_config(r#"{"sounds":false,"sound_volume":0.35}"#, &path, &shared).unwrap();
+        // Sounds on/off applies at once: no restart.
+        let reply = post_config(r#"{"sounds":false}"#, &path, &shared).unwrap();
         assert_eq!(reply["needs_restart"], false);
-        let saved = Config::load(&path).unwrap().daemon;
-        assert!(!saved.sounds);
-        assert!((saved.sound_volume - 0.35).abs() < 1e-6);
-        let s = state(&path, &shared).unwrap();
-        assert_eq!(s["sounds"], false);
-        assert!((s["sound_volume"].as_f64().unwrap() - 0.35).abs() < 1e-6);
-
-        // A bad volume saves nothing.
-        let before = std::fs::read_to_string(&path).unwrap();
-        for bad in [r#"{"sound_volume":1.5}"#, r#"{"sound_volume":"loud"}"#] {
-            let err = post_config(bad, &path, &shared).unwrap_err();
-            assert!(err.to_string().contains("sound_volume"), "{err}");
-        }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(!Config::load(&path).unwrap().daemon.sounds);
+        assert_eq!(state(&path, &shared).unwrap()["sounds"], false);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

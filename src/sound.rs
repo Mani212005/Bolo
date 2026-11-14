@@ -1,4 +1,4 @@
-//! Sound cues: start and stop of a dictation, and a screenshot being taken.
+//! Sound cues: the start of a dictation, and a screenshot being taken.
 //!
 //! The cues are synthesised by `scripts/sounds/generate.py` and committed as
 //! `assets/sounds/*.wav`. Playing one must be instant, so nothing happens on
@@ -11,18 +11,17 @@
 //! device or its format changes (headphones in, Bluetooth profile switch).
 //!
 //! The cues go through the normal output device, so the system's mute and
-//! volume apply; `[daemon] sounds` and `sound_volume` apply on top, live.
+//! volume apply; `[daemon] sounds` applies on top, live.
 
-use crate::config::{DaemonConfig, DEFAULT_SOUND_VOLUME};
+use crate::config::DaemonConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const START_WAV: &[u8] = include_bytes!("../assets/sounds/start.wav");
-const STOP_WAV: &[u8] = include_bytes!("../assets/sounds/stop.wav");
 const CAPTURE_WAV: &[u8] = include_bytes!("../assets/sounds/capture.wav");
 
 /// Output buffer to ask for, in frames: 2.7 ms at 48 kHz. Smaller than the
@@ -35,19 +34,16 @@ const WATCH_EVERY: Duration = Duration::from_millis(500);
 pub enum Cue {
     /// Dictation started (also when resumed from a pause).
     Start,
-    /// Dictation stopped.
-    Stop,
     /// A screenshot was taken.
     Capture,
 }
 
 impl Cue {
-    const ALL: [Cue; 3] = [Cue::Start, Cue::Stop, Cue::Capture];
+    const ALL: [Cue; 2] = [Cue::Start, Cue::Capture];
 
     fn name(self) -> &'static str {
         match self {
             Cue::Start => "start",
-            Cue::Stop => "stop",
             Cue::Capture => "capture",
         }
     }
@@ -59,7 +55,6 @@ impl Cue {
     fn wav(self) -> &'static [u8] {
         match self {
             Cue::Start => START_WAV,
-            Cue::Stop => STOP_WAV,
             Cue::Capture => CAPTURE_WAV,
         }
     }
@@ -69,38 +64,14 @@ impl Cue {
 // Settings
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static VOLUME_BITS: AtomicU32 = AtomicU32::new(0);
 
-/// Applies `[daemon] sounds` and `sound_volume`; takes effect on the next cue.
+/// Linear gain every cue plays at (a 0.6 volume, squared); the cues peak at
+/// -6 dBFS or lower before this.
+const GAIN: f32 = 0.36;
+
+/// Applies `[daemon] sounds`; takes effect on the next cue.
 pub fn configure(daemon: &DaemonConfig) {
     ENABLED.store(daemon.sounds, Ordering::Relaxed);
-    VOLUME_BITS.store(
-        sanitize_volume(daemon.sound_volume).to_bits(),
-        Ordering::Relaxed,
-    );
-}
-
-/// A volume from the config file, forced into 0..=1 (NaN gets the default).
-fn sanitize_volume(volume: f32) -> f32 {
-    if volume.is_finite() {
-        volume.clamp(0.0, 1.0)
-    } else {
-        DEFAULT_SOUND_VOLUME
-    }
-}
-
-fn volume() -> f32 {
-    match VOLUME_BITS.load(Ordering::Relaxed) {
-        0 => DEFAULT_SOUND_VOLUME,
-        bits => f32::from_bits(bits),
-    }
-}
-
-/// Linear gain for a 0..=1 volume setting. Squared, so the slider follows
-/// loudness (the cues peak at -6 dBFS or lower before this).
-fn gain_for(volume: f32) -> f32 {
-    let v = volume.clamp(0.0, 1.0);
-    v * v
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +82,6 @@ struct Voice {
     cue: Cue,
     samples: Arc<[f32]>,
     pos: usize,
-    gain: f32,
     /// When the caller asked for the cue.
     requested: Instant,
     /// Whether its first buffer has been handed to the device yet.
@@ -121,8 +91,6 @@ struct Voice {
 /// What it took to get a cue's first sample to the device.
 struct Timing {
     cue: Cue,
-    /// Linear gain it plays at (the volume setting, squared).
-    gain: f32,
     /// Request until the callback that carries the first sample.
     queued: Duration,
     /// That callback until the sample leaves the device.
@@ -131,7 +99,7 @@ struct Timing {
 
 /// The cues converted to the open stream's rate and channel count.
 struct Rendered {
-    cues: [Arc<[f32]>; 3],
+    cues: [Arc<[f32]>; 2],
 }
 
 struct Engine {
@@ -168,19 +136,11 @@ fn engine() -> &'static Arc<Engine> {
     })
 }
 
-/// Plays `cue` now, if sounds are on. Never blocks.
-pub fn play(cue: Cue) {
-    play_since(cue, Instant::now());
-}
-
-/// Plays `cue`, measuring its latency from `trigger`: the moment the user's
-/// action was noticed, which may be earlier than this call.
+/// Plays `cue` now, if sounds are on. Never blocks. Its latency is measured
+/// from `trigger`: the moment the user's action was noticed, which may be
+/// earlier than this call.
 pub fn play_since(cue: Cue, trigger: Instant) {
     if !ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
-    let gain = gain_for(volume());
-    if gain <= 0.0 {
         return;
     }
     let engine = engine();
@@ -197,7 +157,6 @@ pub fn play_since(cue: Cue, trigger: Instant) {
             cue,
             samples,
             pos: 0,
-            gain,
             requested: trigger,
             reported: false,
         });
@@ -249,9 +208,8 @@ fn watch(engine: Arc<Engine>, timing_tx: Sender<Timing>, timing_rx: Receiver<Tim
 fn report(t: &Timing) {
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     eprintln!(
-        "[sound] {} cue at {:.0} dB: {:.1} ms to the first buffer + {:.1} ms output = {:.1} ms from trigger to speaker",
+        "[sound] {} cue: {:.1} ms to the first buffer + {:.1} ms output = {:.1} ms from trigger to speaker",
         t.cue.name(),
-        20.0 * t.gain.log10(),
         ms(t.queued),
         ms(t.output),
         ms(t.queued + t.output)
@@ -279,7 +237,7 @@ fn build_stream(
     engine: &Arc<Engine>,
     timing_tx: &Sender<Timing>,
     key: &DeviceKey,
-    decoded: &[Vec<f32>; 3],
+    decoded: &[Vec<f32>; 2],
 ) -> anyhow::Result<cpal::Stream> {
     let device = cpal::default_host()
         .default_output_device()
@@ -339,7 +297,6 @@ fn output_stream<T: SizedSample + FromSample<f32>>(
                 mix_voices(&mut voices, &mut mix, |voice| {
                     let _ = timing_tx.try_send(Timing {
                         cue: voice.cue,
-                        gain: voice.gain,
                         queued: voice.requested.elapsed(),
                         output,
                     });
@@ -368,7 +325,7 @@ fn mix_voices(voices: &mut Vec<Voice>, out: &mut [f32], mut first_buffer: impl F
         }
         let n = out.len().min(voice.samples.len() - voice.pos);
         for (o, &s) in out[..n].iter_mut().zip(&voice.samples[voice.pos..]) {
-            *o += s * voice.gain;
+            *o += s * GAIN;
         }
         voice.pos += n;
     }
@@ -381,7 +338,7 @@ fn mix_voices(voices: &mut Vec<Voice>, out: &mut [f32], mut first_buffer: impl F
 /// Sample rate the cue WAVs are written at.
 const SOURCE_RATE: u32 = 48_000;
 
-fn decode_cues() -> [Vec<f32>; 3] {
+fn decode_cues() -> [Vec<f32>; 2] {
     Cue::ALL.map(|cue| decode_wav(cue.wav()).unwrap_or_default())
 }
 
@@ -450,40 +407,6 @@ fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// `bolo sound-test`
-
-/// Plays each requested cue `repeat` times through the daemon's engine and
-/// prints how long each took from request to speaker.
-pub fn self_test(cues: &[Cue], repeat: usize) {
-    init();
-    // Wait for the stream to open.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while engine()
-        .rendered
-        .lock()
-        .map(|r| r.is_none())
-        .unwrap_or(true)
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    for _ in 0..repeat {
-        for &cue in cues {
-            play(cue);
-            std::thread::sleep(Duration::from_millis(450));
-        }
-    }
-}
-
-pub fn parse_cue(name: &str) -> Option<Cue> {
-    Cue::ALL.into_iter().find(|cue| cue.name() == name)
-}
-
-pub fn cue_names() -> &'static str {
-    "start, stop, capture"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,35 +452,13 @@ mod tests {
     }
 
     #[test]
-    fn cues_are_loudness_matched_and_stop_is_quieter() {
+    fn cues_are_loudness_matched() {
         let start = active_rms_db(&samples(Cue::Start));
         let capture = active_rms_db(&samples(Cue::Capture));
-        let stop = active_rms_db(&samples(Cue::Stop));
         assert!(
             (start - capture).abs() < 0.5,
             "start {start} dB, capture {capture} dB"
         );
-        assert!(
-            (start - stop - 3.0).abs() < 0.5,
-            "start {start} dB, stop {stop} dB"
-        );
-    }
-
-    #[test]
-    fn volume_is_perceptual_and_clamped() {
-        assert_eq!(gain_for(0.0), 0.0);
-        assert_eq!(gain_for(1.0), 1.0);
-        assert!((gain_for(0.5) - 0.25).abs() < 1e-6);
-        assert_eq!(gain_for(7.0), 1.0);
-        assert_eq!(gain_for(-1.0), 0.0);
-    }
-
-    #[test]
-    fn config_volume_is_clamped_and_nan_gets_the_default() {
-        assert_eq!(sanitize_volume(0.3), 0.3);
-        assert_eq!(sanitize_volume(9.0), 1.0);
-        assert_eq!(sanitize_volume(-2.0), 0.0);
-        assert_eq!(sanitize_volume(f32::NAN), DEFAULT_SOUND_VOLUME);
     }
 
     #[test]
@@ -579,12 +480,11 @@ mod tests {
         assert_eq!(render_for(&input, 48_000, 48_000, 2).len(), input.len() * 2);
     }
 
-    fn voice(cue: Cue, len: usize, gain: f32) -> Voice {
+    fn voice(cue: Cue, len: usize) -> Voice {
         Voice {
             cue,
             samples: Arc::from(vec![1.0f32; len]),
             pos: 0,
-            gain,
             requested: Instant::now(),
             reported: false,
         }
@@ -592,24 +492,16 @@ mod tests {
 
     #[test]
     fn mixer_sums_voices_applies_gain_reports_once_and_retires() {
-        let mut voices = vec![voice(Cue::Start, 6, 0.5), voice(Cue::Capture, 3, 0.25)];
+        let mut voices = vec![voice(Cue::Start, 6), voice(Cue::Capture, 3)];
         let mut reported = Vec::new();
         let mut out = [0.0f32; 4];
         mix_voices(&mut voices, &mut out, |v| reported.push(v.cue));
-        assert_eq!(out, [0.75, 0.75, 0.75, 0.5]);
+        assert_eq!(out, [2.0 * GAIN, 2.0 * GAIN, 2.0 * GAIN, GAIN]);
         assert_eq!(reported, [Cue::Start, Cue::Capture]);
         assert_eq!(voices.len(), 1, "the 3-sample voice is finished");
         let mut out = [0.0f32; 4];
         mix_voices(&mut voices, &mut out, |_| panic!("already reported"));
-        assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(out, [GAIN, GAIN, 0.0, 0.0]);
         assert!(voices.is_empty());
-    }
-
-    #[test]
-    fn cue_names_round_trip() {
-        for cue in Cue::ALL {
-            assert_eq!(parse_cue(cue.name()), Some(cue));
-        }
-        assert_eq!(parse_cue("shutter"), None);
     }
 }

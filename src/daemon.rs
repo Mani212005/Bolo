@@ -434,8 +434,6 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     Ok(x) => x,
                     Err(e) => {
                         eprintln!("[daemon] audio start failed: {e:#}");
-                        // The start cue promised a recording; this takes it back.
-                        crate::sound::play(crate::sound::Cue::Stop);
                         end_session(&shared, outcome_event("mic-unavailable", "", None));
                         continue;
                     }
@@ -483,10 +481,6 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // Before the stream is torn down, which takes a moment.
-                            if utt.reason != StopReason::Pause {
-                                crate::sound::play(crate::sound::Cue::Stop);
-                            }
                             drop(stream);
                             {
                                 let mut s = shared.lock().unwrap();
@@ -502,7 +496,6 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         Err(e) => {
                             eprintln!("[daemon] endpointer failed: {e:#}");
                             drop(stream);
-                            crate::sound::play(crate::sound::Cue::Stop);
                             end_session(&shared, outcome_event("error", "", None));
                             break;
                         }

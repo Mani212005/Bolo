@@ -347,21 +347,15 @@ impl Default for EnhanceConfig {
 #[serde(default)]
 pub struct DaemonConfig {
     pub notifications: bool,
-    /// Play the start, stop and screenshot cues.
+    /// Play the dictation start and screenshot cues.
     pub sounds: bool,
-    /// Cue volume, 0.0 (silent) to 1.0, on top of the system volume.
-    pub sound_volume: f32,
 }
-
-/// Default cue volume: audible over music without startling anyone.
-pub const DEFAULT_SOUND_VOLUME: f32 = 0.6;
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             notifications: true,
             sounds: true,
-            sound_volume: DEFAULT_SOUND_VOLUME,
         }
     }
 }
@@ -526,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn sounds_default_on_at_a_moderate_volume_and_parse() {
+    fn sounds_default_on_and_parse() {
         #[derive(Deserialize)]
         struct Wrapper {
             #[serde(default)]
@@ -534,15 +528,12 @@ mod tests {
         }
         let none = toml::from_str::<Wrapper>("").unwrap().daemon;
         assert!(none.sounds);
-        assert_eq!(none.sound_volume, DEFAULT_SOUND_VOLUME);
-        let set = toml::from_str::<Wrapper>("[daemon]\nsounds = false\nsound_volume = 0.25\n")
+        let set = toml::from_str::<Wrapper>("[daemon]\nsounds = false\n")
             .unwrap()
             .daemon;
         assert!(!set.sounds);
-        assert_eq!(set.sound_volume, 0.25);
         let shipped = Config::load(Path::new("config.toml")).unwrap().daemon;
         assert!(shipped.sounds);
-        assert_eq!(shipped.sound_volume, DEFAULT_SOUND_VOLUME);
     }
 
     #[test]
