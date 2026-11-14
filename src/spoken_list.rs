@@ -230,7 +230,7 @@ static OTHER_MARKER: LazyLock<Regex> = LazyLock::new(|| {
 /// recognised as a marker: what is left over after a layout.
 static STRAY_ORDINAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^{LEAD}(?:the\s+)?(?:{})\b",
+        r"(?i)^{LEAD}(?:the\s+)?(?:{})(?:[\s,:.;!?]|$)",
         ORDINALS[1..].join("|")
     ))
     .unwrap()
@@ -1093,6 +1093,24 @@ mod tests {
         assert_eq!(
             layout.render(Style::Numbered, str::to_string),
             "Okay, a couple of things here.\n\n1. The voiceover is not working\n2. I cannot drag clips\n3. Undo does not work\n\nFix these and tell me when done."
+        );
+    }
+
+    #[test]
+    fn a_hyphenated_ordinal_is_not_a_stray_enumerator() {
+        let sentences = s(&[
+            "First, the setup.",
+            "Second, third-party integrations are slow.",
+            "Third, second-guessing the pricing, and the second-hand market.",
+        ]);
+        let layout = layout_from_roles(&sentences, &roles(&[Item, Item, Item])).unwrap();
+        assert_eq!(
+            layout.items,
+            [
+                "The setup",
+                "third-party integrations are slow",
+                "second-guessing the pricing, and the second-hand market"
+            ]
         );
     }
 
