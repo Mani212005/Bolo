@@ -256,9 +256,9 @@ fn number_value(word: &str) -> Option<u32> {
 /// only counts when it is that number.
 ///
 /// With `mid` the position is in the middle of a clause (no comma or "and"
-/// before it), so only the unmistakable shapes count: an ordinal with its
-/// slot noun or "is" ("the third thing is"), or a counter followed by "is"
-/// or a comma or colon ("point number five is", "point five,").
+/// before it), so only the unmistakable shapes count: an ordinal or
+/// a counter followed by "is" or a comma or colon ("the third thing is",
+/// "point number five is", "point five,").
 fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<(usize, Count)> {
     if let Some(c) = ORDINAL_MARKER.captures(s) {
         let next_word = s[c.get(0).unwrap().end()..]
@@ -268,7 +268,9 @@ fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<
             .to_lowercase();
         let has_verb = c.name("verb").is_some() || c.name("nverb").is_some();
         let has_punct = c.name("punct").is_some();
-        let valid = if mid || c.name("the").is_some() {
+        let valid = if mid {
+            has_verb || has_punct
+        } else if c.name("the").is_some() {
             c.name("noun").is_some() || has_verb
         } else if c.name("ly").is_some() || has_verb || has_punct {
             true
@@ -968,6 +970,29 @@ mod tests {
             let segs = scan_sentence(text, &mut expected, true);
             let texts: Vec<&str> = segs.iter().map(|s| s.text.trim()).collect();
             assert_eq!(texts, ["install it today", "the pill."], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_mid_clause_ordinal_needs_is_or_punctuation() {
+        for text in [
+            "First, pick the second option from the menu.",
+            "First, pick the second one from the list.",
+            "First, open the second step in the wizard.",
+            "First, read the second part twice.",
+        ] {
+            let mut expected = 1;
+            assert_eq!(scan_sentence(text, &mut expected, true).len(), 1, "{text}");
+        }
+        for text in [
+            "First, install it today the second thing is the pill.",
+            "First, install it and then the second thing is the pill.",
+            "First, install it today the second thing: the pill.",
+        ] {
+            let mut expected = 1;
+            let segs = scan_sentence(text, &mut expected, true);
+            assert_eq!(segs.len(), 2, "{text}");
+            assert_eq!(segs[1].text.trim(), "the pill.", "{text}");
         }
     }
 
