@@ -208,7 +208,7 @@ static LAST_MARKER: LazyLock<Regex> = LazyLock::new(|| {
 });
 static COUNTER_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^{LEAD}(?:(?:{COUNTER_NOUNS})\s+(?:number\s+)?|number\s+)(?P<n>{}|\d+)(?:\s+(?:is|being))?\s*[,:]?\s+",
+        r"(?i)^{LEAD}(?:(?:{COUNTER_NOUNS})\s+(?:number\s+)?|number\s+)(?P<n>{}|\d+)(?P<verb>\s+(?:is|being))?\s*(?P<punct>[,:])?\s+",
         NUMBERS.join("|")
     ))
     .unwrap()
@@ -257,8 +257,8 @@ fn number_value(word: &str) -> Option<u32> {
 ///
 /// With `mid` the position is in the middle of a clause (no comma or "and"
 /// before it), so only the unmistakable shapes count: an ordinal with its
-/// slot noun or "is" ("the third thing is"), or a counter ("point number
-/// five").
+/// slot noun or "is" ("the third thing is"), or a counter followed by "is"
+/// or a comma or colon ("point number five is", "point five,").
 fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<(usize, Count)> {
     if let Some(c) = ORDINAL_MARKER.captures(s) {
         let next_word = s[c.get(0).unwrap().end()..]
@@ -282,8 +282,11 @@ fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<
         }
     }
     if let Some(c) = COUNTER_MARKER.captures(s) {
-        if let Some(n) = number_value(c.name("n").unwrap().as_str()) {
-            return Some((c.get(0).unwrap().end(), Count::Nth(n)));
+        let shaped = c.name("verb").is_some() || c.name("punct").is_some();
+        if shaped || !mid {
+            if let Some(n) = number_value(c.name("n").unwrap().as_str()) {
+                return Some((c.get(0).unwrap().end(), Count::Nth(n)));
+            }
         }
     }
     if mid {
@@ -943,6 +946,25 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_mid_clause_counter_needs_is_or_punctuation() {
+        for text in [
+            "Second, at that point three people left.",
+            "Second, after step two we shipped it.",
+            "Second, save the phone number two times.",
+        ] {
+            let mut expected = 3;
+            assert_eq!(scan_sentence(text, &mut expected, true).len(), 1, "{text}");
+        }
+        let mut expected = 3;
+        let segs = scan_sentence(
+            "The second thing is the trial and point number three is the pill.",
+            &mut expected,
+            true,
+        );
+        assert_eq!(segs.len(), 2);
     }
 
     #[test]
