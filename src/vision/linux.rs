@@ -25,9 +25,10 @@ pub fn shot_from_selection(crop: &RgbImage, frame: Option<&RgbImage>, budget: Bu
     shot::render(crop, frame, region, budget)
 }
 
-/// Captures the area the user selects in the portal dialog.
+/// Captures the area the user selects in the portal dialog. `on_captured`
+/// runs as soon as the portal hands back the selected area.
 #[allow(dead_code)]
-pub fn capture_shot(budget: Budget) -> Result<Shot> {
+pub fn capture_shot(budget: Budget, on_captured: &dyn Fn()) -> Result<Shot> {
     #[cfg(target_os = "linux")]
     {
         let fut = async {
@@ -39,6 +40,7 @@ pub fn capture_shot(budget: Budget) -> Result<Shot> {
                 }
             };
             let crop = portal_screenshot(true).await?;
+            on_captured();
             Ok(shot_from_selection(&crop, frame.as_ref(), budget))
         };
         match tokio::runtime::Handle::try_current() {
@@ -48,7 +50,7 @@ pub fn capture_shot(budget: Budget) -> Result<Shot> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = budget;
+        let _ = (budget, on_captured);
         Err(anyhow::anyhow!(
             "Linux portal screenshot unavailable on non-Linux platform"
         ))

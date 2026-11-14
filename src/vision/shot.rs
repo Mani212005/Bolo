@@ -332,7 +332,7 @@ pub fn render(
 }
 
 /// Crops `region` from `frame` and renders it.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub fn render_region(frame: &RgbImage, region: PxRect, budget: Budget) -> Shot {
     let crop = imageops::crop_imm(frame, region.x, region.y, region.w, region.h).to_image();
     render(&crop, Some(frame), Some(region), budget)

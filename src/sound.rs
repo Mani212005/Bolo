@@ -1,116 +1,507 @@
-use crate::config::Config;
-use std::fs;
-use std::path::PathBuf;
+//! Sound cues: the start of a dictation, and a screenshot being taken.
+//!
+//! The cues are synthesised by `scripts/sounds/generate.py` and committed as
+//! `assets/sounds/*.wav`. Playing one must be instant, so nothing happens on
+//! the play path but queueing: one cpal output stream on the default output
+//! device is opened when the daemon starts and stays open, its callback mixes
+//! the queued cues into silence, and the cues are decoded and converted to the
+//! device's rate once, ahead of time. There is no process to spawn (the old
+//! `afplay` path cost tens of milliseconds before the first sample) and no
+//! file to read. A watcher thread reopens the stream when the default output
+//! device or its format changes (headphones in, Bluetooth profile switch).
+//!
+//! The cues go through the normal output device, so the system's mute and
+//! volume apply; `[daemon] sounds` applies on top, live.
 
-const START_WAV_BYTES: &[u8] = include_bytes!("../assets/start-chime.wav");
+use crate::config::DaemonConfig;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SampleFormat, SizedSample};
+use crossbeam_channel::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy)]
-pub enum Chime {
+const START_WAV: &[u8] = include_bytes!("../assets/sounds/start.wav");
+const CAPTURE_WAV: &[u8] = include_bytes!("../assets/sounds/capture.wav");
+
+/// Output buffer to ask for, in frames: 2.7 ms at 48 kHz. Smaller than the
+/// default 512 for a few ms less delay; idle CPU is the same (about 0.6% of a core).
+const BUFFER_FRAMES: u32 = 128;
+/// How often the watcher checks that the stream still matches the default device.
+const WATCH_EVERY: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cue {
+    /// Dictation started (also when resumed from a pause).
     Start,
-    Stop,
+    /// A screenshot was taken.
+    Capture,
 }
 
-impl Chime {
-    fn as_str(self) -> &'static str {
+impl Cue {
+    const ALL: [Cue; 2] = [Cue::Start, Cue::Capture];
+
+    fn name(self) -> &'static str {
         match self {
-            Chime::Start => "start",
-            Chime::Stop => "stop",
+            Cue::Start => "start",
+            Cue::Capture => "capture",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn wav(self) -> &'static [u8] {
+        match self {
+            Cue::Start => START_WAV,
+            Cue::Capture => CAPTURE_WAV,
         }
     }
 }
 
-/// Ensures the start audio WAV is extracted from binary bytes to a temporary path.
-fn get_start_audio_file() -> PathBuf {
-    let tmp_path = std::env::temp_dir().join("bolo_start_chime.wav");
-    let needs_write = !tmp_path.exists()
-        || fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0) != START_WAV_BYTES.len() as u64;
-    if needs_write {
-        let _ = fs::write(&tmp_path, START_WAV_BYTES);
-    }
-    tmp_path
+// ---------------------------------------------------------------------------
+// Settings
+
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Linear gain every cue plays at (a 0.6 volume, squared); the cues peak at
+/// -6 dBFS or lower before this.
+const GAIN: f32 = 0.36;
+
+/// Applies `[daemon] sounds`; takes effect on the next cue.
+pub fn configure(daemon: &DaemonConfig) {
+    ENABLED.store(daemon.sounds, Ordering::Relaxed);
 }
 
-/// Fire-and-forget chime via afplay on macOS (at 50% volume) or paplay on Linux; never blocks the caller.
-/// Checks the latest `sounds` setting dynamically from active config so UI toggle changes apply live.
-pub fn play(cfg: &Config, chime: Chime) {
-    // Dynamic real-time lookup of sounds preference from active config.toml
-    let sounds_enabled = if let Some(home) = std::env::var_os("HOME") {
-        let local_file = std::path::PathBuf::from("config.toml");
-        let conf_file = std::path::PathBuf::from(home).join(".config/bolo/config.toml");
-        let target = if local_file.exists() {
-            &local_file
-        } else {
-            &conf_file
-        };
-        Config::load(target)
-            .map(|c| c.daemon.sounds)
-            .unwrap_or(cfg.daemon.sounds)
-    } else {
-        cfg.daemon.sounds
-    };
+// ---------------------------------------------------------------------------
+// Engine
 
-    if !sounds_enabled {
+/// A cue being mixed out.
+struct Voice {
+    cue: Cue,
+    samples: Arc<[f32]>,
+    pos: usize,
+    /// When the caller asked for the cue.
+    requested: Instant,
+    /// Whether its first buffer has been handed to the device yet.
+    reported: bool,
+}
+
+/// What it took to get a cue's first sample to the device.
+struct Timing {
+    cue: Cue,
+    /// Request until the callback that carries the first sample.
+    queued: Duration,
+    /// That callback until the sample leaves the device.
+    output: Duration,
+}
+
+/// The cues converted to the open stream's rate and channel count.
+struct Rendered {
+    cues: [Arc<[f32]>; 2],
+}
+
+struct Engine {
+    voices: Mutex<Vec<Voice>>,
+    rendered: Mutex<Option<Rendered>>,
+    /// Set by the stream's error callback; the watcher then reopens it.
+    broken: AtomicBool,
+}
+
+static ENGINE: OnceLock<Arc<Engine>> = OnceLock::new();
+
+/// Opens the output stream and starts the watcher. Idempotent; the daemon
+/// calls it at startup so the first cue does not pay for it.
+pub fn init() {
+    engine();
+}
+
+fn engine() -> &'static Arc<Engine> {
+    ENGINE.get_or_init(|| {
+        let engine = Arc::new(Engine {
+            voices: Mutex::new(Vec::new()),
+            rendered: Mutex::new(None),
+            broken: AtomicBool::new(false),
+        });
+        let (timing_tx, timing_rx) = crossbeam_channel::unbounded();
+        let watcher = Arc::clone(&engine);
+        let spawned = std::thread::Builder::new()
+            .name("bolo-sound".into())
+            .spawn(move || watch(watcher, timing_tx, timing_rx));
+        if let Err(e) = spawned {
+            eprintln!("[sound] cannot start the audio thread: {e}");
+        }
+        engine
+    })
+}
+
+/// Plays `cue` now, if sounds are on. Never blocks. Its latency is measured
+/// from `trigger`: the moment the user's action was noticed, which may be
+/// earlier than this call.
+pub fn play_since(cue: Cue, trigger: Instant) {
+    if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-
-    let path = match chime {
-        Chime::Start => get_start_audio_file(),
-        Chime::Stop => return, // Stop chime is disabled as requested by Captain
+    let engine = engine();
+    let samples = match engine.rendered.lock() {
+        Ok(rendered) => rendered.as_ref().map(|r| Arc::clone(&r.cues[cue.index()])),
+        Err(_) => None,
     };
-
-    let is_macos = cfg!(target_os = "macos");
-    let player = if is_macos { "afplay" } else { "paplay" };
-
-    let mut cmd = std::process::Command::new(player);
-    if is_macos {
-        // Set volume to 50% (-v 0.5) for crisp, clear, pleasant audio feedback
-        cmd.arg("-v").arg("0.5");
+    let Some(samples) = samples else {
+        eprintln!("[sound] {} cue dropped: no output device open", cue.name());
+        return;
+    };
+    if let Ok(mut voices) = engine.voices.lock() {
+        voices.push(Voice {
+            cue,
+            samples,
+            pos: 0,
+            requested: trigger,
+            reported: false,
+        });
     }
-    cmd.arg(&path);
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+}
 
-    match cmd.spawn() {
-        Ok(_) => eprintln!(
-            "[sound] playing {} via {player} (50% volume, {})",
-            chime.as_str(),
-            path.display()
-        ),
-        Err(e) => eprintln!("[sound] {} failed with {player}: {e}", chime.as_str()),
+/// Owns the stream (a cpal `Stream` is not `Send`): opens it, and reopens it
+/// when the default output device or its format changes or the stream dies.
+fn watch(engine: Arc<Engine>, timing_tx: Sender<Timing>, timing_rx: Receiver<Timing>) {
+    let decoded = decode_cues();
+    let mut open: Option<(cpal::Stream, DeviceKey)> = None;
+    loop {
+        let current = probe();
+        let stale = match (&open, &current) {
+            (Some((_, key)), Some(now)) => key != now || engine.broken.load(Ordering::Relaxed),
+            (None, Some(_)) => true,
+            (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if stale {
+            open = None;
+            *engine.rendered.lock().unwrap() = None;
+            engine.broken.store(false, Ordering::Relaxed);
+            if let Some(key) = current {
+                match build_stream(&engine, &timing_tx, &key, &decoded) {
+                    Ok(stream) => {
+                        eprintln!(
+                            "[sound] output \"{}\" {} Hz {} ch",
+                            key.name, key.rate, key.channels
+                        );
+                        open = Some((stream, key));
+                    }
+                    Err(e) => eprintln!("[sound] cannot open the output device: {e:#}"),
+                }
+            }
+        }
+        match timing_rx.recv_timeout(WATCH_EVERY) {
+            Ok(t) => report(&t),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+        // Drain whatever else arrived before polling the device again.
+        while let Ok(t) = timing_rx.try_recv() {
+            report(&t);
+        }
     }
+}
+
+fn report(t: &Timing) {
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    eprintln!(
+        "[sound] {} cue: {:.1} ms to the first buffer + {:.1} ms output = {:.1} ms from trigger to speaker",
+        t.cue.name(),
+        ms(t.queued),
+        ms(t.output),
+        ms(t.queued + t.output)
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceKey {
+    name: String,
+    rate: u32,
+    channels: u16,
+}
+
+fn probe() -> Option<DeviceKey> {
+    let device = cpal::default_host().default_output_device()?;
+    let config = device.default_output_config().ok()?;
+    Some(DeviceKey {
+        name: device.name().unwrap_or_else(|_| "<unknown>".into()),
+        rate: config.sample_rate().0,
+        channels: config.channels(),
+    })
+}
+
+fn build_stream(
+    engine: &Arc<Engine>,
+    timing_tx: &Sender<Timing>,
+    key: &DeviceKey,
+    decoded: &[Vec<f32>; 2],
+) -> anyhow::Result<cpal::Stream> {
+    let device = cpal::default_host()
+        .default_output_device()
+        .ok_or_else(|| anyhow::anyhow!("no default output device"))?;
+    let supported = device.default_output_config()?;
+    let mut config: cpal::StreamConfig = supported.config();
+    if let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size() {
+        if (*min..=*max).contains(&BUFFER_FRAMES) {
+            config.buffer_size = cpal::BufferSize::Fixed(BUFFER_FRAMES);
+        }
+    }
+    let rendered = Rendered {
+        cues: Cue::ALL.map(|cue| {
+            Arc::from(render_for(
+                &decoded[cue.index()],
+                SOURCE_RATE,
+                key.rate,
+                key.channels as usize,
+            ))
+        }),
+    };
+    let stream = match supported.sample_format() {
+        SampleFormat::F32 => output_stream::<f32>(&device, &config, engine, timing_tx)?,
+        SampleFormat::I16 => output_stream::<i16>(&device, &config, engine, timing_tx)?,
+        SampleFormat::U16 => output_stream::<u16>(&device, &config, engine, timing_tx)?,
+        SampleFormat::I32 => output_stream::<i32>(&device, &config, engine, timing_tx)?,
+        other => anyhow::bail!("unsupported output sample format {other:?}"),
+    };
+    stream.play()?;
+    *engine.rendered.lock().unwrap() = Some(rendered);
+    Ok(stream)
+}
+
+fn output_stream<T: SizedSample + FromSample<f32>>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    engine: &Arc<Engine>,
+    timing_tx: &Sender<Timing>,
+) -> anyhow::Result<cpal::Stream> {
+    let callback_engine = Arc::clone(engine);
+    let error_engine = Arc::clone(engine);
+    let timing_tx = timing_tx.clone();
+    let mut mix: Vec<f32> = Vec::with_capacity(16_384);
+    let stream = device.build_output_stream(
+        config,
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+            mix.clear();
+            mix.resize(data.len(), 0.0);
+            // A cue queued this very instant waits one buffer rather than
+            // blocking the audio thread on the lock.
+            if let Ok(mut voices) = callback_engine.voices.try_lock() {
+                let stamp = info.timestamp();
+                let output = stamp
+                    .playback
+                    .duration_since(&stamp.callback)
+                    .unwrap_or_default();
+                mix_voices(&mut voices, &mut mix, |voice| {
+                    let _ = timing_tx.try_send(Timing {
+                        cue: voice.cue,
+                        queued: voice.requested.elapsed(),
+                        output,
+                    });
+                });
+            }
+            for (out, &sample) in data.iter_mut().zip(mix.iter()) {
+                *out = T::from_sample(sample.clamp(-1.0, 1.0));
+            }
+        },
+        move |e| {
+            eprintln!("[sound] output stream error: {e}");
+            error_engine.broken.store(true, Ordering::Relaxed);
+        },
+        None,
+    )?;
+    Ok(stream)
+}
+
+/// Adds each voice's next slice into `out` and drops finished voices.
+/// `first_buffer` is called once per voice as its first slice goes out.
+fn mix_voices(voices: &mut Vec<Voice>, out: &mut [f32], mut first_buffer: impl FnMut(&Voice)) {
+    for voice in voices.iter_mut() {
+        if !voice.reported {
+            voice.reported = true;
+            first_buffer(voice);
+        }
+        let n = out.len().min(voice.samples.len() - voice.pos);
+        for (o, &s) in out[..n].iter_mut().zip(&voice.samples[voice.pos..]) {
+            *o += s * GAIN;
+        }
+        voice.pos += n;
+    }
+    voices.retain(|voice| voice.pos < voice.samples.len());
+}
+
+// ---------------------------------------------------------------------------
+// Decoding and conversion
+
+/// Sample rate the cue WAVs are written at.
+const SOURCE_RATE: u32 = 48_000;
+
+fn decode_cues() -> [Vec<f32>; 2] {
+    Cue::ALL.map(|cue| decode_wav(cue.wav()).unwrap_or_default())
+}
+
+/// Mono f32 samples of a 16-bit WAV.
+fn decode_wav(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
+    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes))?;
+    let spec = reader.spec();
+    anyhow::ensure!(
+        spec.channels == 1 && spec.bits_per_sample == 16 && spec.sample_rate == SOURCE_RATE,
+        "cue WAVs are 48 kHz 16-bit mono"
+    );
+    Ok(reader
+        .samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|s| s as f32 / 32768.0)
+        .collect())
+}
+
+/// Converts a mono clip to `rate`, then spreads it over `channels` interleaved.
+fn render_for(mono: &[f32], from: u32, to: u32, channels: usize) -> Vec<f32> {
+    let converted = if from == to {
+        mono.to_vec()
+    } else {
+        resample(mono, from, to)
+    };
+    let mut out = Vec::with_capacity(converted.len() * channels);
+    for s in converted {
+        out.extend(std::iter::repeat_n(s, channels));
+    }
+    out
+}
+
+/// Windowed-sinc resampler for a whole short clip. Done once per device
+/// change, so it favours quality over speed; unlike a streaming resampler it
+/// adds no delay before the first sample.
+fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    const HALF_TAPS: i64 = 32;
+    let ratio = to as f64 / from as f64;
+    let cutoff = ratio.min(1.0) * 0.97;
+    let out_len = (input.len() as f64 * ratio).round() as usize;
+    let sinc = |x: f64| {
+        if x.abs() < 1e-9 {
+            1.0
+        } else {
+            (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+        }
+    };
+    (0..out_len)
+        .map(|i| {
+            let centre = i as f64 / ratio;
+            let base = centre.floor() as i64;
+            let mut acc = 0.0f64;
+            for k in (base - HALF_TAPS + 1)..=(base + HALF_TAPS) {
+                if k < 0 || k as usize >= input.len() {
+                    continue;
+                }
+                let d = centre - k as f64;
+                let w = 0.42
+                    + 0.5 * (std::f64::consts::PI * d / HALF_TAPS as f64).cos()
+                    + 0.08 * (2.0 * std::f64::consts::PI * d / HALF_TAPS as f64).cos();
+                acc += input[k as usize] as f64 * cutoff * sinc(cutoff * d) * w;
+            }
+            acc as f32
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_embedded_audio_file() {
-        let path = get_start_audio_file();
-        assert!(
-            path.exists(),
-            "Embedded WAV should be extracted to temp directory"
-        );
-        assert_eq!(
-            fs::metadata(&path).unwrap().len(),
-            START_WAV_BYTES.len() as u64,
-            "Temp WAV file size must match embedded byte length"
-        );
+    fn samples(cue: Cue) -> Vec<f32> {
+        decode_wav(cue.wav()).expect("cue WAV decodes")
+    }
 
-        // Verify that START_WAV_BYTES is a valid WAV audio file parseable by hound
-        let reader = hound::WavReader::new(std::io::Cursor::new(START_WAV_BYTES));
-        assert!(reader.is_ok(), "Embedded audio must be valid WAV format");
-        let reader = reader.unwrap();
-        let spec = reader.spec();
-        assert!(spec.channels >= 1, "WAV must have at least 1 audio channel");
-        assert!(spec.sample_rate >= 8000, "WAV sample rate must be valid");
-        assert!(reader.duration() > 0, "WAV duration must be non-zero");
+    fn peak(s: &[f32]) -> f32 {
+        s.iter().fold(0.0, |m, v| m.max(v.abs()))
+    }
+
+    /// RMS of the samples above 2% of the peak: the generator's loudness measure.
+    fn active_rms_db(s: &[f32]) -> f32 {
+        let floor = 0.02 * peak(s);
+        let active: Vec<f32> = s.iter().copied().filter(|v| v.abs() >= floor).collect();
+        let mean = active.iter().map(|v| v * v).sum::<f32>() / active.len() as f32;
+        10.0 * mean.log10()
     }
 
     #[test]
-    fn test_play_stop_is_noop() {
-        if let Ok(cfg) = Config::load(std::path::Path::new("config.toml")) {
-            play(&cfg, Chime::Stop);
+    fn cues_are_short_quiet_and_clickless() {
+        for cue in Cue::ALL {
+            let s = samples(cue);
+            let ms = s.len() as f32 * 1000.0 / SOURCE_RATE as f32;
+            assert!((80.0..=250.0).contains(&ms), "{}: {ms} ms", cue.name());
+            assert!(peak(&s) <= 0.5, "{}: peak over -6 dBFS", cue.name());
+            assert_eq!(s[0], 0.0, "{}: must start at zero", cue.name());
+            assert_eq!(*s.last().unwrap(), 0.0, "{}: must end at zero", cue.name());
+            let step = s
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f32::max);
+            assert!(step < 0.2, "{}: click risk, step {step}", cue.name());
+            // Sound within 1.5 ms: playback adds no silence of its own.
+            let audible = s.iter().position(|v| v.abs() > 0.01 * peak(&s)).unwrap();
+            assert!(
+                audible < 72,
+                "{}: first audible sample {audible}",
+                cue.name()
+            );
         }
+    }
+
+    #[test]
+    fn cues_are_loudness_matched() {
+        let start = active_rms_db(&samples(Cue::Start));
+        let capture = active_rms_db(&samples(Cue::Capture));
+        assert!(
+            (start - capture).abs() < 0.5,
+            "start {start} dB, capture {capture} dB"
+        );
+    }
+
+    #[test]
+    fn resampling_keeps_pitch_length_and_level() {
+        // 1 kHz sine at 48 kHz -> 44.1 kHz.
+        let input: Vec<f32> = (0..4800)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin() * 0.5)
+            .collect();
+        let out = resample(&input, 48_000, 44_100);
+        assert_eq!(out.len(), 4410);
+        // Compare against the ideal sine, away from the clip edges.
+        let worst = (200..out.len() - 200)
+            .map(|i| {
+                let ideal = (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 44_100.0).sin() * 0.5;
+                (out[i] - ideal).abs()
+            })
+            .fold(0.0, f32::max);
+        assert!(worst < 0.02, "resampled sine off by {worst}");
+        assert_eq!(render_for(&input, 48_000, 48_000, 2).len(), input.len() * 2);
+    }
+
+    fn voice(cue: Cue, len: usize) -> Voice {
+        Voice {
+            cue,
+            samples: Arc::from(vec![1.0f32; len]),
+            pos: 0,
+            requested: Instant::now(),
+            reported: false,
+        }
+    }
+
+    #[test]
+    fn mixer_sums_voices_applies_gain_reports_once_and_retires() {
+        let mut voices = vec![voice(Cue::Start, 6), voice(Cue::Capture, 3)];
+        let mut reported = Vec::new();
+        let mut out = [0.0f32; 4];
+        mix_voices(&mut voices, &mut out, |v| reported.push(v.cue));
+        assert_eq!(out, [2.0 * GAIN, 2.0 * GAIN, 2.0 * GAIN, GAIN]);
+        assert_eq!(reported, [Cue::Start, Cue::Capture]);
+        assert_eq!(voices.len(), 1, "the 3-sample voice is finished");
+        let mut out = [0.0f32; 4];
+        mix_voices(&mut voices, &mut out, |_| panic!("already reported"));
+        assert_eq!(out, [GAIN, GAIN, 0.0, 0.0]);
+        assert!(voices.is_empty());
     }
 }

@@ -5,7 +5,12 @@ use super::shot::{self, Budget, Rect, Shot};
 use anyhow::Result;
 
 /// Captures the region at `pointer` (global logical points; `None` means the
-/// current pointer position).
+/// current pointer position). `on_captured` runs the moment the screen has
+/// been grabbed, before the pixels are converted or the accessibility tree is
+/// asked, so the user's "screenshot taken" cue is not held up by either.
+///
+/// The grab is in-process through CoreGraphics (about 10 ms); where that is
+/// unavailable it falls back to the `screencapture` tool (about 150 ms).
 ///
 /// The region is the accessibility element under the pointer when it is a
 /// sensible size, otherwise a 640x400 box around the pointer
@@ -13,24 +18,44 @@ use anyhow::Result;
 /// columns instead ([`shot::choose_region_in_frame`]). Only the display containing the pointer is
 /// captured, and its scale comes from the captured pixels, so secondary and
 /// non-Retina displays crop correctly.
-pub fn capture_shot(pointer: Option<(f64, f64)>, budget: Budget) -> Result<Shot> {
+pub fn capture_shot(
+    pointer: Option<(f64, f64)>,
+    budget: Budget,
+    on_captured: &dyn Fn(),
+) -> Result<Shot> {
     let pointer = match pointer {
         Some(p) => p,
         None => ffi::pointer_location()
             .ok_or_else(|| anyhow::anyhow!("could not read the pointer position"))?,
     };
-    let display = ffi::display_bounds_at(pointer)
-        .ok_or_else(|| anyhow::anyhow!("no display under the pointer"))?;
+    let (display_id, display) =
+        ffi::display_at(pointer).ok_or_else(|| anyhow::anyhow!("no display under the pointer"))?;
+    // Once, whichever path takes the picture.
+    let fired = std::cell::Cell::new(false);
+    let notify = || {
+        if !fired.replace(true) {
+            on_captured();
+        }
+    };
+    let in_process = if std::env::var_os("BOLO_CAPTURE_FALLBACK").is_some() {
+        None // debugging and tests: force the `screencapture` path
+    } else {
+        ffi::grab_display(display_id, display, &notify)
+    };
+    let frame = match in_process {
+        Some(frame) => frame,
+        None => capture_rect(display, &notify)?,
+    };
     let elements = ffi::element_frames_at(pointer);
-    let frame = capture_rect(display)?;
     Ok(shot::render_pointed(
         &frame, display, pointer, &elements, budget,
     ))
 }
 
 /// `screencapture` of one display's rectangle, at the display's native
-/// pixels, without the cursor or the shutter sound.
-fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
+/// pixels, without the cursor or the system shutter sound. `on_captured`
+/// runs as soon as `screencapture` has written the frame.
+fn capture_rect(rect: Rect, on_captured: &dyn Fn()) -> Result<image::RgbImage> {
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -51,7 +76,10 @@ fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
         .arg(&raw)
         .status();
     let decoded = match status {
-        Ok(s) if s.success() && raw.exists() => image::open(&raw).map(|img| img.to_rgb8()),
+        Ok(s) if s.success() && raw.exists() => {
+            on_captured();
+            image::open(&raw).map(|img| img.to_rgb8())
+        }
         _ => {
             let _ = std::fs::remove_dir_all(&raw_dir);
             return Err(anyhow::anyhow!(
@@ -61,6 +89,36 @@ fn capture_rect(rect: Rect) -> Result<image::RgbImage> {
     };
     let _ = std::fs::remove_dir_all(&raw_dir);
     Ok(decoded?)
+}
+
+/// Pays CoreGraphics' one-time start-up cost (about 50 ms on the first grab of
+/// a process) before anyone is waiting for a screenshot: a throwaway 8x8 grab.
+pub fn prewarm() {
+    ffi::prewarm();
+}
+
+/// RGB from a BGRA frame whose rows are `stride` bytes apart; `None` when
+/// `bytes` is too short for `width` x `height`.
+fn bgra_to_rgb(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> Option<image::RgbImage> {
+    if width == 0
+        || height == 0
+        || stride < width * 4
+        || bytes.len() < stride * (height - 1) + width * 4
+    {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    for row in bytes.chunks(stride).take(height) {
+        for px in row[..width * 4].chunks_exact(4) {
+            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        }
+    }
+    image::RgbImage::from_raw(width as u32, height as u32, rgb)
 }
 
 mod ffi {
@@ -94,6 +152,8 @@ mod ffi {
     }
 
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    /// kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little: bytes B, G, R, A.
+    const K_BGRA_PREMULTIPLIED_FIRST_LITTLE: u32 = 0x2002;
     const K_AX_VALUE_CG_POINT_TYPE: u32 = 1;
     const K_AX_VALUE_CG_SIZE_TYPE: u32 = 2;
     const K_AX_ERROR_SUCCESS: i32 = 0;
@@ -109,8 +169,17 @@ mod ffi {
             matching_display_count: *mut u32,
         ) -> i32;
         fn CGDisplayBounds(display: u32) -> CGRect;
-        fn CGEventCreate(source: *const c_void) -> *const c_void;
-        fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+        fn CGMainDisplayID() -> u32;
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGImageGetWidth(image: CFTypeRef) -> usize;
+        fn CGImageGetHeight(image: CFTypeRef) -> usize;
+        fn CGImageGetBytesPerRow(image: CFTypeRef) -> usize;
+        fn CGImageGetBitsPerPixel(image: CFTypeRef) -> usize;
+        fn CGImageGetBitmapInfo(image: CFTypeRef) -> u32;
+        fn CGImageGetDataProvider(image: CFTypeRef) -> CFTypeRef;
+        fn CGDataProviderCopyData(provider: CFTypeRef) -> CFTypeRef;
+        fn CGEventCreate(source: *const c_void) -> *mut c_void;
+        fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -121,6 +190,12 @@ mod ffi {
             encoding: u32,
         ) -> CFStringRef;
         fn CFRelease(cf: CFTypeRef);
+        fn CFDataGetLength(data: CFTypeRef) -> isize;
+        fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8;
+    }
+
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -149,13 +224,13 @@ mod ffi {
                 return None;
             }
             let p = CGEventGetLocation(event);
-            CFRelease(event);
+            CFRelease(event as CFTypeRef);
             Some((p.x, p.y))
         }
     }
 
-    /// Logical bounds of the display containing `p`.
-    pub fn display_bounds_at(p: (f64, f64)) -> Option<Rect> {
+    /// The display containing `p`: its id and logical bounds.
+    pub fn display_at(p: (f64, f64)) -> Option<(u32, Rect)> {
         unsafe {
             let mut display = 0u32;
             let mut count = 0u32;
@@ -165,12 +240,95 @@ mod ffi {
                 return None;
             }
             let b = CGDisplayBounds(display);
-            Some(Rect::new(
-                b.origin.x,
-                b.origin.y,
-                b.size.width,
-                b.size.height,
+            Some((
+                display,
+                Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height),
             ))
+        }
+    }
+
+    type CreateImageForRect = unsafe extern "C" fn(u32, CGRect) -> CFTypeRef;
+
+    /// `CGDisplayCreateImageForRect`, looked up at run time: Apple deprecated
+    /// it, so a macOS release that drops it must send Bolo to the
+    /// `screencapture` fallback rather than stop it from launching.
+    fn create_image_for_rect() -> Option<CreateImageForRect> {
+        const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+        let name = CString::new("CGDisplayCreateImageForRect").ok()?;
+        let symbol = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+        // SAFETY: the symbol has this signature in CoreGraphics.
+        (!symbol.is_null()).then(|| unsafe { std::mem::transmute(symbol) })
+    }
+
+    pub fn prewarm() {
+        unsafe {
+            if !CGPreflightScreenCaptureAccess() {
+                return;
+            }
+            let Some(create) = create_image_for_rect() else {
+                return;
+            };
+            let rect = CGRect {
+                origin: CGPoint::default(),
+                size: CGSize {
+                    width: 8.0,
+                    height: 8.0,
+                },
+            };
+            let image = create(CGMainDisplayID(), rect);
+            if !image.is_null() {
+                CFRelease(image);
+            }
+        }
+    }
+
+    /// Grabs the whole display in-process at its native pixels, without the
+    /// cursor, and calls `on_captured` the moment the image exists. `None`
+    /// (nothing called) when Screen Recording is not granted (without it the
+    /// grab would silently be the wallpaper alone), when the symbol is gone, or
+    /// when the pixels are not the 32-bit BGRA this converts.
+    pub fn grab_display(
+        display: u32,
+        bounds: Rect,
+        on_captured: &dyn Fn(),
+    ) -> Option<image::RgbImage> {
+        unsafe {
+            if !CGPreflightScreenCaptureAccess() {
+                return None;
+            }
+            let create = create_image_for_rect()?;
+            let rect = CGRect {
+                origin: CGPoint::default(),
+                size: CGSize {
+                    width: bounds.w,
+                    height: bounds.h,
+                },
+            };
+            let image = create(display, rect);
+            if image.is_null() {
+                return None;
+            }
+            let (width, height) = (CGImageGetWidth(image), CGImageGetHeight(image));
+            let stride = CGImageGetBytesPerRow(image);
+            let bgra = CGImageGetBitsPerPixel(image) == 32
+                && CGImageGetBitmapInfo(image) == K_BGRA_PREMULTIPLIED_FIRST_LITTLE;
+            if !bgra || width == 0 || height == 0 {
+                CFRelease(image);
+                return None;
+            }
+            on_captured();
+            let data = CGDataProviderCopyData(CGImageGetDataProvider(image));
+            let frame = if data.is_null() {
+                None
+            } else {
+                let len = CFDataGetLength(data) as usize;
+                let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), len);
+                let frame = super::bgra_to_rgb(bytes, width, height, stride);
+                CFRelease(data);
+                frame
+            };
+            CFRelease(image);
+            frame
         }
     }
 
@@ -258,5 +416,47 @@ mod ffi {
             CFRelease(element);
         }
         frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bgra_rows_become_rgb_and_skip_stride_padding() {
+        // 2x2 frame, 12-byte rows (8 pixel bytes + 4 padding).
+        let bytes = [
+            1, 2, 3, 255, 4, 5, 6, 255, 9, 9, 9, 9, //
+            7, 8, 9, 255, 10, 11, 12, 255, 9, 9, 9, 9,
+        ];
+        let img = bgra_to_rgb(&bytes, 2, 2, 12).unwrap();
+        assert_eq!(img.dimensions(), (2, 2));
+        assert_eq!(img.get_pixel(0, 0).0, [3, 2, 1]);
+        assert_eq!(img.get_pixel(1, 0).0, [6, 5, 4]);
+        assert_eq!(img.get_pixel(0, 1).0, [9, 8, 7]);
+        assert_eq!(img.get_pixel(1, 1).0, [12, 11, 10]);
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused() {
+        assert!(bgra_to_rgb(&[0; 15], 2, 2, 8).is_none());
+        assert!(
+            bgra_to_rgb(&[0; 16], 2, 2, 4).is_none(),
+            "stride under a row"
+        );
+        assert!(bgra_to_rgb(&[], 0, 0, 0).is_none());
+    }
+
+    #[test]
+    #[ignore = "takes a real screenshot; needs Screen Recording for the test runner"]
+    fn grabbing_the_main_display_matches_the_screencapture_fallback() {
+        let (id, bounds) = ffi::display_at((10.0, 10.0)).expect("a display at (10, 10)");
+        let fired = std::cell::Cell::new(0);
+        let fast = ffi::grab_display(id, bounds, &|| fired.set(fired.get() + 1))
+            .expect("in-process grab (is Screen Recording granted?)");
+        assert_eq!(fired.get(), 1, "the cue hook fires once, at the grab");
+        let slow = capture_rect(bounds, &|| {}).unwrap();
+        assert_eq!(fast.dimensions(), slow.dimensions());
     }
 }

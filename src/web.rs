@@ -426,12 +426,18 @@ pub(crate) fn route(
             let events = shared.lock().unwrap().events.clone();
             crate::pill::save_settings(config_path, &events, pill_style, pill_show_when_idle)?;
         }
-        let only_pill = changes
+        // Sounds on/off applies at once, like the pill's settings.
+        if changes.get("sounds").is_some() {
+            if let Ok(saved) = Config::load(config_path) {
+                crate::sound::configure(&saved.daemon);
+            }
+        }
+        let only_live = changes
             .as_object()
-            .is_some_and(|keys| keys.keys().all(|k| k.starts_with("pill_")));
+            .is_some_and(|keys| keys.keys().all(|k| k.starts_with("pill_") || k == "sounds"));
         eprintln!("[web] config saved");
         return Ok(WebResponse::Json(
-            json!({ "ok": true, "needs_restart": !only_pill }),
+            json!({ "ok": true, "needs_restart": !only_live }),
         ));
     }
     if method == "POST" && clean_path == "/api/restart" {
@@ -905,16 +911,33 @@ mod tests {
         assert_eq!(s["pill_show_when_idle"], false);
 
         // Other settings still ask for a restart, and leave the pill alone.
-        let reply = post_config(r#"{"sounds":false}"#, &path, &shared).unwrap();
+        let reply = post_config(r#"{"notifications":false}"#, &path, &shared).unwrap();
         assert_eq!(reply["needs_restart"], true);
         assert_eq!(Config::load(&path).unwrap().pill.style, PillStyle::Large);
 
         // One request can carry both kinds; the pill part still lands.
-        let reply =
-            post_config(r#"{"sounds":true,"pill_style":"hidden"}"#, &path, &shared).unwrap();
+        let reply = post_config(
+            r#"{"notifications":true,"pill_style":"hidden"}"#,
+            &path,
+            &shared,
+        )
+        .unwrap();
         assert_eq!(reply["needs_restart"], true);
         assert_eq!(Config::load(&path).unwrap().pill.style, PillStyle::Hidden);
-        assert!(Config::load(&path).unwrap().daemon.sounds);
+        assert!(Config::load(&path).unwrap().daemon.notifications);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_sounds_setting_saves_and_applies_live() {
+        let path = scratch_config("sounds");
+        let shared = Arc::new(Mutex::new(Shared::default()));
+
+        // Sounds on/off applies at once: no restart.
+        let reply = post_config(r#"{"sounds":false}"#, &path, &shared).unwrap();
+        assert_eq!(reply["needs_restart"], false);
+        assert!(!Config::load(&path).unwrap().daemon.sounds);
+        assert_eq!(state(&path, &shared).unwrap()["sounds"], false);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

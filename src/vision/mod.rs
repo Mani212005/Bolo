@@ -36,35 +36,46 @@ pub fn context_image_path(crop: &Path) -> PathBuf {
     crop.with_file_name(format!("{stem}-screen.png"))
 }
 
+/// Pays the screen grab's one-time start-up cost now, so the first screenshot
+/// is as quick as the rest. A no-op where there is none.
+pub fn prewarm() {
+    #[cfg(target_os = "macos")]
+    macos::prewarm();
+}
+
 /// Captures what the user points at into `output_path` (a PNG), plus the
 /// context image next to it.
 ///
 /// `pointer` is the logical point the user pointed at (the circle's centre
 /// on macOS, or `None` for the current pointer). Linux has no global
 /// pointer read on Wayland, so it asks the user to select the area instead.
+///
+/// `on_captured` runs once the image has actually been taken, before it is
+/// processed or saved, and not at all when the capture fails.
 pub fn capture_screen(
     pointer: Option<(f64, f64)>,
     output_path: &Path,
     budget: shot::Budget,
     context_policy: shot::ContextPolicy,
+    on_captured: &dyn Fn(),
 ) -> Result<Captured> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     #[cfg(target_os = "macos")]
     {
-        let shot = macos::capture_shot(pointer, budget)?;
+        let shot = macos::capture_shot(pointer, budget, on_captured)?;
         save_shot(&shot, output_path, context_policy)
     }
     #[cfg(target_os = "linux")]
     {
         let _ = pointer;
-        let shot = linux::capture_shot(budget)?;
+        let shot = linux::capture_shot(budget, on_captured)?;
         save_shot(&shot, output_path, context_policy)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (pointer, output_path, budget, context_policy);
+        let _ = (pointer, output_path, budget, context_policy, on_captured);
         Err(anyhow::anyhow!(
             "Screen capture not supported on this operating system"
         ))

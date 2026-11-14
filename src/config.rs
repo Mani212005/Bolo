@@ -347,6 +347,7 @@ impl Default for EnhanceConfig {
 #[serde(default)]
 pub struct DaemonConfig {
     pub notifications: bool,
+    /// Play the dictation start and screenshot cues.
     pub sounds: bool,
 }
 
@@ -516,6 +517,23 @@ mod tests {
         let shipped = Config::load(Path::new("config.toml")).unwrap().pill;
         assert_eq!(shipped.style, PillStyle::Small);
         assert!(shipped.show_when_idle);
+    }
+
+    #[test]
+    fn sounds_default_on_and_parse() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            daemon: DaemonConfig,
+        }
+        let none = toml::from_str::<Wrapper>("").unwrap().daemon;
+        assert!(none.sounds);
+        let set = toml::from_str::<Wrapper>("[daemon]\nsounds = false\n")
+            .unwrap()
+            .daemon;
+        assert!(!set.sounds);
+        let shipped = Config::load(Path::new("config.toml")).unwrap().daemon;
+        assert!(shipped.sounds);
     }
 
     #[test]

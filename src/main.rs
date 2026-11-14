@@ -920,54 +920,6 @@ mod regression_audit_tests {
     }
 
     #[test]
-    fn test_bug_7_linux_start_chime_wav() {
-        let start_wav = include_bytes!("../assets/start-chime.wav");
-        assert_eq!(
-            &start_wav[0..4],
-            b"RIFF",
-            "Audio file must start with RIFF header"
-        );
-        assert_eq!(
-            &start_wav[8..12],
-            b"WAVE",
-            "Audio file must have WAVE format identifier"
-        );
-
-        let reader = hound::WavReader::new(std::io::Cursor::new(start_wav))
-            .expect("Must parse as valid WAV");
-        let spec = reader.spec();
-        let duration_s = reader.duration() as f64 / spec.sample_rate as f64;
-
-        assert!(spec.channels >= 1);
-        assert!(spec.sample_rate >= 8000);
-        assert!(duration_s > 0.0);
-
-        if let Some(dir) = get_evidence_dir() {
-            let evidence = serde_json::json!({
-                "bug_id": 7,
-                "title": "Linux start chime never plays",
-                "verified": true,
-                "asset_path": "assets/start-chime.wav",
-                "format": "WAV (RIFF)",
-                "channels": spec.channels,
-                "sample_rate_hz": spec.sample_rate,
-                "bits_per_sample": spec.bits_per_sample,
-                "sample_format": format!("{:?}", spec.sample_format),
-                "duration_seconds": duration_s,
-                "byte_size": start_wav.len(),
-                "player_compatibility": {
-                    "linux": "paplay (supports WAV natively)",
-                    "macos": "afplay (supports WAV natively)"
-                }
-            });
-            let _ = std::fs::write(
-                dir.join("start_chime_wav_inspection.json"),
-                serde_json::to_string_pretty(&evidence).unwrap(),
-            );
-        }
-    }
-
-    #[test]
     fn test_bug_8_macos_hotkey_swallowing() {
         #[cfg(target_os = "macos")]
         {
