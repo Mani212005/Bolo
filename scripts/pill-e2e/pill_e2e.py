@@ -423,7 +423,7 @@ def run_checks(lab, args):
         outcome = lab.wait_event(lambda e: e.get("type") == "outcome", timeout=30)
         check(
             outcome is not None
-            and outcome.get("kind") in ("done", "no-speech", "error", "max-length", "paste-interrupted"),
+            and outcome.get("kind") in ("done", "no-speech", "not-caught", "error", "max-length", "paste-interrupted"),
             f"an outcome is reported ({outcome})",
         )
         idle = lab.wait_event(lambda e: e.get("type") == "phase" and e.get("phase") == "idle")

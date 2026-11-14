@@ -119,6 +119,19 @@ mod tests {
     }
 
     #[test]
+    fn comma_heavy_dictation_never_splits_into_a_bare_comma() {
+        // Splitting cuts after spaces, so a comma stays with its word: no
+        // paste is ever just "," and no words are dropped.
+        let text = "Okay, so, first, check it, and, if it is done, close it, ".repeat(40);
+        let pieces = check(&text, CC);
+        assert!(pieces.len() > 1);
+        assert!(
+            pieces.iter().all(|p| crate::stt::has_words(p)),
+            "{pieces:?}"
+        );
+    }
+
+    #[test]
     fn counts_utf16_units_like_claude_code() {
         let text = "\u{1F600}".repeat(401); // 401 chars, 802 UTF-16 units
         let pieces = check(&text, CC);

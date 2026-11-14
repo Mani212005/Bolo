@@ -115,9 +115,21 @@ impl WhisperStt {
     }
 }
 
-#[async_trait::async_trait]
-impl SttProvider for WhisperStt {
-    async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
+/// How whisper.cpp decodes the audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decode {
+    /// With timestamp tokens: the decoder moves through long audio segment by
+    /// segment. Primed by the vocabulary prompt, it sometimes writes one
+    /// punctuation token and then the end-of-window timestamp, so a whole
+    /// 30s window of speech comes back as a lone "," or "-".
+    Timestamped,
+    /// Without timestamp tokens, so the decoder cannot jump to the end of the
+    /// window. Keeps the vocabulary prompt. Used for the retry.
+    Plain,
+}
+
+impl WhisperStt {
+    async fn decode(&self, wav_bytes: Vec<u8>, mode: Decode) -> anyhow::Result<Transcript> {
         let ctx = Arc::clone(&self.ctx);
         let model = self.model.clone();
         let language = self.language.clone();
@@ -135,6 +147,7 @@ impl SttProvider for WhisperStt {
             params.set_n_threads(threads);
             params.set_language(Some(&language));
             params.set_suppress_blank(true);
+            params.set_no_timestamps(mode == Decode::Plain);
             // Bias toward the user's vocabulary (names, jargon).
             let vocab = crate::userdata::vocabulary_prompt();
             if let Some(v) = vocab.as_deref() {
@@ -154,7 +167,7 @@ impl SttProvider for WhisperStt {
             let latency_ms = t0.elapsed().as_millis();
 
             let n = state.full_n_segments();
-            let mut text = String::new();
+            let mut texts = Vec::new();
             let mut segments = Vec::new();
             for i in 0..n {
                 let seg = state.get_segment(i).context("missing segment")?;
@@ -164,61 +177,19 @@ impl SttProvider for WhisperStt {
                     "t1": seg.end_timestamp(),
                     "text": seg_text,
                 }));
-                text.push_str(&seg_text);
+                texts.push(seg_text);
             }
-            let mut text = text.trim().to_string();
+            let skipped_audio = skips_audio(&texts);
+            let text = strip_stray_lead(texts.concat().trim()).to_string();
 
-            // When initial token decoding fails on audio with pauses/silence
-            // (e.g. empty transcript or hallucinated single dash "-"),
-            // fallback parameters (suppress_blank = true, temperature_inc = 0.2) cleanly recover.
-            if is_decoding_failure(&text) {
-                eprintln!(
-                    "[whisper] initial decoding yielded {:?}; attempting fallback recovery",
-                    text
-                );
-                let mut fallback_params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-                fallback_params.set_n_threads(threads);
-                fallback_params.set_language(Some(&language));
-                fallback_params.set_suppress_blank(true);
-                fallback_params.set_temperature_inc(0.2);
-                fallback_params.set_print_special(false);
-                fallback_params.set_print_progress(false);
-                fallback_params.set_print_realtime(false);
-                fallback_params.set_print_timestamps(false);
-
-                if let Ok(mut fb_state) = ctx.create_state() {
-                    if fb_state.full(fallback_params, &samples).is_ok() {
-                        let fb_n = fb_state.full_n_segments();
-                        let mut fb_text = String::new();
-                        let mut fb_segments = Vec::new();
-                        for i in 0..fb_n {
-                            if let Some(seg) = fb_state.get_segment(i) {
-                                if let Ok(seg_text) = seg.to_str() {
-                                    fb_segments.push(serde_json::json!({
-                                        "t0": seg.start_timestamp(),
-                                        "t1": seg.end_timestamp(),
-                                        "text": seg_text,
-                                    }));
-                                    fb_text.push_str(seg_text);
-                                }
-                            }
-                        }
-                        let fb_trimmed = fb_text.trim().to_string();
-                        if !is_decoding_failure(&fb_trimmed) {
-                            eprintln!("[whisper] fallback recovered text: {}", fb_trimmed);
-                            text = fb_trimmed;
-                            segments = fb_segments;
-                        }
-                    }
-                }
-            }
-
-            let raw_json =
-                serde_json::json!({ "model": model, "segments": segments, "text": text })
-                    .to_string();
+            let raw_json = serde_json::json!({
+                "model": model, "decode": format!("{mode:?}"), "segments": segments, "text": text,
+            })
+            .to_string();
             eprintln!(
-                "[whisper] model={} latency_ms={} audio_s={:.2} rtf={:.2}",
+                "[whisper] model={} decode={:?} latency_ms={} audio_s={:.2} rtf={:.2}",
                 model,
+                mode,
                 latency_ms,
                 audio_s,
                 latency_ms as f64 / 1000.0 / audio_s.max(0.001)
@@ -227,6 +198,7 @@ impl SttProvider for WhisperStt {
                 text,
                 raw_json,
                 latency_ms,
+                skipped_audio,
             })
         })
         .await
@@ -234,24 +206,71 @@ impl SttProvider for WhisperStt {
     }
 }
 
-/// Determines if a transcription output indicates a whisper greedy decoder early-exit failure
-/// (e.g. empty text or hallucinated lone hyphen) warranting fallback recovery.
-pub fn is_decoding_failure(text: &str) -> bool {
-    let t = text.trim();
-    t.is_empty() || t == "-"
+#[async_trait::async_trait]
+impl SttProvider for WhisperStt {
+    async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
+        self.decode(wav_bytes, Decode::Timestamped).await
+    }
+
+    async fn retranscribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<Transcript> {
+        self.decode(wav_bytes, Decode::Plain).await
+    }
+}
+
+/// Whether a segment came back as punctuation only, such as the lone "," that
+/// stands in for a whole window of speech. Whisper writes no segment at all
+/// for silence, so such a segment means words went missing.
+fn skips_audio(segments: &[String]) -> bool {
+    segments.iter().any(|s| !crate::stt::has_words(s))
+}
+
+/// Drops the stray punctuation the vocabulary prompt primes at the very start,
+/// as in ", also put in Bloc-GEO" or "- Okay, so": a run of `,.;:-` and dashes
+/// followed by a space. Real leading symbols such as "-5" or ".NET" stay.
+fn strip_stray_lead(text: &str) -> &str {
+    let lead = text
+        .find(|c: char| !matches!(c, ',' | '.' | ';' | ':' | '-' | '–' | '—' | '…'))
+        .unwrap_or(text.len());
+    let rest = &text[lead..];
+    if lead > 0 && rest.starts_with(char::is_whitespace) && crate::stt::has_words(rest) {
+        rest.trim_start()
+    } else {
+        text
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn segs(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|t| t.to_string()).collect()
+    }
+
     #[test]
-    fn test_is_decoding_failure() {
-        assert!(is_decoding_failure(""));
-        assert!(is_decoding_failure("   "));
-        assert!(is_decoding_failure("-"));
-        assert!(is_decoding_failure("  -  "));
-        assert!(!is_decoding_failure("hello"));
-        assert!(!is_decoding_failure("some text with - hyphen"));
+    fn a_punctuation_only_segment_skips_audio() {
+        // rec_1794646961803: 25s of speech decoded as one segment [0s-30s] ",".
+        assert!(skips_audio(&segs(&[","])));
+        assert!(skips_audio(&segs(&["-", " Something that is missing"])));
+        assert!(skips_audio(&segs(&[" Okay.", " . ", " And then"])));
+        assert!(!skips_audio(&segs(&[" Okay, so.", " And then - fine."])));
+        assert!(!skips_audio(&[]));
+    }
+
+    #[test]
+    fn stray_leading_punctuation_is_dropped() {
+        assert_eq!(
+            strip_stray_lead(", also put in Bloc-GEO"),
+            "also put in Bloc-GEO"
+        );
+        assert_eq!(strip_stray_lead("- Okay, so"), "Okay, so");
+        assert_eq!(strip_stray_lead("... and then"), "and then");
+        assert_eq!(strip_stray_lead("Okay, so"), "Okay, so");
+        assert_eq!(strip_stray_lead("-5 degrees"), "-5 degrees");
+        assert_eq!(strip_stray_lead(".NET is fine"), ".NET is fine");
+        // Nothing but punctuation stays, so the caller sees there are no words.
+        assert_eq!(strip_stray_lead(","), ",");
+        assert_eq!(strip_stray_lead("- -"), "- -");
+        assert_eq!(strip_stray_lead(""), "");
     }
 }

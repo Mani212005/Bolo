@@ -109,8 +109,10 @@ fn main() -> anyhow::Result<()> {
             );
             let stt = stt::make_provider(&cfg)?;
             let runtime = tokio::runtime::Runtime::new()?;
-            let transcript = runtime.block_on(stt.transcribe(bytes))?;
-            println!("[result]  {}", transcript.text);
+            match runtime.block_on(stt::transcribe_speech(&*stt, bytes))? {
+                Some(transcript) => println!("[result]  {}", transcript.text),
+                None => println!("[result]  (no words heard)"),
+            }
             return Ok(());
         }
         Some("model") => {
@@ -233,10 +235,13 @@ fn main() -> anyhow::Result<()> {
     );
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let transcript = runtime.block_on(stt.transcribe(wav_bytes))?;
-
-    eprintln!("[stt-raw] {}", transcript.raw_json);
-    println!("[result]  {}", transcript.text);
+    match runtime.block_on(stt::transcribe_speech(&*stt, wav_bytes))? {
+        Some(transcript) => {
+            eprintln!("[stt-raw] {}", transcript.raw_json);
+            println!("[result]  {}", transcript.text);
+        }
+        None => println!("[result]  (no words heard)"),
+    }
     Ok(())
 }
 
@@ -589,6 +594,7 @@ mod regression_audit_tests {
                 text: "test".to_string(),
                 raw_json: "{}".to_string(),
                 latency_ms: 0,
+                skipped_audio: false,
             })
         }
     }

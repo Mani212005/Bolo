@@ -82,6 +82,7 @@ func outcomeAppearance(kind: String, detail: String) -> (state: PillState, label
         default: return (.done, "Pasted")
         }
     case "no-speech": return (.error, "No speech")
+    case "not-caught": return (.error, "Try again")
     case "mic-unavailable": return (.error, "Mic unavailable")
     case "paste-interrupted": return (.error, "Paste stopped")
     case "max-length": return (.error, "Max length")
@@ -1254,6 +1255,7 @@ func renderSnapshots(to directory: String) {
         ("done-pasted", PillAppearance(state: .done, label: "Pasted")),
         ("done-copied", PillAppearance(state: .done, label: "Copied")),
         ("error-no-speech", PillAppearance(state: .error, label: "No speech")),
+        ("error-not-caught", PillAppearance(state: .error, label: "Try again")),
         ("error-mic-unavailable", PillAppearance(state: .error, label: "Mic unavailable")),
         ("error-paste-stopped", PillAppearance(state: .error, label: "Paste stopped")),
         ("error-max-length", PillAppearance(state: .error, label: "Max length")),
@@ -1405,6 +1407,7 @@ func runSelfTest() -> Bool {
     // Results and the meter.
     expect(outcomeAppearance(kind: "done", detail: "copied").label == "Copied", "copied result says Copied")
     expect(outcomeAppearance(kind: "no-speech", detail: "").state == .error, "no speech is an error result")
+    expect(outcomeAppearance(kind: "not-caught", detail: "") == (.error, "Try again"), "a transcript without words asks to try again")
     expect(smoothed(previous: 0, next: 1) > 1 - smoothed(previous: 1, next: 0), "the meter attacks faster than it releases")
     expect(holdSeconds(.done) < holdSeconds(.error), "errors stay longer than successes")
 
