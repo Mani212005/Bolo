@@ -854,6 +854,8 @@
     cursor: pointer;
   }
   .toggle-switch input { display: none; }
+  .volume-slider { width: 140px; flex: none; accent-color: var(--accent); cursor: pointer; }
+  .volume-slider:disabled { opacity: 0.45; cursor: not-allowed; }
   .toggle-slider {
     position: absolute;
     inset: 0;
@@ -1150,12 +1152,20 @@
         <div class="setting-row">
           <div class="setting-info">
             <div class="setting-label">Audio Chimes & Feedback</div>
-            <div class="setting-desc">Play start, stop, and splice audio cues</div>
+            <div class="setting-desc">Soft cues when dictation starts and stops, and when a screenshot is taken</div>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="settingSounds">
             <span class="toggle-slider"></span>
           </label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">Cue Volume</div>
+            <div class="setting-desc">On top of your Mac's volume; the slider plays the start cue when you let go</div>
+          </div>
+          <input type="range" id="settingSoundVolume" class="volume-slider" min="0" max="100" step="5" aria-label="Cue volume">
         </div>
 
         <div class="setting-row">
@@ -1439,6 +1449,7 @@
     scratchpad: "",
     enhance_prompt: "",
     sounds: true,
+    sound_volume: 0.6,
     notifications: true,
     pill_style: "small",
     pill_show_when_idle: true,
@@ -1555,6 +1566,8 @@
     $("settingModel").value = state.model || "small.en";
     $("settingMaxLen").value = String(state.max_len || 1800000);
     $("settingSounds").checked = !!state.sounds;
+    $("settingSoundVolume").value = String(Math.round((state.sound_volume ?? 0.6) * 100));
+    $("settingSoundVolume").disabled = !state.sounds;
     $("settingNotifications").checked = !!state.notifications;
     renderPillCard();
     if ($("settingSmartCode")) $("settingSmartCode").checked = state.smart_code !== false;
@@ -2250,6 +2263,7 @@
       model: $("settingModel").value,
       max_utterance_ms: parseInt($("settingMaxLen").value, 10),
       sounds: $("settingSounds").checked,
+      sound_volume: parseInt($("settingSoundVolume").value, 10) / 100,
       notifications: $("settingNotifications").checked,
       smart_code: $("settingSmartCode") ? $("settingSmartCode").checked : true,
       jev_enabled: $("settingJevEnabled") ? $("settingJevEnabled").checked : true,
@@ -2265,7 +2279,11 @@
   $("settingProvider").onchange = saveConfig;
   $("settingModel").onchange = saveConfig;
   $("settingMaxLen").onchange = saveConfig;
-  $("settingSounds").onchange = saveConfig;
+  $("settingSounds").onchange = () => { $("settingSoundVolume").disabled = !$("settingSounds").checked; saveConfig(); };
+  $("settingSoundVolume").onchange = async () => {
+    await saveConfig();
+    if ($("settingSounds").checked) api("sound-preview", { method: "POST", body: "{}" });
+  };
   $("settingNotifications").onchange = saveConfig;
   if ($("settingSmartCode")) $("settingSmartCode").onchange = saveConfig;
   if ($("settingJevEnabled")) $("settingJevEnabled").onchange = saveConfig;

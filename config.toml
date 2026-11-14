@@ -28,7 +28,8 @@ max_utterance_ms = 1800000          # hard safety cap (30 min)
 
 [daemon]
 notifications = true                # desktop notifications on state changes
-sounds = true                       # chime on recording start/stop
+sounds = true                       # cues: dictation start, stop and screenshot taken (bolo sound-test plays them)
+sound_volume = 0.6                  # 0.0 - 1.0, on top of the system volume (the Mac's mute silences them too)
 
 [inject]
 # paste     = clipboard + synthesized Ctrl+V: whole text lands at once (default)

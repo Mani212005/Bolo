@@ -387,6 +387,11 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     }
     let stt = crate::stt::make_provider(&cfg)?;
 
+    crate::sound::configure(&cfg.daemon);
+    crate::sound::init();
+    if cfg.vision.enabled {
+        std::thread::spawn(crate::vision::prewarm);
+    }
     let events = EventHub::spawn(cfg.pill.clone());
     let shared = Arc::new(Mutex::new(Shared {
         phase: Phase::Idle,
@@ -410,10 +415,18 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let shared = Arc::clone(&shared);
         let pipeline_tx = pipeline_tx.clone();
         let vad_cfg = cfg.vad.clone();
-        let cfg_audio = cfg.clone();
         let events = events.clone();
         std::thread::spawn(move || {
             for () in start_rx.iter() {
+                // The cue is the first thing that happens, in step with the pill:
+                // it must not wait for the microphone to open (50-100 ms), and
+                // starting it first keeps most of it out of the recording.
+                let pressed = shared
+                    .lock()
+                    .unwrap()
+                    .toggle_t0
+                    .unwrap_or_else(Instant::now);
+                crate::sound::play_since(crate::sound::Cue::Start, pressed);
                 let (audio_tx, audio_rx) = crossbeam_channel::unbounded::<Vec<f32>>();
                 let (control_tx, control_rx) = crossbeam_channel::unbounded::<Control>();
                 let stream_info = crate::audio::start_capture(audio_tx);
@@ -421,6 +434,8 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                     Ok(x) => x,
                     Err(e) => {
                         eprintln!("[daemon] audio start failed: {e:#}");
+                        // The start cue promised a recording; this takes it back.
+                        crate::sound::play(crate::sound::Cue::Stop);
                         end_session(&shared, outcome_event("mic-unavailable", "", None));
                         continue;
                     }
@@ -437,7 +452,6 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         );
                     }
                 }
-                crate::sound::play(&cfg_audio, crate::sound::Chime::Start);
 
                 loop {
                     let result = vad::run_endpointer(
@@ -469,10 +483,11 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            drop(stream);
+                            // Before the stream is torn down, which takes a moment.
                             if utt.reason != StopReason::Pause {
-                                crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                                crate::sound::play(crate::sound::Cue::Stop);
                             }
+                            drop(stream);
                             {
                                 let mut s = shared.lock().unwrap();
                                 s.control_tx = None;
@@ -487,7 +502,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
                         Err(e) => {
                             eprintln!("[daemon] endpointer failed: {e:#}");
                             drop(stream);
-                            crate::sound::play(&cfg_audio, crate::sound::Chime::Stop);
+                            crate::sound::play(crate::sound::Cue::Stop);
                             end_session(&shared, outcome_event("error", "", None));
                             break;
                         }
@@ -1187,9 +1202,25 @@ fn start_capture(
     };
     let shared = Arc::clone(shared);
     let cfg = cfg.clone();
+    let trigger = Instant::now();
     std::thread::spawn(move || {
         let budget = cfg.vision.resolution.budget();
-        let result = crate::vision::capture_screen(pointer, &img_path, budget, cfg.vision.context);
+        // The cue plays the moment the screen has been grabbed; a failed
+        // capture stays silent, so a cue always means "it worked".
+        let on_captured = || {
+            eprintln!(
+                "[vision] trigger->frame_ms={}",
+                trigger.elapsed().as_millis()
+            );
+            crate::sound::play_since(crate::sound::Cue::Capture, trigger);
+        };
+        let result = crate::vision::capture_screen(
+            pointer,
+            &img_path,
+            budget,
+            cfg.vision.context,
+            &on_captured,
+        );
         if finish_capture(&shared, &session_dir, &img_path, result) {
             notify(&cfg, "Screen context captured 📸");
         }

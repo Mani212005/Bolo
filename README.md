@@ -45,6 +45,7 @@ https://github.com/user-attachments/assets/4111acdf-83bc-4493-a096-9a30876a1bbb
 - **On-Device Privacy & Local Models**: Run speech recognition completely offline with whisper.cpp and faster-whisper.
 - **Ultra-Fast Cloud Transcription**: Transcribe long voice notes in ~250ms using Groq Whisper-Large-v3.
 - **Recording Pill (macOS)**: A small always-on-top pill at the bottom of the screen shows a live mic waveform while Bolo records, a moving wave while it transcribes, and a check when the text lands. Click it to start, stop or resume; drag it anywhere; right-click it to switch style, show or hide the idle handle, or open the dashboard. Pick **Small**, **Large** (bigger waveform, timer, Pause/Resume and Stop buttons) or **Hidden** in the dashboard's *Recording indicator* card, with `bolo pill-style`, or from the pill's menu; it applies at once. It never takes focus from the app you dictate into, stays out of screenshots and screen sharing, and honours Reduce Motion and VoiceOver.
+- **Sound Cues**: Three short, soft cues so you never have to wonder: a rising pair of notes when dictation starts, a quieter falling pair when it stops, and a camera-shutter tick the instant a pointed screenshot has been taken (a failed capture stays silent, so a cue always means it worked). They play through a pre-opened output stream, a few milliseconds after the trigger, and go through your Mac's output, so system mute and volume apply. Turn them off or set their volume (default 60%) in the dashboard's *Audio Chimes & Feedback* settings, or with `[daemon] sounds` and `sound_volume`; both apply at once. `bolo sound-test` plays them. The cues are original, synthesised by `scripts/sounds/generate.py` (see [`assets/sounds/README.md`](assets/sounds/README.md)).
 - **Native Popup & History Dashboard**: Search past voice dictations, filter image-bearing transcriptions, and listen back with the built-in audio playback engine.
 - **Screen Context Lightbox & Bulk Image Copy**: Browse captured screenshots with an always-visible per-card images section, expand images in a full-screen modal, and copy single screenshots or all transcription images directly to your clipboard.
 - **One-Click AI Prompt Enhancement**: Refine raw speech and rambles into structured prompts using LLaMA-3.3-70B with settings-configurable models and API keys.
@@ -87,7 +88,7 @@ bolo
 
 *Running `bolo` makes sure the background daemon is running (which shows the recording pill on macOS); it opens no window. Run `bolo settings` for the dashboard and `bolo exit` to shut down.*
 
-On macOS the daemon also starts `bolo-pill` (built and installed next to `bolo` by `install.sh`): the small recording pill described above. It is optional; without the helper (`bolo` tells you how to install it), with `bolo pill-style hidden`, and on Linux, Bolo keeps the start chime and its "Listening / Paused / Transcribing" notification banners. While the pill is showing, those three banners are skipped as redundant; result and error banners always stay. If you hide the pill from its own menu, bring it back with `bolo pill-style small` or the dashboard.
+On macOS the daemon also starts `bolo-pill` (built and installed next to `bolo` by `install.sh`): the small recording pill described above. It is optional; without the helper (`bolo` tells you how to install it), with `bolo pill-style hidden`, and on Linux, Bolo keeps its sound cues and its "Listening / Paused / Transcribing" notification banners. While the pill is showing, those three banners are skipped as redundant; result and error banners always stay. If you hide the pill from its own menu, bring it back with `bolo pill-style small` or the dashboard.
 
 ### 2. macOS Permissions (One-Time Setup)
 
@@ -117,6 +118,7 @@ bolo pause               # Pause or resume ongoing voice recording
 bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
 bolo transcribe <file>   # Transcribe a local audio WAV file
+bolo sound-test [cue]    # Play the start, stop and capture cues, with their latency (--repeat N)
 bolo events              # Print the live event stream (phase, mic level, outcome) as JSON lines
 bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
 bolo split-preview       # Read text on stdin, print terminal paste pieces as JSON
@@ -150,6 +152,10 @@ Bolo configuration files live in `~/.config/bolo/`:
   min_angle_degrees = 315.0   # minimum circle arc angle threshold (macOS)
   resolution = "standard"     # "standard" (1568 px) or "high" (2576 px, about 3x the image tokens)
   context = "auto"            # full-screen context image: "auto", "always" or "never"
+
+  [daemon]
+  sounds = true               # start / stop / screenshot cues
+  sound_volume = 0.6          # 0.0 - 1.0, on top of the system volume
 
   [pill]
   style = "small"             # macOS recording pill: "small", "large" or "hidden"

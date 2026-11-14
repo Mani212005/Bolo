@@ -36,6 +36,11 @@ impl ConfigDoc {
             .and_then(|i| i.as_bool())
             .unwrap_or(default)
     }
+    pub fn float_at(&self, path: &[&str], default: f64) -> f64 {
+        self.item_at(path)
+            .and_then(|i| i.as_float().or_else(|| i.as_integer().map(|n| n as f64)))
+            .unwrap_or(default)
+    }
     pub fn int_at(&self, path: &[&str], default: i64) -> i64 {
         self.item_at(path)
             .and_then(|i| i.as_integer())
