@@ -396,9 +396,6 @@ static BULLET_CUE: LazyLock<Regex> = LazyLock::new(|| {
 static TASK_CUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(to-?do\s+list|to\s+do\s+list|checklist|task\s+list)\b").unwrap()
 });
-static ORDINAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(first(?:ly)?|second(?:ly)?|third(?:ly)?|fourth|fifth|finally|lastly|number\s+(?:one|two|three))\b").unwrap()
-});
 static SENTENCE_END: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[.?!]+["')\]]?\s+"#).unwrap());
 
@@ -444,20 +441,7 @@ fn explicit_list(text: &str) -> Option<(ListKind, usize)> {
     Some((kind, offset))
 }
 
-/// Three or more distinct ordinal words ("first... second... finally") make a
-/// dictated list likely, but prose uses them too, so this only nominates the
-/// run for a Jev question.
-fn ordinal_list_candidate(text: &str) -> bool {
-    let mut seen: Vec<String> = ORDINAL
-        .find_iter(text)
-        .map(|m| m.as_str().to_lowercase())
-        .collect();
-    seen.sort();
-    seen.dedup();
-    seen.len() >= 3
-}
-
-fn split_sentences(text: &str) -> Vec<String> {
+pub(crate) fn split_sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut last = 0;
     for m in SENTENCE_END.find_iter(text) {
@@ -489,6 +473,14 @@ fn opens_new_thought(sentence: &str) -> bool {
 /// transition word once the current paragraph has 2+ sentences, or after 4
 /// sentences regardless. Short dictations (under 4 sentences) are unchanged.
 pub fn paragraphize(text: &str) -> String {
+    paragraphize_keeping(text, false)
+}
+
+/// `paragraphize`, but with `keep_enumeration` the sentences from the first
+/// to the last one that opens with an enumerator ("Secondly", "Then",
+/// "Number two") stay in one paragraph, so a spoken list that was not laid
+/// out as a list is not cut apart.
+fn paragraphize_keeping(text: &str, keep_enumeration: bool) -> String {
     let trimmed = text.trim();
     if trimmed.contains('\n') {
         return trimmed.to_string();
@@ -497,10 +489,25 @@ pub fn paragraphize(text: &str) -> String {
     if sentences.len() < 4 {
         return trimmed.to_string();
     }
+    let enumerated: Vec<usize> = if keep_enumeration {
+        sentences
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| crate::spoken_list::opens_with_enumerator(s))
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let inside_list = |i: usize| match (enumerated.first(), enumerated.last()) {
+        (Some(&first), Some(&last)) => i > first && i <= last,
+        _ => false,
+    };
     let mut paragraphs: Vec<Vec<String>> = vec![Vec::new()];
-    for sentence in sentences {
+    for (i, sentence) in sentences.into_iter().enumerate() {
         let current = paragraphs.last().unwrap();
         let start_new = !current.is_empty()
+            && !inside_list(i)
             && (current.len() >= 4 || (current.len() >= 2 && opens_new_thought(&sentence)));
         if start_new {
             paragraphs.push(Vec::new());
@@ -514,40 +521,18 @@ pub fn paragraphize(text: &str) -> String {
         .join("\n\n")
 }
 
-/// Formats list items after a lead-in, keeping the lead-in as prose.
-fn listify(text: &str, items_start: usize, kind: ListKind) -> Option<String> {
+/// Lays out an explicitly requested list: the cue's sentence is the lead-in
+/// and everything after it is items.
+fn explicit_layout(text: &str, items_start: usize) -> Option<crate::spoken_list::Layout> {
+    use crate::spoken_list::Role;
     let lead = text[..items_start].trim();
-    let rest = text[items_start..].trim();
-    if rest.is_empty() {
-        return None;
+    let mut segments: Vec<(&str, Role)> = Vec::new();
+    if !lead.is_empty() {
+        segments.push((lead, Role::LeadIn));
     }
-    let list = match kind {
-        ListKind::Bullets => crate::vocab::format_bullet_list(rest),
-        ListKind::Tasks => crate::vocab::format_task_list(rest),
-    };
-    if list.lines().count() < 2 {
-        return None;
-    }
-    // Spoken items end in sentence periods; list items read better without.
-    let list = list
-        .lines()
-        .map(|l| match l.strip_suffix('.') {
-            Some(item) if !item.ends_with('.') => item,
-            _ => l,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(if lead.is_empty() {
-        list
-    } else {
-        format!("{lead}\n\n{list}")
-    })
-}
-
-/// Splits dictation that enumerates with ordinals into a lead-in and bullets.
-fn listify_ordinals(text: &str) -> Option<String> {
-    let first = ORDINAL.find(text)?;
-    listify(text, first.start(), ListKind::Bullets)
+    let items = split_sentences(text[items_start..].trim());
+    segments.extend(items.iter().map(|s| (s.as_str(), Role::Item)));
+    crate::spoken_list::layout(&segments)
 }
 
 // ---------------------------------------------------------------- the plan
@@ -575,7 +560,8 @@ enum Part {
     /// Flowing prose: consecutive speech plus short inline pastes.
     Prose {
         text: String,
-        ordinal_question: Option<usize>,
+        /// Question slot when the prose may be a spoken list.
+        list_question: Option<usize>,
     },
     Code {
         text: String,
@@ -603,18 +589,55 @@ pub struct Plan {
 #[derive(Debug, Clone)]
 enum Question {
     IsCode(String),
-    IsList(String),
+    /// A spoken dictation that may be a list, with the sentences Jev assigns
+    /// roles to.
+    IsList {
+        text: String,
+        sentences: Vec<String>,
+    },
 }
 
 /// Jev's p(code) and optional (language, confidence) for one paste.
 type CodeAnswer = (f64, Option<(String, f64)>);
 
+/// Jev's view of one list candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListAnswer {
+    /// p(the dictation is a list).
+    pub is_list: f64,
+    /// Chosen style id ("numbered" or "bullets") and its confidence.
+    pub style: Option<(String, f64)>,
+    /// Each sentence's role and its confidence, in sentence order.
+    pub roles: Vec<Option<(crate::spoken_list::Role, f64)>>,
+}
+
 /// Answers from Jev, keyed by question slot.
 #[derive(Debug, Clone, Default)]
 pub struct Answers {
     code: Vec<Option<CodeAnswer>>,
-    list: Vec<Option<f64>>,
+    list: Vec<Option<ListAnswer>>,
 }
+
+impl Answers {
+    /// Jev's p(list) for question slot `q`.
+    pub fn list_probability(&self, q: usize) -> Option<f64> {
+        self.list.get(q)?.as_ref().map(|a| a.is_list)
+    }
+}
+
+/// Jev must pick "numbered" this confidently to number a list the speaker
+/// did not count out loud.
+const NUMBERED_CONFIDENCE: f64 = 0.7;
+
+/// What makes a dictation a list, for Jev's `is_list` question.
+const LIST_TRUE: &str = "The speaker names or announces several parallel items and then gives \
+    them one after another (for example 'a couple of things: first..., second...', 'one is..., \
+    the other is...', 'number one..., number two...', 'step one..., step two...', 'things to do \
+    today: call the bank, then book the flights', 'make a list: milk, eggs, bread'). Each item is \
+    a separate request, task, step, issue, point or thing.";
+const LIST_FALSE: &str = "Ordinal or sequence words (first, then, finally, one, the second) only \
+    narrate events or steps inside flowing prose, point at specific objects ('the first image', \
+    'the second column', 'the first time'), or there is just one item.";
 
 /// Probability a Jev yes/no answer must reach before Bolo acts on it; below
 /// it the text is left exactly as it came.
@@ -663,25 +686,28 @@ impl Plan {
             if text.is_empty() {
                 return;
             }
-            let ordinal_question = if options.list_cues
-                && explicit_list(&text).is_none()
-                && ordinal_list_candidate(&text)
-            {
-                questions.push(Question::IsList(text.clone()));
-                Some(questions.len() - 1)
+            let list_question = if options.list_cues && explicit_list(&text).is_none() {
+                let sentences = split_sentences(&text);
+                crate::spoken_list::is_candidate(&text, &sentences).then(|| {
+                    questions.push(Question::IsList {
+                        text: text.clone(),
+                        sentences,
+                    });
+                    questions.len() - 1
+                })
             } else {
                 None
             };
             parts.push(Part::Prose {
                 text,
-                ordinal_question,
+                list_question,
             });
         };
 
         for piece in pieces {
             match piece {
                 TranscriptPiece::Spoken(s) => {
-                    push_inline(&mut prose, s);
+                    push_inline(&mut prose, crate::spoken_list::strip_stray_dash(s));
                 }
                 TranscriptPiece::Inserted(s) => {
                     let text = s.trim();
@@ -778,7 +804,14 @@ impl Plan {
             .iter()
             .map(|q| match q {
                 Question::IsCode(t) => json!({"kind": "pasted into a dictation", "text": t}),
-                Question::IsList(t) => json!({"kind": "spoken dictation", "text": t}),
+                Question::IsList { text, sentences } => {
+                    let sentences: serde_json::Map<String, Value> = sentences
+                        .iter()
+                        .enumerate()
+                        .map(|(k, s)| (format!("S{}", k + 1), Value::String(s.clone())))
+                        .collect();
+                    json!({"kind": "spoken dictation", "text": text, "sentences": sentences})
+                }
             })
             .collect();
         let mut state = serde_json::Map::new();
@@ -820,19 +853,52 @@ impl Plan {
                         }),
                     );
                 }
-                Question::IsList(_) => {
+                Question::IsList { sentences, .. } => {
                     questions.insert(
                         format!("list_{i}"),
                         json!({
                             "type": "noul",
                             "instructions": format!(
                                 "Did the speaker dictate `pieces[{i}].text` as a list of separate \
-                                 items, enumerated with words like first, second, next and finally, \
-                                 that should be written as bullet points? Answer no when those \
-                                 words narrate steps, reasons or events in flowing prose."
-                            )
+                                 items that should be written as a list?"
+                            ),
+                            "criteria": {"true": LIST_TRUE, "false": LIST_FALSE}
                         }),
                     );
+                    questions.insert(
+                        format!("list_style_{i}"),
+                        json!({
+                            "type": "choice",
+                            "instructions": format!(
+                                "If `pieces[{i}].text` is written as a list, which kind of list \
+                                 matches how the speaker gave the items?"
+                            ),
+                            "criteria": {
+                                "numbered": "The speaker counted the items (first, second, \
+                                    number one, step one, one is... the second is...) or gave \
+                                    ordered steps to follow in sequence.",
+                                "bullets": "The speaker gave the items without counting them, \
+                                    and their order does not matter."
+                            }
+                        }),
+                    );
+                    let roles: serde_json::Map<String, Value> = crate::spoken_list::Role::CHOICES
+                        .iter()
+                        .map(|(_, id, desc)| (id.to_string(), Value::String(desc.to_string())))
+                        .collect();
+                    for k in 1..=sentences.len() {
+                        questions.insert(
+                            format!("role_{i}_S{k}"),
+                            json!({
+                                "type": "choice",
+                                "instructions": format!(
+                                    "If `pieces[{i}].text` is written as a list, what role does \
+                                     the sentence `pieces[{i}].sentences.S{k}` play in it?"
+                                ),
+                                "criteria": roles.clone()
+                            }),
+                        );
+                    }
                 }
             }
         }
@@ -857,8 +923,21 @@ impl Plan {
                     let lang = choice(answers.get(format!("language_{i}")));
                     out.code[i] = p.map(|p| (p, lang));
                 }
-                Question::IsList(_) => {
-                    out.list[i] = noul(answers.get(format!("list_{i}")));
+                Question::IsList { sentences, .. } => {
+                    out.list[i] =
+                        noul(answers.get(format!("list_{i}"))).map(|is_list| ListAnswer {
+                            is_list,
+                            style: choice(answers.get(format!("list_style_{i}"))),
+                            roles: (1..=sentences.len())
+                                .map(|k| {
+                                    choice(answers.get(format!("role_{i}_S{k}"))).and_then(
+                                        |(id, c)| {
+                                            crate::spoken_list::Role::from_id(&id).map(|r| (r, c))
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        });
                 }
             }
         }
@@ -873,8 +952,8 @@ impl Plan {
             let block = match part {
                 Part::Prose {
                     text,
-                    ordinal_question,
-                } => self.render_prose(text, *ordinal_question, answers),
+                    list_question,
+                } => self.render_prose(text, *list_question, answers),
                 Part::Code { text, lang } => render_code(text, lang, style),
                 Part::Block(text) => text.clone(),
                 Part::Unsure { text, question } => {
@@ -902,31 +981,71 @@ impl Plan {
     fn render_prose(
         &self,
         text: &str,
-        ordinal_question: Option<usize>,
+        list_question: Option<usize>,
         answers: Option<&Answers>,
     ) -> String {
+        use crate::spoken_list::Style;
+        let prose = |t: &str| {
+            if self.options.paragraphs {
+                paragraphize(t)
+            } else {
+                t.to_string()
+            }
+        };
         if self.options.list_cues {
             if let Some((kind, start)) = explicit_list(text) {
-                if let Some(list) = listify(text, start, kind) {
-                    return list;
+                if let Some(layout) = explicit_layout(text, start) {
+                    let style = match kind {
+                        ListKind::Tasks => Style::Tasks,
+                        ListKind::Bullets => Style::Bullets,
+                    };
+                    return layout.render(style, prose);
                 }
             }
-            if let Some(q) = ordinal_question {
-                let is_list = answers
-                    .and_then(|a| a.list.get(q).copied().flatten())
-                    .is_some_and(|p| p >= ACT_ABOVE);
-                if is_list {
-                    if let Some(list) = listify_ordinals(text) {
-                        return list;
-                    }
+            if let Some(q) = list_question {
+                if let Some(layout) = self.spoken_list(q, answers) {
+                    return layout;
                 }
+                // A possible list that stays prose keeps its enumeration in
+                // one paragraph.
+                return if self.options.paragraphs {
+                    paragraphize_keeping(text, true)
+                } else {
+                    text.to_string()
+                };
             }
         }
-        if self.options.paragraphs {
-            paragraphize(text)
+        prose(text)
+    }
+
+    /// The list Jev confirmed for question slot `q`, rendered; None leaves
+    /// the dictation as spoken.
+    fn spoken_list(&self, q: usize, answers: Option<&Answers>) -> Option<String> {
+        use crate::spoken_list::Style;
+        let Question::IsList { sentences, .. } = self.questions.get(q)? else {
+            return None;
+        };
+        let answer = answers?.list.get(q)?.as_ref()?;
+        if answer.is_list < ACT_ABOVE {
+            return None;
+        }
+        let layout = crate::spoken_list::layout_from_roles(sentences, &answer.roles)?;
+        let jev_numbered = answer
+            .style
+            .as_ref()
+            .is_some_and(|(id, c)| id == "numbered" && *c >= NUMBERED_CONFIDENCE);
+        let style = if layout.counted || jev_numbered {
+            Style::Numbered
         } else {
-            text.to_string()
-        }
+            Style::Bullets
+        };
+        Some(layout.render(style, |t| {
+            if self.options.paragraphs {
+                paragraphize(t)
+            } else {
+                t.to_string()
+            }
+        }))
     }
 
     /// One-line summary for the daemon log.
@@ -1243,28 +1362,91 @@ else:
         assert!(!plan.needs_jev());
         assert_eq!(
             plan.render(None, CodeStyle::Fenced),
-            "Make a todo list:\n\n- [ ] buy milk\n- [ ] Call the bank\n- [ ] Ship the Bolo PR"
+            "Make a todo list:\n\n- [ ] Buy milk\n- [ ] Call the bank\n- [ ] Ship the Bolo PR"
         );
     }
 
     #[test]
-    fn ordinal_speech_asks_jev_and_respects_the_answer() {
+    fn spoken_list_asks_jev_once_and_respects_the_answer() {
         let text = "Here is the plan. First, fix the timeout. Second, batch the calls. Finally, add stats.";
         let pieces = vec![TranscriptPiece::Spoken(text.to_string())];
         let plan = Plan::new(&pieces, opts());
-        assert!(plan.needs_jev());
-        let yes = plan.parse_answers(&json!({"list_0": {"type": "noul", "noul": 0.9}}));
+        let req = plan.jev_request(Some("Claude"), "jev-latest").unwrap();
+        let q = req["questions"].as_object().unwrap();
+        // is_list + style + one role per sentence, in one request.
+        assert_eq!(q.len(), 2 + 4);
+        assert!(q["list_0"]["criteria"]["true"].is_string());
+        assert_eq!(
+            req["state"]["pieces"][0]["sentences"]["S2"],
+            "First, fix the timeout."
+        );
+        let role = |r: &str| json!({"type": "choice", "choice": r, "confidence": 0.9});
+        let yes = plan.parse_answers(&json!({
+            "list_0": {"type": "noul", "noul": 0.9},
+            "list_style_0": {"type": "choice", "choice": "bullets", "confidence": 0.8},
+            "role_0_S1": role("lead_in"), "role_0_S2": role("item"),
+            "role_0_S3": role("item"), "role_0_S4": role("item"),
+        }));
+        // The speaker counted, so the list is numbered.
         assert_eq!(
             plan.render(Some(&yes), CodeStyle::Fenced),
-            "Here is the plan.\n\n- fix the timeout\n- batch the calls\n- add stats"
+            "Here is the plan.\n\n1. Fix the timeout\n2. Batch the calls\n3. Add stats"
         );
-        // Not a list: it stays prose (with the usual paragraph breaks).
+        // Not a list: it stays exactly as spoken.
         let no = plan.parse_answers(&json!({"list_0": {"type": "noul", "noul": 0.2}}));
+        assert_eq!(plan.render(Some(&no), CodeStyle::Fenced), text);
+        assert_eq!(plan.render(None, CodeStyle::Fenced), text);
+    }
+
+    #[test]
+    fn uncounted_list_is_bulleted_unless_jev_is_sure_it_is_ordered() {
+        let text = "Things to do today. Call the bank. Then book the flights. Also reply to Sam.";
+        let plan = Plan::new(&[TranscriptPiece::Spoken(text.to_string())], opts());
+        let role = |r: &str| json!({"type": "choice", "choice": r, "confidence": 0.9});
+        let answers = |style: &str, c: f64| {
+            plan.parse_answers(&json!({
+                "list_0": {"type": "noul", "noul": 0.95},
+                "list_style_0": {"type": "choice", "choice": style, "confidence": c},
+                "role_0_S1": role("lead_in"), "role_0_S2": role("item"),
+                "role_0_S3": role("item"), "role_0_S4": role("item"),
+            }))
+        };
         assert_eq!(
-            plan.render(Some(&no), CodeStyle::Fenced),
-            paragraphize(text)
+            plan.render(Some(&answers("numbered", 0.5)), CodeStyle::Fenced),
+            "Things to do today.\n\n- Call the bank\n- Book the flights\n- Reply to Sam"
         );
-        assert!(!plan.render(Some(&no), CodeStyle::Fenced).contains("- "));
+        assert!(plan
+            .render(Some(&answers("numbered", 0.9)), CodeStyle::Fenced)
+            .contains("\n1. Call the bank\n2. Book the flights"));
+    }
+
+    #[test]
+    fn a_kept_enumeration_is_not_split_into_paragraphs() {
+        let text = "I want to talk about the editor. It has issues. Firstly the timeline drops \
+                    frames. Secondly the audio drifts. Thirdly undo is broken. Finally export \
+                    fails. So that is the state.";
+        let kept = paragraphize_keeping(text, true);
+        assert!(
+            kept.contains(
+                "Firstly the timeline drops frames. Secondly the audio drifts. \
+                           Thirdly undo is broken. Finally export fails."
+            ),
+            "{kept}"
+        );
+        assert!(paragraphize(text).contains("\n\nSecondly"));
+    }
+
+    #[test]
+    fn a_stray_leading_dash_is_dropped_from_speech() {
+        let pieces = vec![TranscriptPiece::Spoken(
+            "- Okay, I'm testing Bolo.".to_string(),
+        )];
+        let out = Plan::new(&pieces, opts()).render(None, CodeStyle::Fenced);
+        assert_eq!(out, "Okay, I'm testing Bolo.");
+        // A pasted Markdown list is not speech and keeps its dashes.
+        let pieces = vec![TranscriptPiece::Inserted("- one\n- two".to_string())];
+        let out = Plan::new(&pieces, opts()).render(None, CodeStyle::Fenced);
+        assert_eq!(out, "- one\n- two");
     }
 
     #[test]

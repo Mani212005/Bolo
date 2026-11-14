@@ -119,7 +119,7 @@ bolo insert-last         # Re-type the most recent transcript at cursor
 bolo enhance             # Enhance the last transcript with AI
 bolo transcribe <file>   # Transcribe a local audio WAV file
 bolo events              # Print the live event stream (phase, mic level, outcome) as JSON lines
-bolo eval-format         # Score code detection on labeled cases (--jev compares Jev)
+bolo eval-format         # Score code detection on labeled cases (--jev compares Jev, --lists scores spoken lists)
 bolo split-preview       # Read text on stdin, print terminal paste pieces as JSON
 ```
 
