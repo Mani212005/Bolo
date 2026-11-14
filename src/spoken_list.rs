@@ -195,7 +195,7 @@ const COUNTER_NOUNS: &str = "step|point|item|question|issue";
 
 static ORDINAL_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i)^{LEAD}(?P<the>the\s+)?(?P<ord>{})(?P<ly>ly)?(?:\s+(?P<noun>{SLOT_NOUNS}))?(?P<verb>\s*,?\s+(?:is|being|was|would\s+be|will\s+be))?(?P<punct>\s*[,:])?\s+",
+        r"(?i)^{LEAD}(?P<the>the\s+)?(?P<ord>{})(?P<ly>ly)?(?:\s+(?P<noun>{SLOT_NOUNS})(?P<nverb>\s*,\s+(?:is|being|was|would\s+be|will\s+be))?)?(?P<verb>\s+(?:is|being|was|would\s+be|will\s+be))?(?P<punct>\s*[,:])?\s+",
         ORDINALS.join("|")
     ))
     .unwrap()
@@ -266,7 +266,7 @@ fn marker_at(s: &str, expected: u32, allow_sequence: bool, mid: bool) -> Option<
             .next()
             .unwrap_or("")
             .to_lowercase();
-        let has_verb = c.name("verb").is_some();
+        let has_verb = c.name("verb").is_some() || c.name("nverb").is_some();
         let has_punct = c.name("punct").is_some();
         let valid = if mid || c.name("the").is_some() {
             c.name("noun").is_some() || has_verb
@@ -951,20 +951,36 @@ mod tests {
     #[test]
     fn a_mid_clause_counter_needs_is_or_punctuation() {
         for text in [
-            "Second, at that point three people left.",
-            "Second, after step two we shipped it.",
-            "Second, save the phone number two times.",
+            "First, at that point two people left.",
+            "First, after step two we shipped it.",
+            "First, save the phone number two times.",
+            "First, on question two the room agreed.",
         ] {
-            let mut expected = 3;
+            let mut expected = 1;
             assert_eq!(scan_sentence(text, &mut expected, true).len(), 1, "{text}");
         }
-        let mut expected = 3;
-        let segs = scan_sentence(
-            "The second thing is the trial and point number three is the pill.",
-            &mut expected,
-            true,
-        );
-        assert_eq!(segs.len(), 2);
+        for text in [
+            "First, install it today point number two is the pill.",
+            "First, install it today point two, the pill.",
+            "First, install it today point two: the pill.",
+        ] {
+            let mut expected = 1;
+            let segs = scan_sentence(text, &mut expected, true);
+            let texts: Vec<&str> = segs.iter().map(|s| s.text.trim()).collect();
+            assert_eq!(texts, ["install it today", "the pill."], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_comma_before_is_belongs_to_the_slot_noun_only() {
+        let mut expected = 1;
+        let segs = scan_sentence("The second thing, is the free trial.", &mut expected, true);
+        assert_eq!(segs[0].text.trim(), "the free trial.");
+
+        let mut expected = 2;
+        let segs = scan_sentence("Second, is the app slow?", &mut expected, true);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text.trim(), "is the app slow?");
     }
 
     #[test]
