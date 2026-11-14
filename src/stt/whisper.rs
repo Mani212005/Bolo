@@ -180,7 +180,7 @@ impl WhisperStt {
                 texts.push(seg_text);
             }
             let skipped_audio = skips_audio(&texts);
-            let text = strip_stray_lead(texts.concat().trim()).to_string();
+            let text = texts.concat().trim().to_string();
 
             let raw_json = serde_json::json!({
                 "model": model, "decode": format!("{mode:?}"), "segments": segments, "text": text,
@@ -224,21 +224,6 @@ fn skips_audio(segments: &[String]) -> bool {
     segments.iter().any(|s| !crate::stt::has_words(s))
 }
 
-/// Drops the stray punctuation the vocabulary prompt primes at the very start,
-/// as in ", also put in Bloc-GEO" or "- Okay, so": a run of `,.;:-` and dashes
-/// followed by a space. Real leading symbols such as "-5" or ".NET" stay.
-fn strip_stray_lead(text: &str) -> &str {
-    let lead = text
-        .find(|c: char| !matches!(c, ',' | '.' | ';' | ':' | '-' | '–' | '—' | '…'))
-        .unwrap_or(text.len());
-    let rest = &text[lead..];
-    if lead > 0 && rest.starts_with(char::is_whitespace) && crate::stt::has_words(rest) {
-        rest.trim_start()
-    } else {
-        text
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,22 +240,5 @@ mod tests {
         assert!(skips_audio(&segs(&[" Okay.", " . ", " And then"])));
         assert!(!skips_audio(&segs(&[" Okay, so.", " And then - fine."])));
         assert!(!skips_audio(&[]));
-    }
-
-    #[test]
-    fn stray_leading_punctuation_is_dropped() {
-        assert_eq!(
-            strip_stray_lead(", also put in Bloc-GEO"),
-            "also put in Bloc-GEO"
-        );
-        assert_eq!(strip_stray_lead("- Okay, so"), "Okay, so");
-        assert_eq!(strip_stray_lead("... and then"), "and then");
-        assert_eq!(strip_stray_lead("Okay, so"), "Okay, so");
-        assert_eq!(strip_stray_lead("-5 degrees"), "-5 degrees");
-        assert_eq!(strip_stray_lead(".NET is fine"), ".NET is fine");
-        // Nothing but punctuation stays, so the caller sees there are no words.
-        assert_eq!(strip_stray_lead(","), ",");
-        assert_eq!(strip_stray_lead("- -"), "- -");
-        assert_eq!(strip_stray_lead(""), "");
     }
 }
