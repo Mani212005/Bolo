@@ -20,7 +20,7 @@ impl LinuxHotkeyListener {
 }
 
 impl HotkeyListener for LinuxHotkeyListener {
-    fn start(&self, callback: Box<dyn Fn(&str) + Send + Sync>) -> Result<()> {
+    fn start(&self, callback: Box<dyn Fn(&str) -> bool + Send + Sync>) -> Result<()> {
         let devices = std::fs::read_to_string("/proc/bus/input/devices")
             .map(|text| keyboard_event_devices(&text))
             .unwrap_or_default();
@@ -58,7 +58,7 @@ fn watch_keyboard(
     device: &std::path::Path,
     device_id: usize,
     tap: Arc<Mutex<ControlTap>>,
-    callback: &(dyn Fn(&str) + Send + Sync),
+    callback: &(dyn Fn(&str) -> bool + Send + Sync),
 ) {
     let mut buf = [0u8; INPUT_EVENT_SIZE * 64];
     loop {
