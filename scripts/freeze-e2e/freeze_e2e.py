@@ -252,6 +252,25 @@ def undisturbed(seen, start, stop):
     return check(not stray, "nobody used the mouse during the hold (else rerun while idle)")
 
 
+def at_least_half(count, baseline):
+    """Moves that must reach the apps: half of what the same posted moves gave with no daemon."""
+    return count >= max(1, baseline // 2)
+
+
+def measure_baseline(lab, cx, cy):
+    """Posts the moves the checks use with no daemon (so no tap holds anything back) and counts
+    what reaches the listen-only watcher; posting speed varies by host, so checks compare to this."""
+    lab.helper_run("move", cx, cy)
+    stop = lab.watch()
+    lab.helper_run("circle", cx, cy, 60, "plain")
+    circle = len(stop())
+    stop = lab.watch()
+    t0 = time.time()
+    lab.helper_run("wiggle", cx, cy, 3, "ctrl")
+    wiggles = len(held_moves(stop(), t0, t0 + 4))
+    return circle, wiggles / 3.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bolo", default="target/release/bolo")
@@ -261,6 +280,10 @@ def main():
     x0, y0 = map(float, lab.helper_run("pointer").split())
     cx, cy = 600.0, 400.0
     try:
+        base_circle, base_rate = measure_baseline(lab, cx, cy)
+        print(f"baseline with no daemon: {base_circle} of 57 circle moves, "
+              f"{base_rate:.1f} wiggle moves per second", flush=True)
+        check(base_circle > 0 and base_rate > 0, "moves posted with no daemon reach the watcher")
         check(lab.start_daemon(), "private daemon up with its event tap")
 
         print("Control-held circle while dictating", flush=True)
@@ -281,7 +304,8 @@ def main():
         undisturbed(seen, t_press, t_circle)
         check(not held_moves(seen, t_press, t_circle), "the apps saw none of the circle's moves")
         after_up = sum(1 for t, ctrl in seen if not ctrl and t >= t_up)
-        check(after_up >= 50, f"moves reach the apps after Control up ({after_up} of 57 seen)")
+        check(at_least_half(after_up, base_circle),
+              f"moves reach the apps after Control up ({after_up} seen, baseline {base_circle})")
         log = lab.daemon_log()
         check("froze the screen at the Control press" in log, "the screen was grabbed at the press")
         check("captured context image" in log and "cut from the frame frozen" in log,
@@ -297,8 +321,9 @@ def main():
         lab.helper_run("circle", cx, cy, 60, "plain")  # Control flag gone, no key-up seen
         seen = stop()
         lab.helper_run("ctrl", "up")
-        check(sum(1 for t, ctrl in seen if not ctrl and t >= t_plain) >= 50,
-              "moves without Control reach the apps at once")
+        plain_seen = sum(1 for t, ctrl in seen if not ctrl and t >= t_plain)
+        check(at_least_half(plain_seen, base_circle),
+              f"moves without Control reach the apps at once ({plain_seen} seen, baseline {base_circle})")
 
         print("hold longer than 10 s", flush=True)
         stop = lab.watch()
@@ -311,7 +336,9 @@ def main():
         before = held_moves(seen, t_press, t_press + 9.5)
         after = held_moves(seen, t_press + 10.5, t_press + 12)
         check(not before, f"held back for the first 10 s ({len(before)} seen)")
-        check(len(after) >= 10, f"moves reach the apps after 10 s ({len(after)} seen)")
+        want = int(base_rate * 1.5)
+        check(at_least_half(len(after), want),
+              f"moves reach the apps after 10 s ({len(after)} seen, baseline {want})")
         lab.end_recording()
 
         print("daemon stops answering mid-hold (tap disabled by the system)", flush=True)
@@ -332,9 +359,9 @@ def main():
         lab.helper_run("wiggle", cx, cy, 1.5, "ctrl")
         seen_cont = stop()
         lab.helper_run("ctrl", "up")
-        check(len(held_moves(seen_stopped, t_stop, t_stop + 5)) >= 10,
+        check(at_least_half(len(held_moves(seen_stopped, t_stop, t_stop + 5)), int(base_rate * 4)),
               "with the daemon stopped, moves reach the apps")
-        check(len(held_moves(seen_cont, t_cont, t_cont + 2)) >= 10,
+        check(at_least_half(len(held_moves(seen_cont, t_cont, t_cont + 2)), int(base_rate * 1.5)),
               "after it resumes, the hold is forgotten and moves still pass")
         lab.end_recording()
 
@@ -352,7 +379,7 @@ def main():
         lab.helper_run("wiggle", cx, cy, 1.5, "ctrl")
         seen = stop()
         lab.helper_run("ctrl", "up")
-        check(len(held_moves(seen, t_kill, t_kill + 2)) >= 10,
+        check(at_least_half(len(held_moves(seen, t_kill, t_kill + 2)), int(base_rate * 1.5)),
               "with the daemon dead, Control-held moves reach the apps")
     finally:
         lab.helper_run("ctrl", "up")
