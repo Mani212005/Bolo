@@ -10,6 +10,22 @@ pub struct Frame {
     image: image::RgbImage,
 }
 
+#[cfg(test)]
+impl Frame {
+    /// A tiny stand-in for a grabbed display.
+    pub(crate) fn blank() -> Self {
+        Frame {
+            display: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            image: image::RgbImage::new(2, 2),
+        }
+    }
+}
+
 /// Grabs the whole display under `pointer` now (see [`capture_shot`] for how).
 pub fn grab_frame(pointer: (f64, f64)) -> Option<Frame> {
     let (display_id, display) = ffi::display_at(pointer)?;

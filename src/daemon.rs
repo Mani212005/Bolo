@@ -551,29 +551,12 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let shared_hotkey = Arc::clone(&shared);
         let vision_enabled = cfg.vision.enabled;
         if let Err(e) = listener.start(Box::new(move |cmd| {
-            if cmd.starts_with("mouse ")
-                || cmd.starts_with("freeze ")
-                || cmd == "thaw"
-                || cmd == "capture"
-            {
-                if !vision_enabled {
-                    return false;
-                }
-                let is_recording = match shared_hotkey.try_lock() {
-                    Ok(s) => s.phase == Phase::Recording,
-                    Err(_) => true,
-                };
-                if !is_recording {
-                    return false;
-                }
-            }
-            match std::os::unix::net::UnixStream::connect(&path) {
-                Ok(mut conn) => {
-                    // The reply is not awaited: the macOS event tap must not block.
-                    writeln!(conn, "{}", cmd).is_ok()
-                }
-                Err(_) => false,
-            }
+            forward_hotkey(
+                || UnixStream::connect(&path),
+                &shared_hotkey,
+                vision_enabled,
+                cmd,
+            )
         })) {
             eprintln!("[daemon] hotkey listener failed: {e}");
         }
@@ -1183,20 +1166,79 @@ enum CaptureStart {
     Busy,
 }
 
+/// How long a hotkey command's reply is awaited: the macOS event tap must
+/// not stall, and past this the tap acts as if the daemon declined.
+const HOTKEY_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long `freeze` waits for the grab before it says the screen is not
+/// frozen: under [`HOTKEY_REPLY_TIMEOUT`], so the tap still gets the reply.
+const FREEZE_CONFIRM: Duration = Duration::from_millis(150);
+
+/// Sends one hotkey-listener command to the daemon's socket (opened by
+/// `connect`) and says whether Bolo acted on it. The listener drops the
+/// pointer moves of a Control hold only on what this says, so it must never
+/// say yes unless the daemon did:
+/// - `freeze`: only when the daemon replied that the screen is frozen;
+/// - `mouse`: whether the hold is still on (recording, screen frozen);
+/// - the rest: whether the command was delivered.
+///
+/// Commands of the screen capture are not sent when capture is off or the
+/// daemon is not recording.
+fn forward_hotkey(
+    connect: impl FnOnce() -> std::io::Result<UnixStream>,
+    shared: &Mutex<Shared>,
+    vision_enabled: bool,
+    cmd: &str,
+) -> bool {
+    let is_freeze = cmd.starts_with("freeze ");
+    let is_mouse = cmd.starts_with("mouse ");
+    let mut still_frozen = true;
+    if is_mouse || is_freeze || cmd == "thaw" || cmd == "capture" {
+        if !vision_enabled {
+            return false;
+        }
+        // A busy daemon (`try_lock` fails) is not a verdict: the daemon
+        // decides `freeze` itself, and a hold already confirmed goes on.
+        if let Ok(s) = shared.try_lock() {
+            if s.phase != Phase::Recording {
+                return false;
+            }
+            still_frozen = s.frozen.is_some();
+        }
+    }
+    let Ok(mut conn) = connect() else {
+        return false;
+    };
+    if writeln!(conn, "{cmd}").is_err() {
+        return false;
+    }
+    if is_freeze {
+        let mut reply = String::new();
+        return conn.set_read_timeout(Some(HOTKEY_REPLY_TIMEOUT)).is_ok()
+            && BufReader::new(conn).read_line(&mut reply).is_ok()
+            && reply.trim() == "ok frozen";
+    }
+    // The reply is not awaited: the macOS event tap must not block.
+    !is_mouse || still_frozen
+}
+
 /// Control went down: while dictating with screen capture on, grabs the
 /// screen now (with `grab`, on its own thread) for the captures made before
-/// it comes up. Says whether it did.
+/// it comes up. Says whether the screen is frozen: the grab finished and
+/// got the frame, within `confirm`. A grab that fails or is slower still
+/// leaves the captures of this hold to wait for it, or fall back to live.
 fn freeze(
     shared: &Arc<Mutex<Shared>>,
     cfg: &Config,
     grab: impl FnOnce() -> Option<crate::vision::FrozenFrame> + Send + 'static,
+    confirm: Duration,
 ) -> bool {
     let mut s = shared.lock().unwrap();
     if !cfg.vision.enabled || s.phase != Phase::Recording || s.vision_session_dir.is_none() {
         return false;
     }
     let pressed = Instant::now();
-    s.frozen = Some(Frozen::start(move || {
+    let pending = Frozen::start(move || {
         let frame = grab();
         match frame {
             Some(_) => eprintln!(
@@ -1206,8 +1248,10 @@ fn freeze(
             None => eprintln!("[vision] could not freeze the screen; capturing live"),
         }
         frame
-    }));
-    true
+    });
+    s.frozen = Some(Arc::clone(&pending));
+    drop(s);
+    pending.wait_within(confirm).is_some()
 }
 
 /// Captures what the user points at (`pointer`, or the current pointer)
@@ -1429,6 +1473,30 @@ fn handle_client(
     cfg: &Config,
     config_path: &Path,
 ) -> anyhow::Result<()> {
+    handle_client_with(
+        conn,
+        shared,
+        start_tx,
+        pipeline_tx,
+        cfg,
+        config_path,
+        crate::vision::freeze_screen,
+    )
+}
+
+/// How the `freeze` command grabs the display under a pointer.
+type Grab = fn((f64, f64)) -> Option<crate::vision::FrozenFrame>;
+
+/// [`handle_client`] with the screen grab chosen, so tests need no display.
+fn handle_client_with(
+    conn: UnixStream,
+    shared: &Arc<Mutex<Shared>>,
+    start_tx: &Sender<()>,
+    pipeline_tx: &Sender<PipelineMsg>,
+    cfg: &Config,
+    config_path: &Path,
+    grab: Grab,
+) -> anyhow::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut conn = conn;
     let mut line = String::new();
@@ -1480,7 +1548,7 @@ fn handle_client(
             ) {
                 (Some(x), Some(y)) => {
                     let pointer = (x, y);
-                    if freeze(shared, cfg, move || crate::vision::freeze_screen(pointer)) {
+                    if freeze(shared, cfg, move || grab(pointer), FREEZE_CONFIRM) {
                         "ok frozen".to_string()
                     } else {
                         "ok".to_string()
@@ -1809,10 +1877,18 @@ mod tests {
             Some(std::env::temp_dir().join("bolo-freeze-test"));
         let grabs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&grabs);
-        assert!(freeze(&shared, &cfg, move || {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            None
-        }));
+        assert!(
+            !freeze(
+                &shared,
+                &cfg,
+                move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    None
+                },
+                Duration::from_secs(5)
+            ),
+            "a grab that fails is not a frozen screen"
+        );
         let pending = shared.lock().unwrap().frozen.clone().expect("frozen");
         assert!(
             pending.wait().is_none(),
@@ -1824,6 +1900,232 @@ mod tests {
             "ok"
         );
         assert!(!frozen(&shared));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod control_hold {
+        use super::*;
+        use crate::hotkey::macos::testing::{play, recorded_circle};
+
+        /// The moves of the recorded hold that follow the Control press.
+        const HELD_MOVES: usize = 77;
+
+        /// The hotkey listener's side of the daemon socket: each command goes
+        /// through the real [`forward_hotkey`] to the real socket handler,
+        /// which grabs the screen with `grab`.
+        struct Link {
+            shared: Arc<Mutex<Shared>>,
+            cfg: Config,
+            grab: Grab,
+            servers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+        }
+
+        impl Link {
+            fn new(grab: Grab) -> Self {
+                let (shared, _hub, mut cfg) = daemon_state();
+                cfg.vision.enabled = true;
+                {
+                    let mut s = shared.lock().unwrap();
+                    s.set_phase(Phase::Recording);
+                    s.vision_session_dir = Some(std::env::temp_dir().join("bolo-hold-test"));
+                }
+                Self {
+                    shared,
+                    cfg,
+                    grab,
+                    servers: Mutex::default(),
+                }
+            }
+
+            fn send(&self, cmd: &str) -> bool {
+                forward_hotkey(
+                    || {
+                        let (server, client) = UnixStream::pair()?;
+                        let (shared, cfg, grab) =
+                            (Arc::clone(&self.shared), self.cfg.clone(), self.grab);
+                        self.servers
+                            .lock()
+                            .unwrap()
+                            .push(std::thread::spawn(move || {
+                                let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+                                let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+                                // The listener may hang up before the reply.
+                                let _ = handle_client_with(
+                                    server,
+                                    &shared,
+                                    &start_tx,
+                                    &pipeline_tx,
+                                    &cfg,
+                                    Path::new("config.toml"),
+                                    grab,
+                                );
+                            }));
+                        Ok(client)
+                    },
+                    &self.shared,
+                    self.cfg.vision.enabled,
+                    cmd,
+                )
+            }
+
+            /// Waits for every command sent so far to be handled.
+            fn settle(&self) {
+                let servers: Vec<_> = self.servers.lock().unwrap().drain(..).collect();
+                for server in servers {
+                    server.join().unwrap();
+                }
+            }
+
+            /// The recorded hold; how many of its moves the tap kept from the apps.
+            fn hold(&self) -> usize {
+                let held = play(&recorded_circle(), &|cmd| self.send(cmd), |_| self.settle());
+                self.settle();
+                held
+            }
+        }
+
+        fn blank_grab(_: (f64, f64)) -> Option<crate::vision::FrozenFrame> {
+            Some(crate::vision::FrozenFrame::blank())
+        }
+
+        fn failed_grab(_: (f64, f64)) -> Option<crate::vision::FrozenFrame> {
+            None
+        }
+
+        #[test]
+        fn a_confirmed_freeze_holds_the_moves_back_until_control_comes_up() {
+            let link = Link::new(blank_grab);
+            assert_eq!(link.hold(), HELD_MOVES);
+            assert!(
+                link.shared.lock().unwrap().frozen.is_none(),
+                "Control up thaws the daemon"
+            );
+        }
+
+        #[test]
+        fn a_daemon_that_declines_holds_nothing_back() {
+            let link = Link::new(blank_grab);
+            link.shared.lock().unwrap().set_phase(Phase::Idle);
+            assert_eq!(link.hold(), 0, "not recording");
+
+            let mut link = Link::new(blank_grab);
+            link.cfg.vision.enabled = false;
+            assert_eq!(link.hold(), 0, "screen capture off");
+            assert!(link.shared.lock().unwrap().frozen.is_none());
+        }
+
+        #[test]
+        fn no_session_directory_holds_nothing_back() {
+            let link = Link::new(blank_grab);
+            link.shared.lock().unwrap().vision_session_dir = None;
+            assert_eq!(link.hold(), 0);
+            assert!(link.shared.lock().unwrap().frozen.is_none());
+        }
+
+        #[test]
+        fn a_failed_grab_holds_nothing_back() {
+            let link = Link::new(failed_grab);
+            assert_eq!(link.hold(), 0);
+        }
+
+        #[test]
+        fn an_unreachable_daemon_holds_nothing_back() {
+            let link = Link::new(blank_grab);
+            let held = play(
+                &recorded_circle(),
+                &|cmd| {
+                    forward_hotkey(
+                        || Err(std::io::ErrorKind::ConnectionRefused.into()),
+                        &link.shared,
+                        true,
+                        cmd,
+                    )
+                },
+                |_| {},
+            );
+            assert_eq!(held, 0);
+        }
+
+        /// Plays the hold while another thread owns the daemon's state from
+        /// just before the Control press: the listener cannot tell the phase
+        /// and sends the command, which the daemon answers only afterwards.
+        fn hold_while_daemon_busy(
+            link: &Link,
+            busy: impl FnOnce(&mut Shared) + Send + 'static,
+        ) -> usize {
+            let shared = Arc::clone(&link.shared);
+            let mut busy = Some(busy);
+            let mut owner = None;
+            let held = play(&recorded_circle(), &|cmd| link.send(cmd), |i| match i {
+                1 => {
+                    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+                    let shared = Arc::clone(&shared);
+                    let busy = busy.take().unwrap();
+                    owner = Some(std::thread::spawn(move || {
+                        let mut s = shared.lock().unwrap();
+                        locked_tx.send(()).unwrap();
+                        std::thread::sleep(Duration::from_millis(300));
+                        busy(&mut s);
+                    }));
+                    locked_rx.recv().unwrap();
+                }
+                2 => {
+                    owner.take().unwrap().join().unwrap();
+                    link.settle();
+                }
+                _ => {}
+            });
+            link.settle();
+            held
+        }
+
+        #[test]
+        fn a_phase_change_racing_the_press_holds_nothing_back() {
+            let link = Link::new(blank_grab);
+            let held = hold_while_daemon_busy(&link, |s| s.set_phase(Phase::Processing));
+            assert_eq!(held, 0);
+        }
+
+        #[test]
+        fn a_daemon_too_slow_to_confirm_holds_nothing_back() {
+            let link = Link::new(blank_grab);
+            let held = hold_while_daemon_busy(&link, |_| {});
+            assert_eq!(held, 0, "the reply came after the tap stopped waiting");
+        }
+
+        #[test]
+        fn stopping_dictation_mid_hold_gives_the_pointer_back() {
+            let link = Link::new(blank_grab);
+            let events = recorded_circle();
+            let stop = events.len() / 2;
+            let held = play(&events, &|cmd| link.send(cmd), |i| {
+                link.settle();
+                if i == stop {
+                    // What Ctrl+Space does: the phase leaves Recording at once,
+                    // and the session end clears the frozen frame.
+                    let mut s = link.shared.lock().unwrap();
+                    s.set_phase(Phase::Processing);
+                    s.frozen = None;
+                }
+            });
+            let before_stop = events[2..stop].iter().filter(|e| e.1 == 5).count();
+            assert!(before_stop > 0 && before_stop < HELD_MOVES);
+            assert_eq!(held, before_stop, "no move is held back after the stop");
+        }
+
+        #[test]
+        fn a_daemon_thawed_mid_hold_gives_the_pointer_back() {
+            let link = Link::new(blank_grab);
+            let events = recorded_circle();
+            let thaw = events.len() / 2;
+            let held = play(&events, &|cmd| link.send(cmd), |i| {
+                link.settle();
+                if i == thaw {
+                    link.shared.lock().unwrap().frozen = None;
+                }
+            });
+            assert_eq!(held, events[2..thaw].iter().filter(|e| e.1 == 5).count());
+        }
     }
 
     #[test]

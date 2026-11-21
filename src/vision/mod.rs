@@ -50,6 +50,16 @@ pub struct FrozenFrame {
     pub(crate) frame: macos::Frame,
 }
 
+#[cfg(all(test, target_os = "macos"))]
+impl FrozenFrame {
+    /// A stand-in for a grabbed display, for tests that need no screen.
+    pub(crate) fn blank() -> Self {
+        Self {
+            frame: macos::Frame::blank(),
+        }
+    }
+}
+
 /// Grabs the display under `pointer` now, for the captures made while
 /// Control stays down. `None` where the platform has no such grab or the
 /// grab failed.

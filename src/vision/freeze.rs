@@ -8,6 +8,7 @@
 //! started.
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// A grab started at a Control press, finished or still running.
 pub struct Pending<F> {
@@ -44,6 +45,19 @@ impl<F: Send + Sync + 'static> Pending<F> {
     }
 }
 
+impl<F> Pending<F> {
+    /// The grabbed frame if the grab finishes within `limit`; `None` when it
+    /// fails or is still running.
+    pub fn wait_within(&self, limit: Duration) -> Option<Arc<F>> {
+        let frame = self.frame.lock().unwrap();
+        let (frame, _) = self
+            .done
+            .wait_timeout_while(frame, limit, |f| f.is_none())
+            .unwrap();
+        (*frame).clone().flatten()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +74,19 @@ mod tests {
         assert_eq!(pending.wait().as_deref(), Some(&pressed));
         // Later captures of the same hold get the same frame.
         assert_eq!(pending.wait().as_deref(), Some(&pressed));
+    }
+
+    #[test]
+    fn a_grab_is_awaited_only_up_to_the_limit() {
+        let slow = Pending::start(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Some(1u8)
+        });
+        assert_eq!(slow.wait_within(Duration::from_millis(20)), None);
+        assert_eq!(slow.wait().as_deref(), Some(&1));
+        assert_eq!(slow.wait_within(Duration::ZERO).as_deref(), Some(&1));
+        let failed = Pending::<u8>::start(|| None);
+        assert_eq!(failed.wait_within(Duration::from_secs(5)), None);
     }
 
     #[test]
