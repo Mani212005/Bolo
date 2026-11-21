@@ -49,6 +49,7 @@ pub fn capture_shot(
     let live;
     let frame = match frozen_image(frozen, display) {
         Some(image) => {
+            eprintln!("[vision] cut from the frame frozen at the Control press");
             on_captured();
             image
         }
