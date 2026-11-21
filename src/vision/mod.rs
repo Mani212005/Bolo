@@ -1,3 +1,4 @@
+pub mod freeze;
 pub mod gesture;
 #[cfg(any(target_os = "linux", test))]
 pub mod linux;
@@ -43,6 +44,27 @@ pub fn prewarm() {
     macos::prewarm();
 }
 
+/// One display as it was when Control went down ([`freeze`]).
+pub struct FrozenFrame {
+    #[cfg(target_os = "macos")]
+    pub(crate) frame: macos::Frame,
+}
+
+/// Grabs the display under `pointer` now, for the captures made while
+/// Control stays down. `None` where the platform has no such grab or the
+/// grab failed.
+pub fn freeze_screen(pointer: (f64, f64)) -> Option<FrozenFrame> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::grab_frame(pointer).map(|frame| FrozenFrame { frame })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pointer;
+        None
+    }
+}
+
 /// Captures what the user points at into `output_path` (a PNG), plus the
 /// context image next to it.
 ///
@@ -50,10 +72,15 @@ pub fn prewarm() {
 /// on macOS, or `None` for the current pointer). Linux has no global
 /// pointer read on Wayland, so it asks the user to select the area instead.
 ///
+/// `frozen` is the screen grabbed when Control went down; when it shows the
+/// display under `pointer`, the capture is cut from it instead of from the
+/// screen as it is now.
+///
 /// `on_captured` runs once the image has actually been taken, before it is
 /// processed or saved, and not at all when the capture fails.
 pub fn capture_screen(
     pointer: Option<(f64, f64)>,
+    frozen: Option<&FrozenFrame>,
     output_path: &Path,
     budget: shot::Budget,
     context_policy: shot::ContextPolicy,
@@ -64,18 +91,26 @@ pub fn capture_screen(
     }
     #[cfg(target_os = "macos")]
     {
-        let shot = macos::capture_shot(pointer, budget, on_captured)?;
+        let frozen = frozen.map(|f| &f.frame);
+        let shot = macos::capture_shot(pointer, frozen, budget, on_captured)?;
         save_shot(&shot, output_path, context_policy)
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = pointer;
+        let _ = (pointer, frozen);
         let shot = linux::capture_shot(budget, on_captured)?;
         save_shot(&shot, output_path, context_policy)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (pointer, output_path, budget, context_policy, on_captured);
+        let _ = (
+            pointer,
+            frozen,
+            output_path,
+            budget,
+            context_policy,
+            on_captured,
+        );
         Err(anyhow::anyhow!(
             "Screen capture not supported on this operating system"
         ))

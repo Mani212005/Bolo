@@ -1,5 +1,6 @@
 use super::HotkeyListener;
 use anyhow::Result;
+use std::cell::Cell;
 use std::os::raw::c_void;
 
 type CGEventRef = *mut c_void;
@@ -26,6 +27,7 @@ const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
 const K_CG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
 const K_CG_EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
 const K_CG_EVENT_KEY_DOWN: u32 = 10;
+const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
 const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
 const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFFFFFF;
 
@@ -81,8 +83,80 @@ extern "C" {
 }
 
 struct TapContext {
-    callback: Box<dyn Fn(&str) + Send + Sync>,
+    callback: Box<dyn Fn(&str) -> bool + Send + Sync>,
     port: CFMachPortRef,
+    /// Touched only on the tap's own run-loop thread.
+    hold: Cell<ControlHold>,
+}
+
+/// What a pointer move does while Control may be held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerMove {
+    /// Not part of a gesture: the move goes on to the apps.
+    Pass,
+    /// Control is held: Bolo watches the move for a circle.
+    Watch,
+    /// Control is held over a frozen screen: Bolo watches the move and the
+    /// apps never see it, so the hover, tooltip or menu highlight under the
+    /// pointer at the press stays on screen, as with Cmd+Shift+4.
+    WatchAndHold,
+}
+
+/// Follows the Control key through the tap's events. Pressing Control while
+/// dictating freezes the screen for a capture ([`crate::vision::freeze`]);
+/// releasing it thaws it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ControlHold {
+    held: bool,
+    frozen: bool,
+}
+
+/// A change in the Control key, from the events the tap sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlEdge {
+    Pressed,
+    Released,
+}
+
+impl ControlHold {
+    /// A flags-changed event: an edge only when Control itself went down or
+    /// up, not when another modifier changed while it is held. Modifiers do
+    /// not auto-repeat, so a long hold is one press.
+    pub(crate) fn flags_changed(&mut self, flags: u64) -> Option<ControlEdge> {
+        self.set_held(is_mouse_modifier_active(flags))
+    }
+
+    /// The daemon froze the screen for this press.
+    pub(crate) fn set_frozen(&mut self) {
+        self.frozen = self.held;
+    }
+
+    /// A pointer move, and a Control release the tap missed: a move without
+    /// Control while it is thought held (the tap was briefly disabled, or
+    /// the release went to a secure-input field).
+    pub(crate) fn pointer_moved(&mut self, flags: u64) -> (PointerMove, Option<ControlEdge>) {
+        let control = is_mouse_modifier_active(flags);
+        let edge = if control { None } else { self.set_held(false) };
+        let action = match (control, self.frozen) {
+            (false, _) => PointerMove::Pass,
+            (true, false) => PointerMove::Watch,
+            (true, true) => PointerMove::WatchAndHold,
+        };
+        (action, edge)
+    }
+
+    fn set_held(&mut self, held: bool) -> Option<ControlEdge> {
+        if held == self.held {
+            return None;
+        }
+        self.held = held;
+        self.frozen = false;
+        Some(if held {
+            ControlEdge::Pressed
+        } else {
+            ControlEdge::Released
+        })
+    }
 }
 
 pub(crate) fn match_hotkey(keycode: i64, flags: u64, autorepeat: i64) -> Option<&'static str> {
@@ -136,14 +210,38 @@ unsafe extern "C" fn event_tap_callback(
         return event;
     }
 
-    if event_type == K_CG_EVENT_MOUSE_MOVED
+    if event_type == K_CG_EVENT_FLAGS_CHANGED {
+        let mut hold = ctx.hold.get();
+        match hold.flags_changed(CGEventGetFlags(event)) {
+            Some(ControlEdge::Pressed) => {
+                let loc = CGEventGetLocation(event);
+                if (ctx.callback)(&format!("freeze {:.1} {:.1}", loc.x, loc.y)) {
+                    hold.set_frozen();
+                }
+            }
+            Some(ControlEdge::Released) => {
+                (ctx.callback)("thaw");
+            }
+            None => {}
+        }
+        ctx.hold.set(hold);
+    } else if event_type == K_CG_EVENT_MOUSE_MOVED
         || event_type == K_CG_EVENT_LEFT_MOUSE_DRAGGED
         || event_type == K_CG_EVENT_RIGHT_MOUSE_DRAGGED
     {
-        let flags = CGEventGetFlags(event);
-        if is_mouse_modifier_active(flags) {
+        let mut hold = ctx.hold.get();
+        let (action, edge) = hold.pointer_moved(CGEventGetFlags(event));
+        ctx.hold.set(hold);
+        if edge == Some(ControlEdge::Released) {
+            (ctx.callback)("thaw");
+        }
+        if action != PointerMove::Pass {
             let loc = CGEventGetLocation(event);
             (ctx.callback)(&format!("mouse {:.1} {:.1}", loc.x, loc.y));
+        }
+        // Only plain moves are held back: a drag is the user acting.
+        if action == PointerMove::WatchAndHold && event_type == K_CG_EVENT_MOUSE_MOVED {
+            return std::ptr::null_mut();
         }
     } else if event_type == K_CG_EVENT_KEY_DOWN {
         let keycode = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE);
@@ -169,11 +267,12 @@ impl MacOsHotkeyListener {
 }
 
 impl HotkeyListener for MacOsHotkeyListener {
-    fn start(&self, callback: Box<dyn Fn(&str) + Send + Sync>) -> Result<()> {
+    fn start(&self, callback: Box<dyn Fn(&str) -> bool + Send + Sync>) -> Result<()> {
         std::thread::spawn(move || {
             unsafe {
-                // Event mask: listen for KeyDown and Mouse movements/drags
+                // Event mask: KeyDown, modifier changes (Control) and mouse movements/drags
                 let event_mask: u64 = (1 << K_CG_EVENT_KEY_DOWN)
+                    | (1 << K_CG_EVENT_FLAGS_CHANGED)
                     | (1 << K_CG_EVENT_MOUSE_MOVED)
                     | (1 << K_CG_EVENT_LEFT_MOUSE_DRAGGED)
                     | (1 << K_CG_EVENT_RIGHT_MOUSE_DRAGGED);
@@ -181,6 +280,7 @@ impl HotkeyListener for MacOsHotkeyListener {
                 let ctx_box = Box::new(TapContext {
                     callback,
                     port: std::ptr::null_mut(),
+                    hold: Cell::new(ControlHold::default()),
                 });
                 let ctx_raw = Box::into_raw(ctx_box);
 
@@ -279,6 +379,88 @@ mod tests {
 
         // Unrelated key should not match
         assert_eq!(match_hotkey(12, K_CG_EVENT_FLAG_MASK_CONTROL, 0), None);
+    }
+
+    /// `(event type, flags)` of each recorded tap event.
+    fn recorded_circle() -> Vec<(u32, u64)> {
+        include_str!("testdata/control_circle_events.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                let flags = u64::from_str_radix(fields[2].trim_start_matches("0x"), 16).unwrap();
+                (fields[1].parse().unwrap(), flags)
+            })
+            .collect()
+    }
+
+    /// Plays events through a `ControlHold` the way the tap does, with the
+    /// daemon answering `frozen` to each press.
+    fn replay(events: &[(u32, u64)], frozen: bool) -> (Vec<ControlEdge>, Vec<PointerMove>) {
+        let mut hold = ControlHold::default();
+        let (mut edges, mut moves) = (Vec::new(), Vec::new());
+        for &(event_type, flags) in events {
+            if event_type == K_CG_EVENT_FLAGS_CHANGED {
+                let edge = hold.flags_changed(flags);
+                if edge == Some(ControlEdge::Pressed) && frozen {
+                    hold.set_frozen();
+                }
+                edges.extend(edge);
+            } else {
+                let (action, edge) = hold.pointer_moved(flags);
+                edges.extend(edge);
+                moves.push(action);
+            }
+        }
+        (edges, moves)
+    }
+
+    #[test]
+    fn a_recorded_hold_freezes_once_and_holds_back_its_moves() {
+        let events = recorded_circle();
+        let (edges, moves) = replay(&events, true);
+        // Shift going down and up mid-hold is not another press.
+        assert_eq!(edges, vec![ControlEdge::Pressed, ControlEdge::Released]);
+        assert_eq!(moves.first(), Some(&PointerMove::Pass), "before the press");
+        assert_eq!(moves.last(), Some(&PointerMove::Pass), "after the release");
+        let held = &moves[1..moves.len() - 1];
+        assert_eq!(held.len(), 77);
+        assert!(held.iter().all(|m| *m == PointerMove::WatchAndHold));
+    }
+
+    #[test]
+    fn moves_reach_the_apps_when_the_daemon_did_not_freeze() {
+        // Not dictating: the circle is watched as before and nothing is held back.
+        let (edges, moves) = replay(&recorded_circle(), false);
+        assert_eq!(edges, vec![ControlEdge::Pressed, ControlEdge::Released]);
+        assert!(!moves.contains(&PointerMove::WatchAndHold));
+        assert_eq!(
+            moves.iter().filter(|m| **m == PointerMove::Watch).count(),
+            77
+        );
+    }
+
+    #[test]
+    fn a_missed_release_thaws_at_the_next_plain_move() {
+        // The recorded hold with its release lost (the tap was disabled
+        // or the release went to a secure-input field).
+        let events: Vec<_> = recorded_circle()
+            .into_iter()
+            .filter(|&(t, flags)| {
+                !(t == K_CG_EVENT_FLAGS_CHANGED && !is_mouse_modifier_active(flags))
+            })
+            .collect();
+        let (edges, moves) = replay(&events, true);
+        assert_eq!(edges, vec![ControlEdge::Pressed, ControlEdge::Released]);
+        assert_eq!(moves.last(), Some(&PointerMove::Pass));
+        // And the next press freezes again.
+        let mut again = events.clone();
+        again.extend(recorded_circle());
+        let (edges, _) = replay(&again, true);
+        assert_eq!(
+            edges.iter().filter(|e| **e == ControlEdge::Pressed).count(),
+            2
+        );
     }
 
     #[test]

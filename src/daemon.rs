@@ -112,6 +112,9 @@ pub(crate) struct Shared {
     pub(crate) captures: Vec<crate::vision::Captured>,
     /// A capture is running (on Linux, its screenshot dialog may be open).
     pub(crate) capture_in_flight: bool,
+    /// The screen grabbed when Control went down, while it stays down: the
+    /// captures of that hold are cut from it ([`crate::vision::freeze`]).
+    pub(crate) frozen: Option<Arc<Frozen>>,
     /// Broadcasts phase changes, levels and outcomes to subscribers.
     pub(crate) events: EventHub,
 }
@@ -126,6 +129,9 @@ impl Shared {
         }
     }
 }
+
+/// A Control-press grab, finished or still running.
+pub(crate) type Frozen = crate::vision::freeze::Pending<crate::vision::FrozenFrame>;
 
 pub(crate) enum PipelineMsg {
     Segment(Utterance),
@@ -404,6 +410,7 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         captured_context_images: Vec::new(),
         captures: Vec::new(),
         capture_in_flight: false,
+        frozen: None,
         events: events.clone(),
     }));
     let (start_tx, start_rx) = crossbeam_channel::unbounded::<()>();
@@ -544,21 +551,28 @@ pub fn run(cfg: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
         let shared_hotkey = Arc::clone(&shared);
         let vision_enabled = cfg.vision.enabled;
         if let Err(e) = listener.start(Box::new(move |cmd| {
-            if cmd.starts_with("mouse ") || cmd == "capture" {
+            if cmd.starts_with("mouse ")
+                || cmd.starts_with("freeze ")
+                || cmd == "thaw"
+                || cmd == "capture"
+            {
                 if !vision_enabled {
-                    return;
+                    return false;
                 }
                 let is_recording = match shared_hotkey.try_lock() {
                     Ok(s) => s.phase == Phase::Recording,
                     Err(_) => true,
                 };
                 if !is_recording {
-                    return;
+                    return false;
                 }
             }
-            if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(&path) {
-                let _ = writeln!(conn, "{}", cmd);
-                // read response if necessary, but we don't care
+            match std::os::unix::net::UnixStream::connect(&path) {
+                Ok(mut conn) => {
+                    // The reply is not awaited: the macOS event tap must not block.
+                    writeln!(conn, "{}", cmd).is_ok()
+                }
+                Err(_) => false,
             }
         })) {
             eprintln!("[daemon] hotkey listener failed: {e}");
@@ -1120,6 +1134,7 @@ fn finalize(
         s.captures.clear();
         s.capture_in_flight = false;
         s.vision_detector = None;
+        s.frozen = None;
         (dir, images, duration)
     };
 
@@ -1168,6 +1183,33 @@ enum CaptureStart {
     Busy,
 }
 
+/// Control went down: while dictating with screen capture on, grabs the
+/// screen now (with `grab`, on its own thread) for the captures made before
+/// it comes up. Says whether it did.
+fn freeze(
+    shared: &Arc<Mutex<Shared>>,
+    cfg: &Config,
+    grab: impl FnOnce() -> Option<crate::vision::FrozenFrame> + Send + 'static,
+) -> bool {
+    let mut s = shared.lock().unwrap();
+    if !cfg.vision.enabled || s.phase != Phase::Recording || s.vision_session_dir.is_none() {
+        return false;
+    }
+    let pressed = Instant::now();
+    s.frozen = Some(Frozen::start(move || {
+        let frame = grab();
+        match frame {
+            Some(_) => eprintln!(
+                "[vision] froze the screen at the Control press in {} ms",
+                pressed.elapsed().as_millis()
+            ),
+            None => eprintln!("[vision] could not freeze the screen; capturing live"),
+        }
+        frame
+    }));
+    true
+}
+
 /// Captures what the user points at (`pointer`, or the current pointer)
 /// into the recording session, on its own thread because the Linux portal
 /// waits for the user to select the area.
@@ -1176,7 +1218,7 @@ fn start_capture(
     cfg: &Config,
     pointer: Option<(f64, f64)>,
 ) -> CaptureStart {
-    let (session_dir, img_path) = {
+    let (session_dir, img_path, frozen) = {
         let mut s = shared.lock().unwrap();
         if s.phase != Phase::Recording {
             return CaptureStart::NotRecording;
@@ -1191,7 +1233,7 @@ fn start_capture(
         let count = s.captured_context_images.len() + 1;
         let img_path = session_dir.join(format!("context-{count}.png"));
         s.captured_context_images.push(img_path.clone());
-        (session_dir, img_path)
+        (session_dir, img_path, s.frozen.clone())
     };
     let shared = Arc::clone(shared);
     let cfg = cfg.clone();
@@ -1207,8 +1249,12 @@ fn start_capture(
             );
             crate::sound::play_since(crate::sound::Cue::Capture, trigger);
         };
+        // The frame of the Control press that began this hold, waiting for
+        // its grab when the circle beat it.
+        let frozen = frozen.and_then(|f| f.wait());
         let result = crate::vision::capture_screen(
             pointer,
+            frozen.as_deref(),
             &img_path,
             budget,
             cfg.vision.context,
@@ -1424,6 +1470,27 @@ fn handle_client(
                     }
                 }
             }
+            "ok".to_string()
+        }
+        cmd if cmd == "freeze" || cmd.starts_with("freeze ") => {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            match (
+                parts.get(1).and_then(|x| x.parse::<f64>().ok()),
+                parts.get(2).and_then(|y| y.parse::<f64>().ok()),
+            ) {
+                (Some(x), Some(y)) => {
+                    let pointer = (x, y);
+                    if freeze(shared, cfg, move || crate::vision::freeze_screen(pointer)) {
+                        "ok frozen".to_string()
+                    } else {
+                        "ok".to_string()
+                    }
+                }
+                _ => "err usage: freeze X Y".to_string(),
+            }
+        }
+        "thaw" => {
+            shared.lock().unwrap().frozen = None;
             "ok".to_string()
         }
         "capture" => {
@@ -1707,6 +1774,56 @@ mod tests {
             json!({ "type": "phase", "phase": "recording" })
         );
         assert!(start_rx.try_recv().is_ok(), "audio thread was not started");
+    }
+
+    #[test]
+    fn control_press_freezes_the_screen_only_while_dictating_with_capture_on() {
+        let (shared, _hub, mut cfg) = daemon_state();
+        let (start_tx, _start_rx) = crossbeam_channel::unbounded();
+        let (pipeline_tx, _pipeline_rx) = crossbeam_channel::unbounded();
+        let frozen = |shared: &Arc<Mutex<Shared>>| shared.lock().unwrap().frozen.is_some();
+        // Capture off, idle, or recording without a session: nothing is grabbed.
+        assert_eq!(
+            command("freeze 522.0 517.0", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok"
+        );
+        cfg.vision.enabled = true;
+        assert_eq!(
+            command("freeze 522.0 517.0", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok"
+        );
+        shared.lock().unwrap().set_phase(Phase::Recording);
+        assert_eq!(
+            command("freeze 522.0 517.0", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok"
+        );
+        assert!(!frozen(&shared));
+        assert_eq!(
+            command("freeze", &shared, &start_tx, &pipeline_tx, &cfg),
+            "err usage: freeze X Y"
+        );
+
+        // Dictating with a session: the press grabs once, and the release
+        // lets the next press grab afresh.
+        shared.lock().unwrap().vision_session_dir =
+            Some(std::env::temp_dir().join("bolo-freeze-test"));
+        let grabs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&grabs);
+        assert!(freeze(&shared, &cfg, move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        }));
+        let pending = shared.lock().unwrap().frozen.clone().expect("frozen");
+        assert!(
+            pending.wait().is_none(),
+            "a failed grab leaves a live capture"
+        );
+        assert_eq!(grabs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            command("thaw", &shared, &start_tx, &pipeline_tx, &cfg),
+            "ok"
+        );
+        assert!(!frozen(&shared));
     }
 
     #[test]

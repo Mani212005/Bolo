@@ -4,13 +4,28 @@
 use super::shot::{self, Budget, Rect, Shot};
 use anyhow::Result;
 
+/// One display at its native pixels, and where it sits in logical points.
+pub struct Frame {
+    display: Rect,
+    image: image::RgbImage,
+}
+
+/// Grabs the whole display under `pointer` now (see [`capture_shot`] for how).
+pub fn grab_frame(pointer: (f64, f64)) -> Option<Frame> {
+    let (display_id, display) = ffi::display_at(pointer)?;
+    let image = grab(display_id, display, &|| {}).ok()?;
+    Some(Frame { display, image })
+}
+
 /// Captures the region at `pointer` (global logical points; `None` means the
 /// current pointer position). `on_captured` runs the moment the screen has
 /// been grabbed, before the pixels are converted or the accessibility tree is
 /// asked, so the user's "screenshot taken" cue is not held up by either.
 ///
-/// The grab is in-process through CoreGraphics (about 10 ms); where that is
-/// unavailable it falls back to the `screencapture` tool (about 150 ms).
+/// When `frozen` shows the display under `pointer`, the region is cut from
+/// it and nothing is grabbed now. Otherwise the grab is in-process through
+/// CoreGraphics (about 10 ms); where that is unavailable it falls back to the
+/// `screencapture` tool (about 150 ms).
 ///
 /// The region is the accessibility element under the pointer when it is a
 /// sensible size, otherwise a 640x400 box around the pointer
@@ -20,6 +35,7 @@ use anyhow::Result;
 /// non-Retina displays crop correctly.
 pub fn capture_shot(
     pointer: Option<(f64, f64)>,
+    frozen: Option<&Frame>,
     budget: Budget,
     on_captured: &dyn Fn(),
 ) -> Result<Shot> {
@@ -30,6 +46,34 @@ pub fn capture_shot(
     };
     let (display_id, display) =
         ffi::display_at(pointer).ok_or_else(|| anyhow::anyhow!("no display under the pointer"))?;
+    let live;
+    let frame = match frozen_image(frozen, display) {
+        Some(image) => {
+            on_captured();
+            image
+        }
+        None => {
+            live = grab(display_id, display, on_captured)?;
+            &live
+        }
+    };
+    let elements = ffi::element_frames_at(pointer);
+    Ok(shot::render_pointed(
+        frame, display, pointer, &elements, budget,
+    ))
+}
+
+/// The frozen pixels, when they are of `display`: a circle on another display
+/// than the one frozen at the Control press is captured live.
+fn frozen_image(frozen: Option<&Frame>, display: Rect) -> Option<&image::RgbImage> {
+    frozen
+        .filter(|frame| frame.display == display)
+        .map(|frame| &frame.image)
+}
+
+/// The whole display now, in-process or through `screencapture`;
+/// `on_captured` runs once, the moment the pixels exist.
+fn grab(display_id: u32, display: Rect, on_captured: &dyn Fn()) -> Result<image::RgbImage> {
     // Once, whichever path takes the picture.
     let fired = std::cell::Cell::new(false);
     let notify = || {
@@ -42,14 +86,10 @@ pub fn capture_shot(
     } else {
         ffi::grab_display(display_id, display, &notify)
     };
-    let frame = match in_process {
-        Some(frame) => frame,
-        None => capture_rect(display, &notify)?,
-    };
-    let elements = ffi::element_frames_at(pointer);
-    Ok(shot::render_pointed(
-        &frame, display, pointer, &elements, budget,
-    ))
+    match in_process {
+        Some(frame) => Ok(frame),
+        None => capture_rect(display, &notify),
+    }
 }
 
 /// `screencapture` of one display's rectangle, at the display's native
@@ -446,6 +486,21 @@ mod tests {
             "stride under a row"
         );
         assert!(bgra_to_rgb(&[], 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn a_frozen_frame_is_used_only_for_its_own_display() {
+        // This Mac's built-in display, and a second display to its right.
+        let built_in = Rect::new(0.0, 0.0, 1470.0, 956.0);
+        let external = Rect::new(1470.0, 0.0, 1920.0, 1080.0);
+        let frozen = Frame {
+            display: built_in,
+            image: image::RgbImage::new(2940, 1912),
+        };
+        let used = frozen_image(Some(&frozen), built_in).expect("same display");
+        assert!(std::ptr::eq(used, &frozen.image));
+        assert!(frozen_image(Some(&frozen), external).is_none());
+        assert!(frozen_image(None, built_in).is_none());
     }
 
     #[test]

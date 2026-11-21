@@ -1,8 +1,10 @@
 use anyhow::Result;
 
 pub trait HotkeyListener: Send + Sync {
-    /// Start listening for global hotkeys.
-    fn start(&self, callback: Box<dyn Fn(&str) + Send + Sync>) -> Result<()>;
+    /// Start listening for global hotkeys. `callback` gets each command and
+    /// says whether Bolo acted on it: for `freeze`, whether the screen is
+    /// now frozen for a capture.
+    fn start(&self, callback: Box<dyn Fn(&str) -> bool + Send + Sync>) -> Result<()>;
 }
 
 #[cfg(target_os = "linux")]
